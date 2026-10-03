@@ -8,6 +8,9 @@ import 'sidecar_source.dart';
 
 /// 翻译 sidecar 的宿主：管理 venv、按需安装依赖、spawn Python 进程并
 /// 流式读取 JSON 行事件。
+/// 在线翻译 API 的单次请求超时（秒）。UI 的超时提示也引用它，避免两处不一致。
+const int apiTimeoutSeconds = 90;
+
 class TranslateService {
   TranslateService();
 
@@ -459,7 +462,7 @@ class TranslateService {
         ],
       }));
       final response = await request.close().timeout(
-            const Duration(seconds: 90),
+            const Duration(seconds: apiTimeoutSeconds),
           );
       final body = await response.transform(utf8.decoder).join();
       if (response.statusCode != HttpStatus.ok) {

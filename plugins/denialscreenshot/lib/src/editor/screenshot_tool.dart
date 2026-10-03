@@ -66,8 +66,15 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
   bool showUndoRedo = true;
   ScreenshotSettings _settings = const ScreenshotSettings();
   final TranslateService _translateService = TranslateService();
+  /// 与 [apiTimeoutSeconds] 保持一致，超时提示里告诉用户等了多久。
+  static const int _apiTimeoutSeconds = apiTimeoutSeconds;
+
   bool _translating = false;
+
+  /// 识字与翻译是两条独立的链路，按钮各自点亮，别再共用一个标志。
+  bool _recognizing = false;
   String _translateStatus = '';
+  Timer? _apiElapsedTimer;
   bool _dockRevealed = false;
   bool _dockHovered = false;
   bool _showHints = false;
@@ -203,6 +210,7 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
     EditorHostBridge.instance.unbindEditor(this);
     _dockRevealTimer?.cancel();
     _copyResetTimer?.cancel();
+    _apiElapsedTimer?.cancel();
     _canvasTick.dispose();
     _staticTick.dispose();
     _decodedImage?.dispose();
@@ -925,7 +933,7 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
       dockButton(Icons.undo, '撤销 (Ctrl+Z)', _undo),
       dockButton(Icons.redo, '重做 (Ctrl+Shift+Z)', _redo),
       dockButton(Icons.text_snippet, '识字（识别并复制图中文字）', _recognize,
-          active: _translating),
+          active: _recognizing),
       dockButton(Icons.translate, '翻译', _translate, active: _translating),
       dockButton(Icons.push_pin, '置顶显示', _toggleToolbarPin),
       dockButton(Icons.check, '保存 (Enter)', _save),
@@ -1910,18 +1918,73 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
     return View.of(context).platformDispatcher.locale.languageCode;
   }
 
-  void _setTranslateStatus(String status) {
+  /// [recognizing] 为 true 时点亮「识字」按钮而非「翻译」按钮；两者互斥，
+  /// 否则点一个另一个也跟着亮。
+  void _setTranslateStatus(String status, {bool recognizing = false}) {
     if (!mounted) return;
     setState(() {
       _translateStatus = status;
-      _translating = true; // 浮层的显示条件，务必随状态一起置位。
+      // 浮层的显示条件，务必随状态一起置位。
+      _translating = !recognizing;
+      _recognizing = recognizing;
     });
+  }
+
+  /// API 调用往往要等好几秒（长文本更久），光一句「调用翻译 API」看不出是
+  /// 在跑还是卡死了，所以每秒把已用秒数刷进状态浮层。
+  void _startApiElapsed(int blocks) {
+    _apiElapsedTimer?.cancel();
+    var elapsed = 0;
+    _apiElapsedTimer = Timer.periodic(const Duration(seconds: 1), (_) {
+      if (!mounted) return;
+      elapsed++;
+      final label = _settings.apiModel.trim().isEmpty
+          ? _settings.apiType
+          : _settings.apiModel.trim();
+      setState(
+        () => _translateStatus =
+            '调用翻译 API（$blocks 块 · $label）… 已用 ${elapsed}s',
+      );
+    });
+  }
+
+  void _stopApiElapsed() {
+    _apiElapsedTimer?.cancel();
+    _apiElapsedTimer = null;
+  }
+
+  /// 把 API/网络的失败翻译成人能看懂的原因（超时、连不上、鉴权、限流…）。
+  String _describeApiError(Object error) {
+    final text = error.toString();
+    if (error is TimeoutException) {
+      return '翻译超时：API ${_apiTimeoutSeconds}s 没有响应，检查网络或换成更快的模型';
+    }
+    if (error is SocketException) {
+      return '连不上 API：${error.address?.host ?? _settings.apiEndpoint}'
+          '（检查地址、网络或代理）';
+    }
+    if (error is HandshakeException) {
+      return 'HTTPS 握手失败：检查地址是否是 https、证书是否有效';
+    }
+    if (text.contains('HTTP 401') || text.contains('HTTP 403')) {
+      return 'API 鉴权失败（401/403）：密钥无效或没权限';
+    }
+    if (text.contains('HTTP 429')) {
+      return 'API 限流（429）：稍后再试，或换额度更高的 key';
+    }
+    if (text.contains('HTTP 5')) {
+      return 'API 服务端错误：对方服务暂时不可用，稍后再试';
+    }
+    if (text.contains('HTTP ')) {
+      return '翻译失败：$text';
+    }
+    return '翻译出错：$error';
   }
 
   /// 识字：只跑 OCR，把图里认到的文字列出来，方便直接复制走。
   Future<void> _recognize() async {
-    if (_translating) return;
-    _setTranslateStatus('正在识别文字…');
+    if (_translating || _recognizing) return;
+    _setTranslateStatus('正在识别文字…', recognizing: true);
     try {
       final png = await _renderPinSnapshot();
       if (png == null) {
@@ -1940,7 +2003,7 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
       )) {
         if (!mounted) return;
         if (event.type == 'status') {
-          _setTranslateStatus(event.message ?? '');
+          _setTranslateStatus(event.message ?? '', recognizing: true);
         } else if (event.type == 'region' && event.region != null) {
           regions.add(event.region!);
         } else if (event.type == 'error') {
@@ -1967,7 +2030,12 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
     } on Object catch (error) {
       _showMessage('识别出错：$error');
     } finally {
-      if (mounted) setState(() => _translating = false);
+      if (mounted) {
+        setState(() {
+          _recognizing = false;
+          _translating = false;
+        });
+      }
     }
   }
 
@@ -2021,7 +2089,7 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
   /// 翻译：快照 → sidecar OCR+翻译 → 每个文字块生成蒙版+译文两条命令。
   /// 依赖未就绪时先弹安装向导（在线装一次，之后离线）。
   Future<void> _translate() async {
-    if (_translating) return;
+    if (_translating || _recognizing) return;
     // 立刻给出可视反馈：检查组件/生成快照也要几秒，不能让用户干等。
     _setTranslateStatus('准备翻译…');
     try {
@@ -2277,15 +2345,25 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
     }
 
     _setTranslateStatus('调用翻译 API（${regions.length} 块）…');
-    final translated = await _translateService.translateViaApi(
-      texts: [for (final region in regions) region.source],
-      target: target,
-      apiType: _settings.apiType,
-      endpoint: _settings.apiEndpoint,
-      apiKey: _settings.apiKey,
-      model: _settings.apiModel,
-      apiAppId: _settings.apiAppId,
-    );
+    _startApiElapsed(regions.length);
+    final List<String> translated;
+    try {
+      translated = await _translateService.translateViaApi(
+        texts: [for (final region in regions) region.source],
+        target: target,
+        apiType: _settings.apiType,
+        endpoint: _settings.apiEndpoint,
+        apiKey: _settings.apiKey,
+        model: _settings.apiModel,
+        apiAppId: _settings.apiAppId,
+      );
+    } on Object catch (error) {
+      _stopApiElapsed();
+      _showMessage(_describeApiError(error), seconds: 5);
+      setState(() => _translating = false);
+      return;
+    }
+    _stopApiElapsed();
     var unchanged = 0;
     for (var i = 0; i < regions.length; i++) {
       final source = regions[i].source.trim();
