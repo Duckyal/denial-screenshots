@@ -1,0 +1,32 @@
+name: denialscreenshot
+description: >-
+  QQ-style screenshot annotation plugin for Denial. Opens the compositor's
+  newest capture in an in-shell editor with brush, arrow, shape, text,
+  mosaic and eraser tools.
+publish_to: none
+version: 0.1.0
+
+environment:
+  sdk: ^3.13.0
+  flutter: 3.47.5
+
+dependencies:
+  flutter:
+    sdk: flutter
+  crypto: ^3.0.6
+  denial_sdk: '0.0.0'
+  denial_flutter_sdk: '0.0.0'
+  flutter_riverpod: ^3.3.2
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+
+denial_plugin:
+  schema: 1
+  name: Screenshot Tool
+  provides:
+    - contract: package:denial_flutter_sdk/actions.dart#ShellAction
+      count: 2
+    - contract: package:denial_flutter_sdk/surfaces.dart#ShellSurface
+      count: 2

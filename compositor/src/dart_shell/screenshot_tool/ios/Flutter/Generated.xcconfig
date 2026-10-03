@@ -1,0 +1,19 @@
+// This is a generated file; do not edit or check into version control.
+FLUTTER_ROOT=/home/wu/.local/state/denial/plugins/build-kits/3cee60e0f668bf882317bb71499dc211a2293bf1e90e495c7e9f96721df54422/flutter
+FLUTTER_APPLICATION_PATH=/home/wu/项目/denial-screenshots/compositor/src/dart_shell/screenshot_tool
+FLUTTER_FRAMEWORK_SWIFT_PACKAGE_PATH=/home/wu/项目/denial-screenshots/compositor/src/dart_shell/screenshot_tool/ios/Flutter/ephemeral/Packages/.packages/FlutterFramework
+COCOAPODS_PARALLEL_CODE_SIGN=true
+FLUTTER_TARGET=lib/main.dart
+FLUTTER_BUILD_DIR=build
+FLUTTER_BUILD_NAME=1.0.0
+FLUTTER_BUILD_NUMBER=1
+FLUTTER_ENGINE=/home/wu/.local/state/denial/plugins/build-kits/3cee60e0f668bf882317bb71499dc211a2293bf1e90e495c7e9f96721df54422/engine
+LOCAL_ENGINE=denial_host_release
+LOCAL_ENGINE_HOST=denial_host_release
+ARCHS=arm64
+EXCLUDED_ARCHS[sdk=iphonesimulator*]=i386
+EXCLUDED_ARCHS[sdk=iphoneos*]=armv7
+DART_OBFUSCATION=false
+TRACK_WIDGET_CREATION=true
+TREE_SHAKE_ICONS=false
+PACKAGE_CONFIG=.dart_tool/package_config.json

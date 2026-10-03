@@ -1,0 +1,40 @@
+{
+    "chat.tools.terminal.autoApprove": {
+        "/^denial-plugins --help 2>&1 \\| sed -n '1,200p'$/": {
+            "approve": true,
+            "matchCommandLine": true
+        },
+        "/^denial-plugins prepare 2>&1 \\| sed -n '1,220p'$/": {
+            "approve": true,
+            "matchCommandLine": true
+        },
+        "/^denial-plugins status 2>&1 \\| sed -n '1,220p'$/": {
+            "approve": true,
+            "matchCommandLine": true
+        },
+        "/^cd /home/wu/项目/denial-screenshots/plugins/denialscreenshot && flutter analyze lib/denialscreenshot\\.dart$/": {
+            "approve": true,
+            "matchCommandLine": true
+        },
+        "/^cd /home/wu/项目/denial-screenshots && denial-plugins status 2>&1 \\| sed -n '1,220p'$/": {
+            "approve": true,
+            "matchCommandLine": true
+        },
+        "/^command -v cargo; command -v dart; command -v flutter; find /home/wu/\\.local/state/denial/plugins/build-kits -maxdepth 5 -type f \\\\\\( -name flutter -o -name dart \\\\\\) -perm -111 -print$/": {
+            "approve": true,
+            "matchCommandLine": true
+        },
+        "/^cd /home/wu/项目/denial-screenshots/compositor/src/dart_shell/screenshot_tool && /home/wu/\\.local/state/denial/plugins/build-kits/3cee60e0f668bf882317bb71499dc211a2293bf1e90e495c7e9f96721df54422/flutter/bin/flutter analyze$/": {
+            "approve": true,
+            "matchCommandLine": true
+        },
+        "/^cd /home/wu/项目/denial-screenshots/plugins/denialscreenshot/rust_backend && cargo test$/": {
+            "approve": true,
+            "matchCommandLine": true
+        },
+        "/^cd /home/wu/项目/denial-screenshots/compositor/src/dart_shell/screenshot_tool && /home/wu/项目/flutter/bin/flutter --version && /home/wu/项目/flutter/bin/flutter analyze$/": {
+            "approve": true,
+            "matchCommandLine": true
+        }
+    }
+}

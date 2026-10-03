@@ -1,0 +1,216 @@
+import 'dart:math' as math;
+import 'package:flutter/painting.dart' show TextPainter, TextSpan, TextStyle;
+import 'dart:ui';
+import 'tools.dart';
+
+/// 图形对象当前实际占据的包围框。
+///
+/// 文字的字号 = strokeWidth * 4，改粗细后视觉范围随之变化，必须按当前
+/// 字号重新排版测量；其他图形用创建时记录的 rect。
+Rect commandDisplayBounds(DrawCommand command) {
+  if (command.type == ScreenshotToolType.text) {
+    final painter = TextPainter(
+      text: TextSpan(
+        text: command.text,
+        style: TextStyle(
+          color: command.color,
+          fontSize: command.strokeWidth * 4,
+          fontWeight: FontWeight.bold,
+        ),
+      ),
+      textDirection: TextDirection.ltr,
+    )..layout();
+    return Rect.fromLTWH(
+      command.start.dx,
+      command.start.dy,
+      painter.width,
+      painter.height,
+    );
+  }
+  return command.rect;
+}
+
+/// 画布上 [BoxFit.contain] 显示的图像实际占据的矩形。
+///
+/// 编辑器画布跟随窗口（平铺布局会给出各种比例），图像按 contain 居中，
+/// 周围是透明留白；置顶快照必须裁到这个矩形，否则留白和选区边框会烙进
+/// 悬浮卡里。
+Rect displayedImageRect(
+    Size canvasSize, double imageWidth, double imageHeight) {
+  if (imageWidth <= 0 || imageHeight <= 0 || canvasSize.isEmpty) {
+    return Offset.zero & canvasSize;
+  }
+  final imageAspect = imageWidth / imageHeight;
+  final canvasAspect = canvasSize.width / canvasSize.height;
+  double width;
+  double height;
+  if (imageAspect > canvasAspect) {
+    width = canvasSize.width;
+    height = width / imageAspect;
+  } else {
+    height = canvasSize.height;
+    width = height * imageAspect;
+  }
+  return Rect.fromLTWH(
+    (canvasSize.width - width) / 2,
+    (canvasSize.height - height) / 2,
+    width,
+    height,
+  );
+}
+
+class DrawCommand {
+  final ScreenshotToolType type;
+  final Offset start;
+  final Offset end;
+  final Path path;
+  final String text;
+  final Rect rect;
+  final Color color;
+  final double strokeWidth;
+  final Color fillColor;
+
+  DrawCommand({
+    required this.type,
+    required this.start,
+    required this.end,
+    required this.path,
+    this.text = '',
+    required this.rect,
+    this.color = const Color(0xffff0000),
+    this.strokeWidth = 3,
+    this.fillColor = const Color(0xffffffff),
+  });
+
+  DrawCommand translated(Offset delta) {
+    return DrawCommand(
+      type: type,
+      start: start + delta,
+      end: end + delta,
+      path: path.shift(delta),
+      text: text,
+      rect: rect.shift(delta),
+      color: color,
+      strokeWidth: strokeWidth,
+      fillColor: fillColor,
+    );
+  }
+
+  /// 光标模式下编辑选中对象的外观（颜色/粗细/蒙版填充色/包围框）。
+  DrawCommand copyWith({
+    Color? color,
+    double? strokeWidth,
+    Color? fillColor,
+    Rect? rect,
+  }) {
+    return DrawCommand(
+      type: type,
+      start: start,
+      end: end,
+      path: path,
+      text: text,
+      rect: rect ?? this.rect,
+      color: color ?? this.color,
+      strokeWidth: strokeWidth ?? this.strokeWidth,
+      fillColor: fillColor ?? this.fillColor,
+    );
+  }
+}
+
+/// 画笔与橡皮痕迹是编辑效果而非图形对象，不参与点击选中/拖动/整体删除，
+/// 否则点击会删掉之前的橡皮命令，令已擦除的痕迹重新出现。
+bool isEditableEffect(DrawCommand command) {
+  return command.type == ScreenshotToolType.brush ||
+      command.type == ScreenshotToolType.eraser;
+}
+
+/// 从最上层往下找到第一个可整体操作（光标模式拖动/编辑）的图形对象。
+int? findManipulableCommandIndex(List<DrawCommand> commands, Offset position) {
+  for (var i = commands.length - 1; i >= 0; i--) {
+    final command = commands[i];
+    if (isEditableEffect(command)) {
+      continue;
+    }
+    if (commandDisplayBounds(command).inflate(12).contains(position)) {
+      return i;
+    }
+  }
+  return null;
+}
+
+/// 橡皮点击删除的图形对象目标，[radius] 是橡皮半径（随橡皮粗细调节）。
+///
+/// 只有图形对象参与点击删除。画笔/橡皮痕迹是编辑效果：笔迹走拖动像素
+/// 擦除（BlendMode.clear），橡皮命令本身点击删除会让已擦掉的痕迹重新
+/// 出现，两者都必须排除。空心图形（矩形/椭圆）只有描边附近才算命中，
+/// 点内部空白不删；蒙版和文字是实心块，整块都算。
+int? findEraserTargetIndex(
+  List<DrawCommand> commands,
+  Offset position,
+  double radius,
+) {
+  for (var i = commands.length - 1; i >= 0; i--) {
+    final command = commands[i];
+    if (isEditableEffect(command)) {
+      continue;
+    }
+    if (commandHits(command, position, radius)) {
+      return i;
+    }
+  }
+  return null;
+}
+
+/// 单个图形对象的命中判定，[radius] 是点击容差。
+bool commandHits(DrawCommand command, Offset position, double radius) {
+  switch (command.type) {
+    case ScreenshotToolType.select:
+    case ScreenshotToolType.brush:
+    case ScreenshotToolType.eraser:
+      return false;
+    case ScreenshotToolType.mask:
+      return command.rect.inflate(radius).contains(position);
+    case ScreenshotToolType.text:
+      return commandDisplayBounds(command).inflate(radius).contains(position);
+    case ScreenshotToolType.rect:
+      return _nearRectOutline(command.rect, position, radius);
+    case ScreenshotToolType.circle:
+      return _nearEllipseOutline(command.rect, position, radius);
+    case ScreenshotToolType.line:
+    case ScreenshotToolType.arrow:
+      return _distanceToSegment(position, command.start, command.end) <= radius;
+  }
+}
+
+bool _nearRectOutline(Rect rect, Offset position, double radius) {
+  if (!rect.inflate(radius).contains(position)) {
+    return false;
+  }
+  final inner = rect.deflate(radius);
+  return !inner.contains(position);
+}
+
+bool _nearEllipseOutline(Rect rect, Offset position, double radius) {
+  final a = rect.width / 2;
+  final b = rect.height / 2;
+  if (a <= 0 || b <= 0) {
+    return false;
+  }
+  final dx = (position.dx - rect.center.dx) / a;
+  final dy = (position.dy - rect.center.dy) / b;
+  final normalized = math.sqrt(dx * dx + dy * dy);
+  final tolerance = radius / math.min(a, b);
+  return (normalized - 1).abs() <= tolerance;
+}
+
+double _distanceToSegment(Offset point, Offset start, Offset end) {
+  final segment = end - start;
+  final lengthSquared = segment.distanceSquared;
+  if (lengthSquared == 0) {
+    return (point - start).distance;
+  }
+  var t = ((point - start).dx * segment.dx + (point - start).dy * segment.dy) /
+      lengthSquared;
+  t = t.clamp(0.0, 1.0);
+  return (point - start - segment * t).distance;
+}

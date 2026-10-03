@@ -1,0 +1,18 @@
+#!/bin/sh
+# This is a generated file; do not edit or check into version control.
+export "FLUTTER_ROOT=/home/wu/.local/state/denial/plugins/build-kits/3cee60e0f668bf882317bb71499dc211a2293bf1e90e495c7e9f96721df54422/flutter"
+export "FLUTTER_APPLICATION_PATH=/home/wu/项目/denial-screenshots/compositor/src/dart_shell/screenshot_tool"
+export "FLUTTER_FRAMEWORK_SWIFT_PACKAGE_PATH=/home/wu/项目/denial-screenshots/compositor/src/dart_shell/screenshot_tool/ios/Flutter/ephemeral/Packages/.packages/FlutterFramework"
+export "COCOAPODS_PARALLEL_CODE_SIGN=true"
+export "FLUTTER_TARGET=lib/main.dart"
+export "FLUTTER_BUILD_DIR=build"
+export "FLUTTER_BUILD_NAME=1.0.0"
+export "FLUTTER_BUILD_NUMBER=1"
+export "FLUTTER_ENGINE=/home/wu/.local/state/denial/plugins/build-kits/3cee60e0f668bf882317bb71499dc211a2293bf1e90e495c7e9f96721df54422/engine"
+export "LOCAL_ENGINE=denial_host_release"
+export "LOCAL_ENGINE_HOST=denial_host_release"
+export "ARCHS=arm64"
+export "DART_OBFUSCATION=false"
+export "TRACK_WIDGET_CREATION=true"
+export "TREE_SHAKE_ICONS=false"
+export "PACKAGE_CONFIG=.dart_tool/package_config.json"

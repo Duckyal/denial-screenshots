@@ -1,0 +1,16 @@
+# Plugin build artifacts
+plugins/denialscreenshot/.dart_tool/
+plugins/denialscreenshot/build/
+plugins/denialscreenshot/pubspec_overrides.yaml
+plugins/denialscreenshot/.vscode/settings.json
+
+# Legacy standalone Flutter app build output
+compositor/src/dart_shell/screenshot_tool/build/
+compositor/src/dart_shell/screenshot_tool/.dart_tool/
+compositor/src/dart_shell/screenshot_tool/.flutter-plugins
+compositor/src/dart_shell/screenshot_tool/.flutter-plugins-dependencies
+
+# Legacy Rust backend artifacts (kept out of the plugin package)
+plugins/denialscreenshot/rust_backend/target/
+build_output/
+test_plugin_output/

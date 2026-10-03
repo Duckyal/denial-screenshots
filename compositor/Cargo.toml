@@ -1,0 +1,14 @@
+[package]
+name = "denial-screenshot-ffi"
+version = "0.1.0"
+edition = "2021"
+links = "denailscreenshot"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+tracing = { version = "0.1", features = ["log"] }
+
+[build-dependencies]
+cc = "1.0"
