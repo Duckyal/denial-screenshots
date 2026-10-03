@@ -9,17 +9,7 @@ import 'tools.dart';
 /// 字号重新排版测量；其他图形用创建时记录的 rect。
 Rect commandDisplayBounds(DrawCommand command) {
   if (command.type == ScreenshotToolType.text) {
-    final painter = TextPainter(
-      text: TextSpan(
-        text: command.text,
-        style: TextStyle(
-          color: command.color,
-          fontSize: command.strokeWidth * 4,
-          fontWeight: FontWeight.bold,
-        ),
-      ),
-      textDirection: TextDirection.ltr,
-    )..layout();
+    final painter = command.textLayout();
     return Rect.fromLTWH(
       command.start.dx,
       command.start.dy,
@@ -69,6 +59,37 @@ class DrawCommand {
   final Color color;
   final double strokeWidth;
   final Color fillColor;
+
+  /// 文字命令的排版缓存。绘制与命中测试都用它，避免每帧重新 layout；
+  /// 字号（strokeWidth * 4）或颜色变化时自动失效。
+  TextPainter? _textLayout;
+  double? _textLayoutFontSize;
+  Color? _textLayoutColor;
+
+  TextPainter textLayout() {
+    final fontSize = strokeWidth * 4;
+    final cached = _textLayout;
+    if (cached != null &&
+        _textLayoutFontSize == fontSize &&
+        _textLayoutColor == color) {
+      return cached;
+    }
+    final painter = TextPainter(
+      text: TextSpan(
+        text: text,
+        style: TextStyle(
+          color: color,
+          fontSize: fontSize,
+          fontWeight: FontWeight.bold,
+        ),
+      ),
+      textDirection: TextDirection.ltr,
+    )..layout();
+    _textLayout = painter;
+    _textLayoutFontSize = fontSize;
+    _textLayoutColor = color;
+    return painter;
+  }
 
   DrawCommand({
     required this.type,

@@ -86,6 +86,20 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
   /// runner); used to skip stale toolbar toggles after 继续编辑.
   bool _nativePinned = false;
   Offset? _cursorPosition;
+
+  /// 指针移动只 bump 这两个通知：预览层与光标环各自重绘，不必重建整棵
+  /// 编辑器树（工具栏、色板、快捷键面板都在那棵树上）。
+  final ValueNotifier<int> _canvasTick = ValueNotifier<int>(0);
+  final ValueNotifier<int> _staticTick = ValueNotifier<int>(0);
+
+  /// `history.take(currentStep + 1)` 的缓存。指针每移动一次都重新复制一遍
+  /// 命令列表，命令多了就很贵。
+  List<DrawCommand> _visibleCommands = const <DrawCommand>[];
+  int _visibleStamp = -1;
+  int _commandsVersion = 0;
+
+  /// 底图 widget 缓存：避免每次重建都新建 Image 节点。
+  late Widget _imageWidget;
   int? _editingCommandIndex;
   DrawCommand? _movingOriginalCommand;
   Offset? _movingStartPosition;
@@ -95,6 +109,30 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
   Offset? _dragStart;
   Offset? _dragEnd;
   Path? _dragPath;
+
+  /// 复制按钮的可视化状态：空闲 / 复制中 / 已复制 / 失败。
+  _CopyState _copyState = _CopyState.idle;
+  Timer? _copyResetTimer;
+
+  IconData get _copyIcon => switch (_copyState) {
+        _CopyState.working => Icons.hourglass_top,
+        _CopyState.done => Icons.check_circle,
+        _CopyState.failed => Icons.error_outline,
+        _CopyState.idle => Icons.content_copy,
+      };
+
+  String get _copyTip => switch (_copyState) {
+        _CopyState.working => '正在复制…',
+        _CopyState.done => '已复制到剪贴板',
+        _CopyState.failed => '复制失败，点击重试',
+        _CopyState.idle => '复制 (Ctrl+C)',
+      };
+
+  Color? get _copyColor => switch (_copyState) {
+        _CopyState.done => Colors.green.withOpacity(0.8),
+        _CopyState.failed => Colors.red.withOpacity(0.8),
+        _ => null,
+      };
 
   /// The canvas hides the system cursor for freehand tools; the drawn ring
   /// in [ToolCursorPainter] becomes the cursor instead.
@@ -108,10 +146,12 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
     super.initState();
     HardwareKeyboard.instance.addHandler(_handleKeyEvent);
     _currentImageBytes = widget.capturedImage;
+    _imageWidget = _buildImageWidget();
     selectionRect = widget.selectionRect;
     if (widget.initialCommands.isNotEmpty) {
       history.addAll(widget.initialCommands);
     }
+    _invalidateCommands();
     _ffi = ScreenshotFFI();
     final bridge = EditorHostBridge.instance;
     bridge.bindEditor(this);
@@ -127,11 +167,44 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
     _decodeCapturedImage(_currentImageBytes);
   }
 
+  Widget _buildImageWidget() =>
+      Image.memory(_currentImageBytes, fit: BoxFit.fill);
+
+  /// 命令数 + 步骤的廉价指纹，用来判断缓存是否过期。
+  int get _commandsStamp => history.length * 1000003 + (currentStep + 1);
+
+  /// 命令列表变化后调用：刷新缓存并让静态层重绘。
+  void _invalidateCommands() {
+    _visibleStamp = _commandsStamp;
+    _visibleCommands =
+        List<DrawCommand>.unmodifiable(history.take(currentStep + 1));
+    _commandsVersion++;
+    _staticTick.value++;
+  }
+
+  /// build 期兜底：命令数或步骤变了却没人通知时刷新缓存（这里不 bump
+  /// 通知，交给 painter 的引用比较去重绘）。
+  void _syncVisibleCommands() {
+    final stamp = _commandsStamp;
+    if (stamp == _visibleStamp) return;
+    _visibleStamp = stamp;
+    _visibleCommands =
+        List<DrawCommand>.unmodifiable(history.take(currentStep + 1));
+    _commandsVersion++;
+  }
+
+  /// 橡皮预览必须和已画内容在同一个离屏图层里，clear 混合才擦得动，所以
+  /// 橡皮工具下用单一 painter，其余工具才分静态层 + 预览层。
+  bool get _eraseToolActive => currentTool == ScreenshotToolType.eraser;
+
   @override
   void dispose() {
     HardwareKeyboard.instance.removeHandler(_handleKeyEvent);
     EditorHostBridge.instance.unbindEditor(this);
     _dockRevealTimer?.cancel();
+    _copyResetTimer?.cancel();
+    _canvasTick.dispose();
+    _staticTick.dispose();
     _decodedImage?.dispose();
     _textController.dispose();
     _textFocusNode.dispose();
@@ -340,6 +413,7 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
 
   @override
   Widget build(BuildContext context) {
+    _syncVisibleCommands();
     return Focus(
       autofocus: true,
       child: Material(
@@ -392,10 +466,7 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
                                   child: Stack(
                                     fit: StackFit.expand,
                                     children: [
-                                      Image.memory(
-                                        _currentImageBytes,
-                                        fit: BoxFit.fill,
-                                      ),
+                                      _imageWidget,
                                       if (selectionRect != null &&
                                           selectionRect != Rect.zero)
                                         Positioned.fromRect(
@@ -409,27 +480,61 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
                                             ),
                                           ),
                                         ),
+                                      // 已提交的图形：只在命令变化时重绘
+                                      // （橡皮工具除外，它需要和预览同层）。
+                                      if (!_eraseToolActive)
+                                        Positioned.fill(
+                                          child: IgnorePointer(
+                                            child: ValueListenableBuilder<int>(
+                                              valueListenable: _staticTick,
+                                              builder: (context, _, __) =>
+                                                  CustomPaint(
+                                                painter: StaticDrawPainter(
+                                                  commands: _visibleCommands,
+                                                  version: _commandsVersion,
+                                                  selectedIndex:
+                                                      _selectedCommandIndex,
+                                                ),
+                                              ),
+                                            ),
+                                          ),
+                                        ),
                                       Positioned.fill(
                                         child: MouseRegion(
-                                          onHover: (event) => setState(() =>
-                                              _cursorPosition =
-                                                  event.localPosition),
-                                          onExit: (_) => setState(
-                                              () => _cursorPosition = null),
+                                          onHover: (event) {
+                                            _cursorPosition =
+                                                event.localPosition;
+                                            _canvasTick.value++;
+                                          },
+                                          onExit: (_) {
+                                            _cursorPosition = null;
+                                            _canvasTick.value++;
+                                          },
                                           cursor: _canvasCursor,
                                           child: GestureDetector(
                                             onPanStart: _onPanStart,
                                             onPanUpdate: _onPanUpdate,
                                             onPanEnd: _onPanEnd,
-                                            child: CustomPaint(
-                                              painter: DrawPainter(
-                                                commands: history
-                                                    .take(currentStep + 1)
-                                                    .toList(),
-                                                preview: _buildPreviewCommand(),
-                                                selectedIndex:
-                                                    _selectedCommandIndex,
-                                              ),
+                                            child: ValueListenableBuilder<int>(
+                                              valueListenable: _canvasTick,
+                                              builder: (context, _, __) {
+                                                final preview =
+                                                    _buildPreviewCommand();
+                                                return CustomPaint(
+                                                  painter: _eraseToolActive
+                                                      ? CombinedDrawPainter(
+                                                          commands:
+                                                              _visibleCommands,
+                                                          version:
+                                                              _commandsVersion,
+                                                          preview: preview,
+                                                          selectedIndex:
+                                                              _selectedCommandIndex,
+                                                        )
+                                                      : PreviewDrawPainter(
+                                                          preview: preview),
+                                                );
+                                              },
                                             ),
                                           ),
                                         ),
@@ -440,20 +545,26 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
                                 // Pointer ring inside the world (scales with it)
                                 // but OUTSIDE the RepaintBoundary so saves and
                                 // pins never contain it.
-                                if (_cursorPosition != null &&
-                                    (currentTool == ScreenshotToolType.brush ||
-                                        currentTool ==
-                                            ScreenshotToolType.eraser))
+                                if (currentTool == ScreenshotToolType.brush ||
+                                    currentTool == ScreenshotToolType.eraser)
                                   Positioned.fill(
                                     child: IgnorePointer(
-                                      child: CustomPaint(
-                                        painter: ToolCursorPainter(
-                                          position: _cursorPosition!,
-                                          isEraser: currentTool ==
-                                              ScreenshotToolType.eraser,
-                                          color: currentColor,
-                                          strokeWidth: _activeSize,
-                                        ),
+                                      child: ValueListenableBuilder<int>(
+                                        valueListenable: _canvasTick,
+                                        builder: (context, _, __) {
+                                          final position = _cursorPosition;
+                                          if (position == null) {
+                                            return const SizedBox.shrink();
+                                          }
+                                          return CustomPaint(
+                                            painter: ToolCursorPainter(
+                                              position: position,
+                                              isEraser: _eraseToolActive,
+                                              color: currentColor,
+                                              strokeWidth: _activeSize,
+                                            ),
+                                          );
+                                        },
                                       ),
                                     ),
                                   ),
@@ -662,6 +773,7 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
     history.add(command);
     currentStep = history.length - 1;
     _selectedCommandIndex = null;
+    _invalidateCommands();
   }
 
   void _eraseCommandAt(int index) {
@@ -672,6 +784,7 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
     currentStep = history.length - 1;
     _selectedCommandIndex = null;
     setState(() {});
+    _invalidateCommands();
   }
 
   /// 停靠式单行工具栏：图标化塞进一行/列，FittedBox 兜底防溢出。
@@ -684,7 +797,7 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
     final revealed = !hidden || _dockRevealed;
 
     Widget dockButton(IconData icon, String tip, VoidCallback onTap,
-        {bool active = false}) {
+        {bool active = false, Color? color}) {
       return Tooltip(
         message: tip,
         child: GestureDetector(
@@ -694,9 +807,10 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
             height: 34,
             margin: const EdgeInsets.all(2),
             decoration: BoxDecoration(
-              color: active
-                  ? Colors.blue.withOpacity(0.6)
-                  : Colors.white.withOpacity(0.06),
+              color: color ??
+                  (active
+                      ? Colors.blue.withOpacity(0.6)
+                      : Colors.white.withOpacity(0.06)),
               borderRadius: BorderRadius.circular(8),
             ),
             child: Icon(icon, color: Colors.white, size: 20),
@@ -814,7 +928,10 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
       dockButton(Icons.push_pin, '置顶显示', _toggleToolbarPin),
       dockButton(Icons.check, '保存 (Enter)', _save),
       dockButton(Icons.close, '关闭编辑器', _closeEditor),
-      dockButton(Icons.content_copy, '复制 (Ctrl+C)', _copy),
+      dockButton(_copyIcon, _copyTip, _copy,
+          active: _copyState == _CopyState.working ||
+              _copyState == _CopyState.done,
+          color: _copyColor),
       divider(),
       dockButton(Icons.settings_outlined, '设置', _openSettings),
     ];
@@ -1034,6 +1151,7 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
       }
       history[index] = next;
     });
+    _invalidateCommands();
   }
 
   void _switchColor(Color color) {
@@ -1115,6 +1233,7 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
         currentStep = history.length - 1;
         _selectedCommandIndex = null;
       });
+      _invalidateCommands();
       _ffi.undo();
       return;
     }
@@ -1123,6 +1242,7 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
       setState(() {
         currentStep--;
       });
+      _invalidateCommands();
     }
     _ffi.undo();
   }
@@ -1138,6 +1258,7 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
         currentStep = history.length - 1;
         _selectedCommandIndex = null;
       });
+      _invalidateCommands();
       _ffi.redo();
       return;
     }
@@ -1146,6 +1267,7 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
       setState(() {
         currentStep++;
       });
+      _invalidateCommands();
     }
     _ffi.redo();
   }
@@ -1499,7 +1621,7 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
                             '工具栏位置',
                             settings.dockPosition,
                             const [
-                              ('auto', '自动（空间不足时贴边隐藏）'),
+                              ('auto', '自动（空间不足时给工具栏预留位置）'),
                               ('left', '左侧'),
                               ('right', '右侧'),
                               ('top', '顶部'),
@@ -1507,6 +1629,17 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
                             ],
                             (value) =>
                                 apply(settings.copyWith(dockPosition: value)),
+                          ),
+                          SwitchListTile(
+                            dense: true,
+                            visualDensity: VisualDensity.compact,
+                            contentPadding: EdgeInsets.zero,
+                            title: const Text('复制后自动关闭编辑器',
+                                style: TextStyle(fontSize: 13)),
+                            value: settings.closeAfterCopy,
+                            onChanged: (value) => apply(
+                              settings.copyWith(closeAfterCopy: value),
+                            ),
                           ),
                           const Padding(
                             padding: EdgeInsets.only(top: 6),
@@ -2037,18 +2170,45 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
   }
 
   Future<void> _copy() async {
+    if (_copyState == _CopyState.working) return;
+    _setCopyState(_CopyState.working);
     final png = await _renderCanvas();
     if (png == null) {
       recordClipboardNote('render returned null');
+      _setCopyState(_CopyState.failed);
       _showMessage('复制失败：画布还没渲染出来');
       return;
     }
     if (await copyPngToClipboard(png)) {
       _ffi.copy();
-      _showMessage('PNG 已复制到剪贴板');
+      _setCopyState(_CopyState.done);
+      _showMessage(
+        _settings.closeAfterCopy ? '已复制到剪贴板，正在关闭…' : 'PNG 已复制到剪贴板',
+        seconds: 2,
+      );
+      if (_settings.closeAfterCopy) {
+        // 让“已复制”先亮一下再退出，否则点了像没反应。
+        _copyResetTimer?.cancel();
+        _copyResetTimer = Timer(const Duration(milliseconds: 700), () {
+          if (mounted) _closeEditor();
+        });
+      }
       return;
     }
+    _setCopyState(_CopyState.failed);
     _showMessage('复制失败，详见 $clipboardLogPath');
+  }
+
+  /// 更新复制按钮状态；短暂后自动回到 idle（除非要接着自动关闭窗口）。
+  void _setCopyState(_CopyState state) {
+    if (!mounted) return;
+    setState(() => _copyState = state);
+    _copyResetTimer?.cancel();
+    final holdUntilClose = state == _CopyState.done && _settings.closeAfterCopy;
+    if (holdUntilClose) return;
+    _copyResetTimer = Timer(const Duration(seconds: 2), () {
+      if (mounted) setState(() => _copyState = _CopyState.idle);
+    });
   }
 
   Future<void> _openImage() async {
@@ -2065,11 +2225,13 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
     _decodedImage?.dispose();
     setState(() {
       _currentImageBytes = bytes;
+      _imageWidget = _buildImageWidget();
       _decodedImage = frame.image;
       history.clear();
       currentStep = -1;
       selectionRect = null;
     });
+    _invalidateCommands();
   }
 
   /// 插件运行在合成器的最上层，zenity 这类外部窗口会被本层盖住，因此改用
@@ -2077,9 +2239,9 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
   Future<String?> _choosePath(List<String> arguments) =>
       choosePathWithDialog(context: context, arguments: arguments);
 
-  void _showMessage(String message) {
+  void _showMessage(String message, {int seconds = 3}) {
     ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(content: Text(message), duration: const Duration(seconds: 3)),
+      SnackBar(content: Text(message), duration: Duration(seconds: seconds)),
     );
   }
 
@@ -2392,6 +2554,7 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
       history[_editingCommandIndex!] =
           _movingOriginalCommand!.translated(delta);
       setState(() {});
+      _invalidateCommands();
       return;
     }
 
@@ -2404,7 +2567,8 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
     }
     _dragEnd = end;
     final rect = _normalizedRect(start, end);
-    setState(() {});
+    // 只重绘预览层，不重建整棵编辑器树。
+    _canvasTick.value++;
     _ffi.updateSelection(
       rect.left.toInt(),
       rect.top.toInt(),
@@ -2481,3 +2645,6 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
     });
   }
 }
+
+/// 复制按钮的反馈状态：空闲 / 复制中 / 已复制 / 失败。
+enum _CopyState { idle, working, done, failed }

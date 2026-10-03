@@ -34,11 +34,11 @@ which is what you look for in **Settings → Shortcuts → Denial actions**.
 | Tools | Select, brush, line, arrow, rectangle, circle, text, mosaic, eraser |
 | Editing | Undo / redo, select an existing shape to recolor or resize it, delete selection |
 | Toolbar | Dockable at `auto` / `left` / `right` / `top` / `bottom`; `Tab` collapses or reveals it |
-| Output | Save / save-as (file picker), copy PNG to clipboard |
+| Output | Save / save-as (file picker), copy PNG to clipboard; the copy button shows its state (copying / copied / failed) with icon and color, and by default closes the editor after a successful copy (toggle in settings) |
 | Pin | Turn the annotated snapshot into a small draggable card, keep editing or close it |
 | OCR + translation | Local RapidOCR + Argos sidecar, or any OpenAI-compatible API; the result is painted back over the original text |
 | Auto-open | Watches the screenshot directory and opens the editor as soon as a new capture lands |
-| Settings | Shortcuts, toolbar dock, translation backend and API are configurable and persisted |
+| Settings | Shortcuts, toolbar dock, close-after-copy, translation backend and API are configurable and persisted |
 
 Settings file: `~/.config/denial-screenshots/settings.json`.
 Set `DENIAL_SCREENSHOT_DIR` to override the capture directory

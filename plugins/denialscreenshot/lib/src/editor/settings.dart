@@ -17,11 +17,15 @@ class ScreenshotSettings {
     this.apiAppId = '',
     this.translateMaskColor = 'FFFFFF',
     this.translateTextColor = '000000',
+    this.closeAfterCopy = true,
   });
 
   /// 工具栏停靠位置：'auto' | 'left' | 'right' | 'top' | 'bottom'。
   /// auto 时按图像大小自动选方向，放不下就隐藏，用快捷键唤出。
   final String dockPosition;
+
+  /// 复制成功后自动关闭编辑器：进剪贴板就意味着这次标注结束了，省掉手动关。
+  final bool closeAfterCopy;
 
   /// 动作 → 快捷键绑定（规范串：ctrl/shift/alt 前缀 + 小写键名）。
   /// 缺失的动作回落到 [defaultShortcuts]。
@@ -100,6 +104,7 @@ class ScreenshotSettings {
     String? apiAppId,
     String? translateMaskColor,
     String? translateTextColor,
+    bool? closeAfterCopy,
   }) {
     return ScreenshotSettings(
       dockPosition: dockPosition ?? this.dockPosition,
@@ -113,6 +118,7 @@ class ScreenshotSettings {
       apiAppId: apiAppId ?? this.apiAppId,
       translateMaskColor: translateMaskColor ?? this.translateMaskColor,
       translateTextColor: translateTextColor ?? this.translateTextColor,
+      closeAfterCopy: closeAfterCopy ?? this.closeAfterCopy,
     );
   }
 
@@ -128,6 +134,7 @@ class ScreenshotSettings {
         'apiAppId': apiAppId,
         'translateMaskColor': translateMaskColor,
         'translateTextColor': translateTextColor,
+        'closeAfterCopy': closeAfterCopy,
       };
 
   factory ScreenshotSettings.fromJson(Map<String, dynamic> json) {
@@ -152,6 +159,7 @@ class ScreenshotSettings {
       apiAppId: json['apiAppId'] as String? ?? '',
       translateMaskColor: json['translateMaskColor'] as String? ?? 'FFFFFF',
       translateTextColor: json['translateTextColor'] as String? ?? '000000',
+      closeAfterCopy: json['closeAfterCopy'] as bool? ?? true,
     );
   }
 
