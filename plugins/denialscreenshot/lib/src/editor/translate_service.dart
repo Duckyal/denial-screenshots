@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'dart:ui' show Color, Rect;
+
 import 'package:crypto/crypto.dart';
 
 import 'sidecar_source.dart';
@@ -9,7 +10,29 @@ import 'sidecar_source.dart';
 /// 翻译 sidecar 的宿主：管理 venv、按需安装依赖、spawn Python 进程并
 /// 流式读取 JSON 行事件。
 /// 在线翻译 API 的单次请求超时（秒）。UI 的超时提示也引用它，避免两处不一致。
-const int apiTimeoutSeconds = 90;
+const int apiTimeoutSeconds = 60;
+
+/// 建连超时：连不上就快点失败，别让用户对着一个「转圈」等一整分钟。
+const int apiConnectTimeoutSeconds = 10;
+
+/// API 返回非 200：带上服务端给的原因（限流、余额不足、模型不存在…），
+/// UI 直接展示，用户不用去猜。
+class ApiTranslateException implements Exception {
+  ApiTranslateException({
+    required this.statusCode,
+    required this.serverMessage,
+    required this.raw,
+  });
+
+  final int statusCode;
+  final String serverMessage;
+  final String raw;
+
+  @override
+  String toString() => serverMessage.isNotEmpty
+      ? 'API HTTP $statusCode: $serverMessage'
+      : 'API HTTP $statusCode: $raw';
+}
 
 class TranslateService {
   TranslateService();
@@ -76,10 +99,11 @@ class TranslateService {
           yield const TranslateSetupEvent('error', '系统缺少 python3');
           return;
         }
-        final create = await Process.run(
-          'python3',
-          ['-m', 'venv', '$dataDir/venv'],
-        );
+        final create = await Process.run('python3', [
+          '-m',
+          'venv',
+          '$dataDir/venv',
+        ]);
         if (create.exitCode != 0) {
           yield TranslateSetupEvent(
             'error',
@@ -104,10 +128,7 @@ class TranslateService {
       pip.stderr.transform(utf8.decoder).listen(stderr.write);
       final code = await pip.exitCode;
       if (code != 0) {
-        yield TranslateSetupEvent(
-          'error',
-          '依赖安装失败：$stderr'.trim(),
-        );
+        yield TranslateSetupEvent('error', '依赖安装失败：$stderr'.trim());
         return;
       }
 
@@ -118,23 +139,18 @@ class TranslateService {
         final pair = pack.replaceFirst('translate-', '');
         // zip 里有顶层目录，metadata 可能落在 models/<pair>/ 或其子目录。
         final pairDir = Directory('$dataDir/models/$pair');
-        final alreadyInstalled = await pairDir.exists() &&
+        final alreadyInstalled =
+            await pairDir.exists() &&
             await pairDir
                 .list(recursive: true)
                 .any((entry) => entry.path.endsWith('metadata.json'));
         if (alreadyInstalled) continue;
         final archive = File('$dataDir/$pack.argosmodel');
-        yield TranslateSetupEvent(
-          'status',
-          '下载语言包 $pair（约 70MB，走 HF 镜像）…',
-        );
+        yield TranslateSetupEvent('status', '下载语言包 $pair（约 70MB，走 HF 镜像）…');
         try {
           await _download('$_packRepo/$pack.argosmodel', archive);
         } on Object catch (error) {
-          yield TranslateSetupEvent(
-            'error',
-            '语言包下载失败：$error',
-          );
+          yield TranslateSetupEvent('error', '语言包下载失败：$error');
           return;
         }
         yield TranslateSetupEvent('status', '解压语言包 $pair…');
@@ -175,28 +191,22 @@ class TranslateService {
   }) async* {
     final ready = await isReady();
     if (!ready) {
-      yield const TranslateEvent(
-        'error',
-        message: '翻译组件未安装，请先在设置中安装',
-      );
+      yield const TranslateEvent('error', message: '翻译组件未安装，请先在设置中安装');
       return;
     }
     final tempInput = File('$dataDir/translate-input.png');
     await tempInput.parent.create(recursive: true);
     await tempInput.writeAsBytes(await File(imagePath).readAsBytes());
 
-    final process = await Process.start(venvPython, [
-      sidecarScript,
-    ]);
-    process.stdin.writeln(jsonEncode({
-      'image': tempInput.path,
-      'target': target,
-      'mode': mode,
-    }));
+    final process = await Process.start(venvPython, [sidecarScript]);
+    process.stdin.writeln(
+      jsonEncode({'image': tempInput.path, 'target': target, 'mode': mode}),
+    );
     await process.stdin.close();
 
-    final lines =
-        process.stdout.transform(utf8.decoder).transform(const LineSplitter());
+    final lines = process.stdout
+        .transform(utf8.decoder)
+        .transform(const LineSplitter());
     await for (final line in lines) {
       if (line.trim().isEmpty) continue;
       Map<String, dynamic> event;
@@ -242,11 +252,15 @@ class TranslateService {
         }).toList();
         yield TranslateEvent('done', regions: regions);
       } else if (type == 'error') {
-        yield TranslateEvent('error',
-            message: event['message'] as String? ?? '');
+        yield TranslateEvent(
+          'error',
+          message: event['message'] as String? ?? '',
+        );
       } else if (type == 'status') {
-        yield TranslateEvent('status',
-            message: event['message'] as String? ?? '');
+        yield TranslateEvent(
+          'status',
+          message: event['message'] as String? ?? '',
+        );
       }
     }
     await process.exitCode;
@@ -336,6 +350,7 @@ class TranslateService {
     required String apiKey,
     required String model,
     String apiAppId = '',
+    void Function(String note)? onRetry,
   }) async {
     if (apiType == 'baidu') {
       if (apiKey.trim().isEmpty) {
@@ -361,13 +376,41 @@ class TranslateService {
     if (apiType == 'libre') {
       final results = <String>[];
       for (final text in texts) {
-        results.add(
-          await _libreTranslate(text, target, endpoint, apiKey),
-        );
+        results.add(await _libreTranslate(text, target, endpoint, apiKey));
       }
       return results;
     }
-    return _openAiBatchTranslate(texts, target, endpoint, apiKey, model);
+    return _openAiBatchTranslate(
+      texts,
+      target,
+      endpoint,
+      apiKey,
+      model,
+      onRetry: onRetry,
+    );
+  }
+
+  /// 从响应体里挖出服务端给的中文原因（智谱会放在 error.message）。
+  ApiTranslateException _apiErrorOf(int status, String body) {
+    var serverMessage = '';
+    try {
+      final decoded = jsonDecode(body);
+      if (decoded is Map) {
+        final error = decoded['error'];
+        if (error is Map) {
+          serverMessage = (error['message'] ?? '').toString();
+        } else {
+          serverMessage = (decoded['message'] ?? '').toString();
+        }
+      }
+    } on Object catch (_) {
+      // 响应体不是 JSON（网关错误页之类）就用原文。
+    }
+    return ApiTranslateException(
+      statusCode: status,
+      serverMessage: serverMessage,
+      raw: body,
+    );
   }
 
   static const _languageNames = {
@@ -390,20 +433,20 @@ class TranslateService {
     final base = endpoint.trim().replaceAll(RegExp(r'/+$'), '');
     final client = HttpClient();
     try {
-      final request = await client.postUrl(
-        Uri.parse('$base/translate'),
-      );
+      final request = await client.postUrl(Uri.parse('$base/translate'));
       request.headers.contentType = ContentType.json;
-      request.write(jsonEncode({
-        'q': text,
-        'source': 'auto',
-        'target': target,
-        'format': 'text',
-        if (apiKey.isNotEmpty) 'api_key': apiKey,
-      }));
+      request.write(
+        jsonEncode({
+          'q': text,
+          'source': 'auto',
+          'target': target,
+          'format': 'text',
+          if (apiKey.isNotEmpty) 'api_key': apiKey,
+        }),
+      );
       final response = await request.close().timeout(
-            const Duration(seconds: 30),
-          );
+        const Duration(seconds: 30),
+      );
       final body = await response.transform(utf8.decoder).join();
       if (response.statusCode != HttpStatus.ok) {
         throw Exception('LibreTranslate HTTP ${response.statusCode}: $body');
@@ -421,8 +464,9 @@ class TranslateService {
     String target,
     String endpoint,
     String apiKey,
-    String model,
-  ) async {
+    String model, {
+    void Function(String note)? onRetry,
+  }) async {
     if (model.trim().isEmpty) {
       throw Exception('未配置模型名，请在设置中填写');
     }
@@ -435,80 +479,125 @@ class TranslateService {
           ? '$url/chat/completions'
           : '$url/v1/chat/completions';
     }
+    final uri = Uri.parse(url);
+    // 智谱的 GLM-4.6/4.7/5 默认带思考，翻译这种活儿会把几十秒全花在推理上
+    // （表现就是「一直转圈不出结果」），显式关掉。
+    final disableThinking =
+        uri.host.endsWith('bigmodel.cn') || uri.host.endsWith('z.ai');
+
     final targetName = _languageNames[target] ?? target;
     final numbered = [
       for (var i = 0; i < texts.length; i++) '${i + 1}. ${texts[i]}',
     ].join('\n');
 
-    final client = HttpClient();
-    try {
-      final request = await client.postUrl(Uri.parse(url));
-      request.headers.contentType = ContentType.json;
-      if (apiKey.isNotEmpty) {
-        request.headers.set('Authorization', 'Bearer $apiKey');
+    // 限流（429）和网关错误（5xx）多半是暂时的，退避重试比直接报错有用；
+    // 401/404/400 这种配置错误重试多少次都一样，立刻失败。
+    Object? lastError;
+    for (var attempt = 0; attempt < 3; attempt++) {
+      if (attempt > 0) {
+        final wait = attempt * 2;
+        onRetry?.call('限流/服务忙，${wait}s 后重试（第 $attempt 次）');
+        await Future<void>.delayed(Duration(seconds: wait));
       }
-      request.write(jsonEncode({
-        'model': model.trim(),
-        'temperature': 0,
-        'messages': [
-          {
-            'role': 'system',
-            'content': 'You are a translation engine. Translate each '
-                'numbered line into $targetName. Reply with the same '
-                'numbered lines ("N. text"), one per input line, no '
-                'explanations, no merging or splitting.',
-          },
-          {'role': 'user', 'content': numbered},
-        ],
-      }));
-      final response = await request.close().timeout(
-            const Duration(seconds: apiTimeoutSeconds),
-          );
-      final body = await response.transform(utf8.decoder).join();
-      if (response.statusCode != HttpStatus.ok) {
-        throw Exception('API HTTP ${response.statusCode}: $body');
-      }
-      final content =
-          ((((jsonDecode(body) as Map<String, dynamic>)['choices'] as List?)
-                  ?.first as Map<String, dynamic>?)?['message']
-              as Map<String, dynamic>?)?['content'] as String?;
-      if (content == null || content.trim().isEmpty) {
-        throw Exception('API 返回为空');
-      }
-      // 有些模型会把结果包在 markdown 代码块里，或不用「1. 」这种编号。
-      // 先剥围栏，再按编号对齐；编号解析不出来时按行顺序兜底，避免整批
-      // 退回原文（表现为「调了 API 但画布没变化」）。
-      final lines = content
-          .replaceAll(RegExp(r'```[A-Za-z0-9]*'), '')
-          .split('\n')
-          .map((line) => line.trim())
-          .where((line) => line.isNotEmpty)
-          .toList();
-      final pattern = RegExp(r'^\s*(\d+)\s*[.、)\]:：]\s*(.*)$');
-      final translated = List<String>.filled(texts.length, '');
-      final unmatched = <String>[];
-      for (final line in lines) {
-        final match = pattern.firstMatch(line);
-        final index = match == null ? null : int.tryParse(match.group(1)!);
-        if (index == null || index < 1 || index > texts.length) {
-          unmatched.add(line);
+      final client = HttpClient()
+        ..connectionTimeout = const Duration(seconds: apiConnectTimeoutSeconds);
+      try {
+        final request = await client.postUrl(uri);
+        request.headers.contentType = ContentType.json;
+        if (apiKey.isNotEmpty) {
+          request.headers.set('Authorization', 'Bearer $apiKey');
+        }
+        request.write(
+          jsonEncode({
+            'model': model.trim(),
+            'temperature': 0,
+            if (disableThinking) 'thinking': {'type': 'disabled'},
+            'messages': [
+              {
+                'role': 'system',
+                'content':
+                    'You are a translation engine. Translate each '
+                    'numbered line into $targetName. Reply with the same '
+                    'numbered lines ("N. text"), one per input line, no '
+                    'explanations, no merging or splitting.',
+              },
+              {'role': 'user', 'content': numbered},
+            ],
+          }),
+        );
+        final response = await request.close().timeout(
+          const Duration(seconds: apiTimeoutSeconds),
+        );
+        final body = await response.transform(utf8.decoder).join();
+        if (response.statusCode != HttpStatus.ok) {
+          final error = _apiErrorOf(response.statusCode, body);
+          // 限流和网关错误退避重试；401/404/400 重试也没用，直接抛。
+          if (attempt < 2 &&
+              (response.statusCode == 429 || response.statusCode >= 500)) {
+            lastError = error;
+            continue;
+          }
+          throw error;
+        }
+        final content =
+            ((((jsonDecode(body) as Map<String, dynamic>)['choices'] as List?)
+                            ?.first
+                        as Map<String, dynamic>?)?['message']
+                    as Map<String, dynamic>?)?['content']
+                as String?;
+        if (content == null || content.trim().isEmpty) {
+          throw Exception('API 返回为空');
+        }
+        // 有些模型会把结果包在 markdown 代码块里，或不用「1. 」这种编号。
+        // 先剥围栏，再按编号对齐；编号解析不出来时按行顺序兜底，避免整批
+        // 退回原文（表现为「调了 API 但画布没变化」）。
+        final lines = content
+            .replaceAll(RegExp(r'```[A-Za-z0-9]*'), '')
+            .split('\n')
+            .map((line) => line.trim())
+            .where((line) => line.isNotEmpty)
+            .toList();
+        final pattern = RegExp(r'^\s*(\d+)\s*[.、)\]:：]\s*(.*)$');
+        final translated = List<String>.filled(texts.length, '');
+        final unmatched = <String>[];
+        for (final line in lines) {
+          final match = pattern.firstMatch(line);
+          final index = match == null ? null : int.tryParse(match.group(1)!);
+          if (index == null || index < 1 || index > texts.length) {
+            unmatched.add(line);
+            continue;
+          }
+          translated[index - 1] = match!.group(2)!.trim();
+        }
+        var cursor = 0;
+        for (
+          var i = 0;
+          i < translated.length && cursor < unmatched.length;
+          i++
+        ) {
+          if (translated[i].isEmpty) {
+            translated[i] = unmatched[cursor++];
+          }
+        }
+        return [
+          for (var i = 0; i < texts.length; i++)
+            translated[i].isNotEmpty ? translated[i] : texts[i],
+        ];
+      } on ApiTranslateException {
+        rethrow;
+      } on Object catch (error) {
+        // 超时/连接抖动值得一试，其余（解析失败之类）立刻抛出。
+        if (attempt < 2 &&
+            (error is TimeoutException || error is SocketException)) {
+          lastError = error;
           continue;
         }
-        translated[index - 1] = match!.group(2)!.trim();
+        rethrow;
+      } finally {
+        client.close();
       }
-      var cursor = 0;
-      for (var i = 0; i < translated.length && cursor < unmatched.length; i++) {
-        if (translated[i].isEmpty) {
-          translated[i] = unmatched[cursor++];
-        }
-      }
-      return [
-        for (var i = 0; i < texts.length; i++)
-          translated[i].isNotEmpty ? translated[i] : texts[i],
-      ];
-    } finally {
-      client.close();
     }
+    throw lastError ?? Exception('翻译 API 调用失败（已重试 2 次）');
   }
 
   /// 百度语言代码与通用码的差异（ja/jp、ko/kor、fr/fra、es/spa）。
@@ -540,28 +629,33 @@ class TranslateService {
     final q = texts.join('\n');
     final sign = md5.convert(utf8.encode('$id$q$salt$key')).toString();
     final to = _baiduCodes[target] ?? target;
-    final url = 'https://fanyi-api.baidu.com/api/trans/vip/translate'
+    final url =
+        'https://fanyi-api.baidu.com/api/trans/vip/translate'
         '?q=${Uri.encodeQueryComponent(q)}'
         '&from=auto&to=${Uri.encodeQueryComponent(to)}'
         '&appid=${Uri.encodeQueryComponent(id)}'
         '&salt=$salt&sign=$sign';
     final effectiveEndpoint = endpoint.trim().isEmpty
         ? url
-        : Uri.parse(endpoint.trim()).replace(queryParameters: {
-            'q': q,
-            'from': 'auto',
-            'to': to,
-            'appid': id,
-            'salt': salt,
-            'sign': sign,
-          }).toString();
+        : Uri.parse(endpoint.trim())
+              .replace(
+                queryParameters: {
+                  'q': q,
+                  'from': 'auto',
+                  'to': to,
+                  'appid': id,
+                  'salt': salt,
+                  'sign': sign,
+                },
+              )
+              .toString();
 
     final client = HttpClient();
     try {
       final request = await client.getUrl(Uri.parse(effectiveEndpoint));
       final response = await request.close().timeout(
-            const Duration(seconds: 30),
-          );
+        const Duration(seconds: 30),
+      );
       final body = await response.transform(utf8.decoder).join();
       if (response.statusCode != HttpStatus.ok) {
         throw Exception('百度翻译 HTTP ${response.statusCode}: $body');
@@ -571,8 +665,8 @@ class TranslateService {
       if (errorCode != null) {
         throw Exception('百度翻译错误 $errorCode: ${json['error_msg'] ?? ''}');
       }
-      final items =
-          (json['trans_result'] as List?)?.cast<Map<String, dynamic>>();
+      final items = (json['trans_result'] as List?)
+          ?.cast<Map<String, dynamic>>();
       if (items == null || items.isEmpty) {
         throw Exception('百度翻译返回为空');
       }
@@ -610,18 +704,21 @@ class TranslateService {
     try {
       final request = await client.postUrl(Uri.parse('$host/v2/translate'));
       request.headers.set('Authorization', 'DeepL-Auth-Key $key');
-      request.headers.contentType =
-          ContentType('application', 'x-www-form-urlencoded');
+      request.headers.contentType = ContentType(
+        'application',
+        'x-www-form-urlencoded',
+      );
       request.add(utf8.encode(query));
       final response = await request.close().timeout(
-            const Duration(seconds: 60),
-          );
+        const Duration(seconds: 60),
+      );
       final body = await response.transform(utf8.decoder).join();
       if (response.statusCode != HttpStatus.ok) {
         throw Exception('DeepL HTTP ${response.statusCode}: $body');
       }
-      final translations = ((jsonDecode(body)
-              as Map<String, dynamic>)['translations'] as List?) ??
+      final translations =
+          ((jsonDecode(body) as Map<String, dynamic>)['translations']
+              as List?) ??
           <dynamic>[];
       if (translations.isEmpty) {
         throw Exception('DeepL 返回为空');
@@ -648,9 +745,7 @@ class TranslateService {
 
   static List<int> _color(dynamic raw) {
     final list = (raw as List?)?.cast<num>() ?? const [255, 255, 255];
-    return [
-      for (final channel in list.take(3)) channel.round().clamp(0, 255),
-    ];
+    return [for (final channel in list.take(3)) channel.round().clamp(0, 255)];
   }
 }
 
@@ -693,16 +788,16 @@ class TranslateRegion {
   final List<int> foreground;
 
   Color get backgroundColor => Color.fromARGB(
-        255,
-        background.isNotEmpty ? background[0] : 255,
-        background.length > 1 ? background[1] : 255,
-        background.length > 2 ? background[2] : 255,
-      );
+    255,
+    background.isNotEmpty ? background[0] : 255,
+    background.length > 1 ? background[1] : 255,
+    background.length > 2 ? background[2] : 255,
+  );
 
   Color get foregroundColor => Color.fromARGB(
-        255,
-        foreground.isNotEmpty ? foreground[0] : 0,
-        foreground.length > 1 ? foreground[1] : 0,
-        foreground.length > 2 ? foreground[2] : 0,
-      );
+    255,
+    foreground.isNotEmpty ? foreground[0] : 0,
+    foreground.length > 1 ? foreground[1] : 0,
+    foreground.length > 2 ? foreground[2] : 0,
+  );
 }

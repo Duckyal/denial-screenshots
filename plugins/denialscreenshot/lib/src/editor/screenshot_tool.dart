@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:io';
 import 'dart:math' as math;
 import 'dart:ui' as ui;
+
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
 import 'package:flutter/services.dart';
@@ -66,6 +67,7 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
   bool showUndoRedo = true;
   ScreenshotSettings _settings = const ScreenshotSettings();
   final TranslateService _translateService = TranslateService();
+
   /// 与 [apiTimeoutSeconds] 保持一致，超时提示里告诉用户等了多久。
   static const int _apiTimeoutSeconds = apiTimeoutSeconds;
 
@@ -75,17 +77,21 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
   bool _recognizing = false;
   String _translateStatus = '';
   Timer? _apiElapsedTimer;
+  String _apiNote = '';
+
+  /// 识字同样是「模型加载 → 逐段识别」的慢过程，用秒数 + 已识别段数把它
+  /// 变成看得见的进度，别停在「正在识别文字…」。
+  Timer? _ocrElapsedTimer;
+  int _ocrSeconds = 0;
+  int _ocrRegions = 0;
+  String _ocrBaseStatus = '正在识别文字…';
   bool _dockRevealed = false;
   bool _dockHovered = false;
   bool _showHints = false;
   bool _settingsDialogOpen = false;
   Timer? _dockRevealTimer;
-  ({
-    bool vertical,
-    bool atStart,
-    bool hidden,
-    bool reserved
-  })? _lastDockPlacement;
+  ({bool vertical, bool atStart, bool hidden, bool reserved})?
+  _lastDockPlacement;
   Uint8List? _pinnedImageBytes;
   bool _pinnedOverlayVisible = false;
 
@@ -122,28 +128,29 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
   Timer? _copyResetTimer;
 
   IconData get _copyIcon => switch (_copyState) {
-        _CopyState.working => Icons.hourglass_top,
-        _CopyState.done => Icons.check_circle,
-        _CopyState.failed => Icons.error_outline,
-        _CopyState.idle => Icons.content_copy,
-      };
+    _CopyState.working => Icons.hourglass_top,
+    _CopyState.done => Icons.check_circle,
+    _CopyState.failed => Icons.error_outline,
+    _CopyState.idle => Icons.content_copy,
+  };
 
   String get _copyTip => switch (_copyState) {
-        _CopyState.working => '正在复制…',
-        _CopyState.done => '已复制到剪贴板',
-        _CopyState.failed => '复制失败，点击重试',
-        _CopyState.idle => '复制 (Ctrl+C)',
-      };
+    _CopyState.working => '正在复制…',
+    _CopyState.done => '已复制到剪贴板',
+    _CopyState.failed => '复制失败，点击重试',
+    _CopyState.idle => '复制 (Ctrl+C)',
+  };
 
   Color? get _copyColor => switch (_copyState) {
-        _CopyState.done => Colors.green.withOpacity(0.8),
-        _CopyState.failed => Colors.red.withOpacity(0.8),
-        _ => null,
-      };
+    _CopyState.done => Colors.green.withOpacity(0.8),
+    _CopyState.failed => Colors.red.withOpacity(0.8),
+    _ => null,
+  };
 
   /// The canvas hides the system cursor for freehand tools; the drawn ring
   /// in [ToolCursorPainter] becomes the cursor instead.
-  MouseCursor get _canvasCursor => currentTool == ScreenshotToolType.brush ||
+  MouseCursor get _canvasCursor =>
+      currentTool == ScreenshotToolType.brush ||
           currentTool == ScreenshotToolType.eraser
       ? SystemMouseCursors.none
       : MouseCursor.defer;
@@ -183,8 +190,9 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
   /// 命令列表变化后调用：刷新缓存并让静态层重绘。
   void _invalidateCommands() {
     _visibleStamp = _commandsStamp;
-    _visibleCommands =
-        List<DrawCommand>.unmodifiable(history.take(currentStep + 1));
+    _visibleCommands = List<DrawCommand>.unmodifiable(
+      history.take(currentStep + 1),
+    );
     _commandsVersion++;
     _staticTick.value++;
   }
@@ -195,8 +203,9 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
     final stamp = _commandsStamp;
     if (stamp == _visibleStamp) return;
     _visibleStamp = stamp;
-    _visibleCommands =
-        List<DrawCommand>.unmodifiable(history.take(currentStep + 1));
+    _visibleCommands = List<DrawCommand>.unmodifiable(
+      history.take(currentStep + 1),
+    );
     _commandsVersion++;
   }
 
@@ -211,6 +220,7 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
     _dockRevealTimer?.cancel();
     _copyResetTimer?.cancel();
     _apiElapsedTimer?.cancel();
+    _ocrElapsedTimer?.cancel();
     _canvasTick.dispose();
     _staticTick.dispose();
     _decodedImage?.dispose();
@@ -238,7 +248,7 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
   /// 手动位置：常显 + 预留；自动：留白装得下就常显（不预留），装不下
   /// 就贴边隐藏（不预留，图像保持最大）。
   ({bool vertical, bool atStart, bool hidden, bool reserved})
-      _resolveDockPlacement(BoxConstraints constraints) {
+  _resolveDockPlacement(BoxConstraints constraints) {
     const thickness = 54.0; // 工具栏容器 + 边距
     const reserve = 56.0; // 预留模式下的画布缩进
     final window = Size(constraints.maxWidth, constraints.maxHeight);
@@ -250,14 +260,14 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
             vertical: false,
             atStart: true,
             hidden: false,
-            reserved: true
+            reserved: true,
           );
         case 'bottom':
           return (
             vertical: false,
             atStart: false,
             hidden: false,
-            reserved: true
+            reserved: true,
           );
         case 'left':
           return (vertical: true, atStart: true, hidden: false, reserved: true);
@@ -266,21 +276,23 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
             vertical: true,
             atStart: false,
             hidden: false,
-            reserved: true
+            reserved: true,
           );
         default: // 窗口尺寸未知时退回底部常显
           return (
             vertical: false,
             atStart: false,
             hidden: false,
-            reserved: true
+            reserved: true,
           );
       }
     }
 
     // 自动模式：图像按整窗适配，看四周留白条带能否装下工具栏。
-    final fitScale =
-        math.min(window.width / world.width, window.height / world.height);
+    final fitScale = math.min(
+      window.width / world.width,
+      window.height / world.height,
+    );
     final sideFree = (window.width - world.width * fitScale) / 2;
     final topBottomFree = (window.height - world.height * fitScale) / 2;
     final horizontalFits = topBottomFree >= thickness;
@@ -294,22 +306,20 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
       vertical = sideFree > topBottomFree;
     } else {
       // 都装不下：选预留空间后图像更大的方向（工具栏常显，靠 Tab 收起）。
-      final horizontalScale = math.min(window.width / world.width,
-          math.max(0, window.height - reserve) / world.height);
+      final horizontalScale = math.min(
+        window.width / world.width,
+        math.max(0, window.height - reserve) / world.height,
+      );
       final verticalScale = math.min(
-          math.max(0, window.width - reserve) / world.width,
-          window.height / world.height);
+        math.max(0, window.width - reserve) / world.width,
+        window.height / world.height,
+      );
       vertical = verticalScale > horizontalScale * 1.05;
     }
     // 不再贴边自动隐藏：工具栏常显，需要时用 Tab 收起。留白装得下就浮在
     // 留白上，装不下才预留空间，免得压住图像。
     final fits = vertical ? verticalFits : horizontalFits;
-    return (
-      vertical: vertical,
-      atStart: false,
-      hidden: false,
-      reserved: !fits
-    );
+    return (vertical: vertical, atStart: false, hidden: false, reserved: !fits);
   }
 
   /// 标注世界的尺寸 = 当前图像的像素尺寸；图像未解码时退回选区尺寸。
@@ -353,8 +363,10 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
 
     // 数据驱动的可自定义快捷键：面板/撤销/重做/关闭/提示/工具切换。
     final binding = _bindingOfEvent(event);
-    debugPrint('[key] binding="$binding" '
-        'hints=${_settings.bindingFor("hints")} showHints=$_showHints');
+    debugPrint(
+      '[key] binding="$binding" '
+      'hints=${_settings.bindingFor("hints")} showHints=$_showHints',
+    );
     if (binding.isNotEmpty) {
       if (binding == _settings.bindingFor('dock')) {
         _toggleDockVisibility();
@@ -437,14 +449,14 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
                 showToolbar && (!placement.hidden || _dockRevealed);
             final canvasPadding = placement.reserved && dockShown
                 ? (placement.vertical
-                    ? EdgeInsets.only(
-                        left: placement.atStart ? dockReserve : 0,
-                        right: placement.atStart ? 0 : dockReserve,
-                      )
-                    : EdgeInsets.only(
-                        top: placement.atStart ? dockReserve : 0,
-                        bottom: placement.atStart ? 0 : dockReserve,
-                      ))
+                      ? EdgeInsets.only(
+                          left: placement.atStart ? dockReserve : 0,
+                          right: placement.atStart ? 0 : dockReserve,
+                        )
+                      : EdgeInsets.only(
+                          top: placement.atStart ? dockReserve : 0,
+                          bottom: placement.atStart ? 0 : dockReserve,
+                        ))
                 : EdgeInsets.zero;
             return Stack(
               children: [
@@ -482,9 +494,12 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
                                           child: Container(
                                             decoration: BoxDecoration(
                                               border: Border.all(
-                                                  color: Colors.red, width: 2),
-                                              color:
-                                                  Colors.red.withOpacity(0.1),
+                                                color: Colors.red,
+                                                width: 2,
+                                              ),
+                                              color: Colors.red.withOpacity(
+                                                0.1,
+                                              ),
                                             ),
                                           ),
                                         ),
@@ -497,13 +512,14 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
                                               valueListenable: _staticTick,
                                               builder: (context, _, __) =>
                                                   CustomPaint(
-                                                painter: StaticDrawPainter(
-                                                  commands: _visibleCommands,
-                                                  version: _commandsVersion,
-                                                  selectedIndex:
-                                                      _selectedCommandIndex,
-                                                ),
-                                              ),
+                                                    painter: StaticDrawPainter(
+                                                      commands:
+                                                          _visibleCommands,
+                                                      version: _commandsVersion,
+                                                      selectedIndex:
+                                                          _selectedCommandIndex,
+                                                    ),
+                                                  ),
                                             ),
                                           ),
                                         ),
@@ -540,7 +556,8 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
                                                               _selectedCommandIndex,
                                                         )
                                                       : PreviewDrawPainter(
-                                                          preview: preview),
+                                                          preview: preview,
+                                                        ),
                                                 );
                                               },
                                             ),
@@ -590,13 +607,16 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
                       atStart: placement.atStart,
                       hidden: placement.hidden,
                     ),
-                  if (_translating)
+                  // 识字和翻译都要显示过程浮层，否则点了像没反应。
+                  if (_translating || _recognizing)
                     Positioned(
                       // 工具栏占哪边，状态浮层就贴另一边，避免重叠。
-                      top:
-                          !placement.vertical && !placement.atStart ? 12 : null,
-                      bottom:
-                          !placement.vertical && !placement.atStart ? null : 12,
+                      top: !placement.vertical && !placement.atStart
+                          ? 12
+                          : null,
+                      bottom: !placement.vertical && !placement.atStart
+                          ? null
+                          : 12,
                       left: 0,
                       right: 0,
                       child: IgnorePointer(
@@ -653,10 +673,14 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
     final media = MediaQuery.of(context).size;
     const popupWidth = 260.0;
     final popupHeight = 120.0;
-    final left = (_textDialogWindowAnchor.dx)
-        .clamp(0.0, (media.width - popupWidth - 8).clamp(0.0, double.infinity));
+    final left = (_textDialogWindowAnchor.dx).clamp(
+      0.0,
+      (media.width - popupWidth - 8).clamp(0.0, double.infinity),
+    );
     final top = (_textDialogWindowAnchor.dy).clamp(
-        0.0, (media.height - popupHeight - 8).clamp(0.0, double.infinity));
+      0.0,
+      (media.height - popupHeight - 8).clamp(0.0, double.infinity),
+    );
 
     return Stack(
       children: [
@@ -701,8 +725,10 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
                       isDense: true,
                       border: OutlineInputBorder(),
                       hintText: '输入文字，回车确认',
-                      contentPadding:
-                          EdgeInsets.symmetric(horizontal: 8, vertical: 8),
+                      contentPadding: EdgeInsets.symmetric(
+                        horizontal: 8,
+                        vertical: 8,
+                      ),
                     ),
                     maxLines: 1,
                     onSubmitted: (_) => _confirmTextInput(),
@@ -804,8 +830,13 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
   }) {
     final revealed = !hidden || _dockRevealed;
 
-    Widget dockButton(IconData icon, String tip, VoidCallback onTap,
-        {bool active = false, Color? color}) {
+    Widget dockButton(
+      IconData icon,
+      String tip,
+      VoidCallback onTap, {
+      bool active = false,
+      Color? color,
+    }) {
       return Tooltip(
         message: tip,
         child: GestureDetector(
@@ -815,7 +846,8 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
             height: 34,
             margin: const EdgeInsets.all(2),
             decoration: BoxDecoration(
-              color: color ??
+              color:
+                  color ??
                   (active
                       ? Colors.blue.withOpacity(0.6)
                       : Colors.white.withOpacity(0.06)),
@@ -828,11 +860,11 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
     }
 
     Widget divider() => Container(
-          width: vertical ? 20 : 1,
-          height: vertical ? 1 : 20,
-          margin: const EdgeInsets.symmetric(horizontal: 3, vertical: 3),
-          color: Colors.white24,
-        );
+      width: vertical ? 20 : 1,
+      height: vertical ? 1 : 20,
+      margin: const EdgeInsets.symmetric(horizontal: 3, vertical: 3),
+      color: Colors.white24,
+    );
 
     const tools = [
       (ScreenshotToolType.select, Icons.near_me, '光标'),
@@ -923,8 +955,12 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
       dockButton(Icons.folder_open, '打开图片', _openImage),
       divider(),
       for (final (type, icon, label) in tools)
-        dockButton(icon, label, () => _switchTool(type),
-            active: currentTool == type),
+        dockButton(
+          icon,
+          label,
+          () => _switchTool(type),
+          active: currentTool == type,
+        ),
       divider(),
       colorCell(),
       paletteCell(),
@@ -932,16 +968,24 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
       divider(),
       dockButton(Icons.undo, '撤销 (Ctrl+Z)', _undo),
       dockButton(Icons.redo, '重做 (Ctrl+Shift+Z)', _redo),
-      dockButton(Icons.text_snippet, '识字（识别并复制图中文字）', _recognize,
-          active: _recognizing),
+      dockButton(
+        Icons.text_snippet,
+        '识字（识别并复制图中文字）',
+        _recognize,
+        active: _recognizing,
+      ),
       dockButton(Icons.translate, '翻译', _translate, active: _translating),
       dockButton(Icons.push_pin, '置顶显示', _toggleToolbarPin),
       dockButton(Icons.check, '保存 (Enter)', _save),
       dockButton(Icons.close, '关闭编辑器', _closeEditor),
-      dockButton(_copyIcon, _copyTip, _copy,
-          active: _copyState == _CopyState.working ||
-              _copyState == _CopyState.done,
-          color: _copyColor),
+      dockButton(
+        _copyIcon,
+        _copyTip,
+        _copy,
+        active:
+            _copyState == _CopyState.working || _copyState == _CopyState.done,
+        color: _copyColor,
+      ),
       divider(),
       dockButton(Icons.settings_outlined, '设置', _openSettings),
     ];
@@ -964,8 +1008,9 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
           : Row(mainAxisSize: MainAxisSize.min, children: cells),
     );
 
-    final slideOut =
-        vertical ? Offset(atStart ? -1 : 1, 0) : Offset(0, atStart ? -1 : 1);
+    final slideOut = vertical
+        ? Offset(atStart ? -1 : 1, 0)
+        : Offset(0, atStart ? -1 : 1);
     return Positioned(
       left: vertical ? (atStart ? 0 : null) : 0,
       right: vertical ? (atStart ? null : 0) : 0,
@@ -990,10 +1035,7 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
                 _dockHovered = false;
                 if (hidden) _hideDockTransient();
               },
-              child: FittedBox(
-                fit: BoxFit.scaleDown,
-                child: bar,
-              ),
+              child: FittedBox(fit: BoxFit.scaleDown, child: bar),
             ),
           ),
         ),
@@ -1069,9 +1111,11 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
     if (binding.isEmpty) return '未设置';
     return binding
         .split('+')
-        .map((part) => part.isEmpty
-            ? part
-            : '${part[0].toUpperCase()}${part.substring(1)}')
+        .map(
+          (part) => part.isEmpty
+              ? part
+              : '${part[0].toUpperCase()}${part.substring(1)}',
+        )
         .join('+');
   }
 
@@ -1089,7 +1133,10 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
           Text(
             '快捷键提示',
             style: const TextStyle(
-                color: Colors.white, fontSize: 14, fontWeight: FontWeight.bold),
+              color: Colors.white,
+              fontSize: 14,
+              fontWeight: FontWeight.bold,
+            ),
           ),
           const SizedBox(height: 8),
           _buildShortcutRow('保存', 'Enter'),
@@ -1127,7 +1174,10 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
           Text(
             shortcut,
             style: const TextStyle(
-                color: Colors.white, fontSize: 12, fontWeight: FontWeight.bold),
+              color: Colors.white,
+              fontSize: 12,
+              fontWeight: FontWeight.bold,
+            ),
           ),
         ],
       ),
@@ -1228,8 +1278,10 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
 
   /// `[` / `]`: eraser steps by 2 so its big range is quick to traverse.
   void _nudgeSize(int direction) {
-    _adjustSize(_activeSize +
-        direction * (currentTool == ScreenshotToolType.eraser ? 2 : 1));
+    _adjustSize(
+      _activeSize +
+          direction * (currentTool == ScreenshotToolType.eraser ? 2 : 1),
+    );
   }
 
   void _undo() {
@@ -1405,9 +1457,7 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
                             const SizedBox(
                               width: 14,
                               height: 14,
-                              child: CircularProgressIndicator(
-                                strokeWidth: 2,
-                              ),
+                              child: CircularProgressIndicator(strokeWidth: 2),
                             ),
                             const SizedBox(width: 10),
                             Expanded(
@@ -1429,14 +1479,17 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
                               ListTile(
                                 dense: true,
                                 visualDensity: VisualDensity.compact,
-                                title: Text(label,
-                                    style: const TextStyle(fontSize: 13)),
+                                title: Text(
+                                  label,
+                                  style: const TextStyle(fontSize: 13),
+                                ),
                                 trailing: busyPair == (from, to)
                                     ? const SizedBox(
                                         width: 16,
                                         height: 16,
                                         child: CircularProgressIndicator(
-                                            strokeWidth: 2),
+                                          strokeWidth: 2,
+                                        ),
                                       )
                                     : TextButton(
                                         onPressed: () => toggle(from, to),
@@ -1523,8 +1576,12 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
                 final binding = _bindingOfEvent(event);
                 if (binding.isEmpty) return KeyEventResult.ignored;
                 final next = Map<String, String>.from(settings.shortcuts);
-                next.updateAll((action, value) =>
-                    value == binding && action != capturingAction ? '' : value);
+                next.updateAll(
+                  (action, value) =>
+                      value == binding && action != capturingAction
+                      ? ''
+                      : value,
+                );
                 next[capturingAction] = binding;
                 apply(settings.copyWith(shortcuts: next));
                 setDialogState(() => capturingAction = '');
@@ -1538,8 +1595,10 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
                   visualDensity: VisualDensity.compact,
                   title: Text(label, style: const TextStyle(fontSize: 13)),
                   trailing: capturing
-                      ? const Text('按新按键…',
-                          style: TextStyle(fontSize: 12, color: Colors.blue))
+                      ? const Text(
+                          '按新按键…',
+                          style: TextStyle(fontSize: 12, color: Colors.blue),
+                        )
                       : TextButton(
                           onPressed: () {
                             // 焦点收归捕获节点，空格等按键不会被
@@ -1579,8 +1638,10 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
                       RadioListTile<String>(
                         dense: true,
                         visualDensity: VisualDensity.compact,
-                        title:
-                            Text(label, style: const TextStyle(fontSize: 13)),
+                        title: Text(
+                          label,
+                          style: const TextStyle(fontSize: 13),
+                        ),
                         value: value,
                         groupValue: groupValue,
                         onChanged: (next) {
@@ -1602,8 +1663,9 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
                   padding: const EdgeInsets.only(top: 4),
                   child: TextField(
                     controller: TextEditingController(text: value)
-                      ..selection =
-                          TextSelection.collapsed(offset: value.length),
+                      ..selection = TextSelection.collapsed(
+                        offset: value.length,
+                      ),
                     obscureText: obscure,
                     style: const TextStyle(fontSize: 13),
                     decoration: InputDecoration(
@@ -1646,19 +1708,22 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
                             dense: true,
                             visualDensity: VisualDensity.compact,
                             contentPadding: EdgeInsets.zero,
-                            title: const Text('复制后自动关闭编辑器',
-                                style: TextStyle(fontSize: 13)),
-                            value: settings.closeAfterCopy,
-                            onChanged: (value) => apply(
-                              settings.copyWith(closeAfterCopy: value),
+                            title: const Text(
+                              '复制后自动关闭编辑器',
+                              style: TextStyle(fontSize: 13),
                             ),
+                            value: settings.closeAfterCopy,
+                            onChanged: (value) =>
+                                apply(settings.copyWith(closeAfterCopy: value)),
                           ),
                           const Padding(
                             padding: EdgeInsets.only(top: 6),
                             child: Text(
                               '快捷键（点击修改，按 Esc 取消捕获）',
                               style: TextStyle(
-                                  fontSize: 13, fontWeight: FontWeight.w600),
+                                fontSize: 13,
+                                fontWeight: FontWeight.w600,
+                              ),
                             ),
                           ),
                           for (final (action, label) in _shortcutActions)
@@ -1666,10 +1731,7 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
                           group(
                             '翻译接口',
                             settings.translateBackend,
-                            const [
-                              ('api', '在线翻译 API'),
-                              ('local', '本地模型'),
-                            ],
+                            const [('api', '在线翻译 API'), ('local', '本地模型')],
                             (value) => apply(
                               settings.copyWith(translateBackend: value),
                             ),
@@ -1679,7 +1741,10 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
                               '翻译协议',
                               settings.apiType,
                               const [
-                                ('openai', 'OpenAI 兼容（DeepSeek / OpenAI / Ollama…）'),
+                                (
+                                  'openai',
+                                  'OpenAI 兼容（DeepSeek / OpenAI / Ollama…）',
+                                ),
                                 ('baidu', '百度翻译'),
                                 ('deepl', 'DeepL'),
                                 ('libre', 'LibreTranslate'),
@@ -1710,6 +1775,30 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
                                 'deepseek-chat',
                                 (value) =>
                                     apply(settings.copyWith(apiModel: value)),
+                              ),
+                              // 模型名写错是最常见的「调了没反应」，按厂商给几个
+                              // 可直接点的预设，省得手抄。
+                              Padding(
+                                padding: const EdgeInsets.only(top: 6),
+                                child: Wrap(
+                                  spacing: 6,
+                                  runSpacing: 4,
+                                  children: [
+                                    for (final preset in _modelPresets(
+                                      settings.apiEndpoint,
+                                    ))
+                                      ActionChip(
+                                        visualDensity: VisualDensity.compact,
+                                        label: Text(
+                                          preset,
+                                          style: const TextStyle(fontSize: 12),
+                                        ),
+                                        onPressed: () => apply(
+                                          settings.copyWith(apiModel: preset),
+                                        ),
+                                      ),
+                                  ],
+                                ),
                               ),
                             ] else if (settings.apiType == 'baidu') ...[
                               apiField(
@@ -1764,26 +1853,31 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
                                           apiTesting = true;
                                           apiTestResult = '正在测试…';
                                         });
+                                        final sw = Stopwatch()..start();
                                         try {
                                           final result = await _translateService
                                               .translateViaApi(
-                                            texts: const ['Hello, world'],
-                                            target: _resolveTranslateTarget(),
-                                            apiType: settings.apiType,
-                                            endpoint: settings.apiEndpoint,
-                                            apiKey: settings.apiKey,
-                                            model: settings.apiModel,
-                                            apiAppId: settings.apiAppId,
-                                          );
+                                                texts: const ['Hello, world'],
+                                                target:
+                                                    _resolveTranslateTarget(),
+                                                apiType: settings.apiType,
+                                                endpoint: settings.apiEndpoint,
+                                                apiKey: settings.apiKey,
+                                                model: settings.apiModel,
+                                                apiAppId: settings.apiAppId,
+                                              );
                                           setDialogState(() {
                                             apiTesting = false;
                                             apiTestResult =
-                                                '可用：Hello, world → ${result.first}';
+                                                '可用（${sw.elapsedMilliseconds}ms）：'
+                                                'Hello, world → ${result.first}';
                                           });
                                         } on Object catch (error) {
                                           setDialogState(() {
                                             apiTesting = false;
-                                            apiTestResult = '失败：$error';
+                                            apiTestResult = _describeApiError(
+                                              error,
+                                            );
                                           });
                                         }
                                       },
@@ -1828,19 +1922,19 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
                             ),
                           ),
                           colorRow(
-                              '蒙版颜色',
-                              settings.translateMaskColor,
-                              (value) => apply(
-                                    settings.copyWith(
-                                        translateMaskColor: value),
-                                  )),
+                            '蒙版颜色',
+                            settings.translateMaskColor,
+                            (value) => apply(
+                              settings.copyWith(translateMaskColor: value),
+                            ),
+                          ),
                           colorRow(
-                              '文字颜色',
-                              settings.translateTextColor,
-                              (value) => apply(
-                                    settings.copyWith(
-                                        translateTextColor: value),
-                                  )),
+                            '文字颜色',
+                            settings.translateTextColor,
+                            (value) => apply(
+                              settings.copyWith(translateTextColor: value),
+                            ),
+                          ),
                         ],
                       ),
                     ),
@@ -1943,7 +2037,8 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
           : _settings.apiModel.trim();
       setState(
         () => _translateStatus =
-            '调用翻译 API（$blocks 块 · $label）… 已用 ${elapsed}s',
+            '调用翻译 API（$blocks 块 · $label）…'
+            ' 已用 ${elapsed}s${_apiNote.isEmpty ? '' : ' · $_apiNote'}',
       );
     });
   }
@@ -1951,11 +2046,87 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
   void _stopApiElapsed() {
     _apiElapsedTimer?.cancel();
     _apiElapsedTimer = null;
+    _apiNote = '';
+  }
+
+  void _startRecognizeElapsed() {
+    _ocrElapsedTimer?.cancel();
+    _ocrSeconds = 0;
+    _ocrRegions = 0;
+    _ocrBaseStatus = '正在识别文字…';
+    _ocrElapsedTimer = Timer.periodic(const Duration(seconds: 1), (_) {
+      if (!mounted) return;
+      _ocrSeconds++;
+      _updateRecognizeStatus();
+    });
+  }
+
+  void _stopRecognizeElapsed() {
+    _ocrElapsedTimer?.cancel();
+    _ocrElapsedTimer = null;
+  }
+
+  /// 秒表每秒刷新一次，收到 OCR 段落时也立刻刷新，避免进度只按秒跳。
+  void _updateRecognizeStatus() {
+    if (!mounted) return;
+    _setTranslateStatus(
+      '$_ocrBaseStatus'
+      '${_ocrRegions > 0 ? ' 已找到 $_ocrRegions 段' : ''}'
+      '（${_ocrSeconds}s）',
+      recognizing: true,
+    );
+  }
+
+  /// 按 API 地址猜厂商，给出该厂商常用的模型名，点一下就填进设置。
+  static List<String> _modelPresets(String endpoint) {
+    final host = Uri.tryParse(endpoint)?.host ?? '';
+    if (host.endsWith('bigmodel.cn') || host.endsWith('z.ai')) {
+      return const [
+        'glm-4-flash',
+        'glm-4.5-air',
+        'glm-4.6',
+        'glm-4.7',
+        'glm-5',
+      ];
+    }
+    if (host.contains('deepseek')) {
+      return const ['deepseek-chat', 'deepseek-reasoner'];
+    }
+    if (host.contains('siliconflow')) {
+      return const ['Qwen/Qwen2.5-7B-Instruct', 'THUDM/glm-4-9b-chat'];
+    }
+    if (host.contains('moonshot')) {
+      return const ['moonshot-v1-8k', 'moonshot-v1-32k'];
+    }
+    if (host.contains('dashscope') || host.contains('aliyuncs')) {
+      return const ['qwen-plus', 'qwen-turbo'];
+    }
+    if (host.contains('openai')) return const ['gpt-4o-mini'];
+    return const ['gpt-4o-mini', 'deepseek-chat'];
   }
 
   /// 把 API/网络的失败翻译成人能看懂的原因（超时、连不上、鉴权、限流…）。
   String _describeApiError(Object error) {
     final text = error.toString();
+    if (error is ApiTranslateException) {
+      // 服务端给的原因（限流、余额不足、模型不存在…）比状态码有用得多。
+      final detail = error.serverMessage.isNotEmpty
+          ? error.serverMessage
+          : error.raw;
+      final hint = switch (error.statusCode) {
+        401 || 403 => '密钥无效或没权限',
+        429 => '请求太频繁或免费额度用尽，稍后再试或换个模型',
+        404 => '接口地址或模型名不对',
+        400 => '请求参数有问题，检查模型名是否正确',
+        >= 500 => '对方服务暂时不可用',
+        _ => '请求被拒绝',
+      };
+      final short = detail.length > 120
+          ? '${detail.substring(0, 120)}…'
+          : detail;
+      return '翻译失败（HTTP ${error.statusCode}·$hint）'
+          '${short.isEmpty ? '' : '：$short'}';
+    }
     if (error is TimeoutException) {
       return '翻译超时：API ${_apiTimeoutSeconds}s 没有响应，检查网络或换成更快的模型';
     }
@@ -1985,14 +2156,16 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
   Future<void> _recognize() async {
     if (_translating || _recognizing) return;
     _setTranslateStatus('正在识别文字…', recognizing: true);
+    _startRecognizeElapsed();
     try {
       final png = await _renderPinSnapshot();
       if (png == null) {
         _showMessage('生成快照失败，无法识别');
         return;
       }
-      final inputFile =
-          File('${Directory.systemTemp.path}/screenshot_tool_ocr.png');
+      final inputFile = File(
+        '${Directory.systemTemp.path}/screenshot_tool_ocr.png',
+      );
       await inputFile.writeAsBytes(png);
 
       final regions = <TranslateRegion>[];
@@ -2003,9 +2176,12 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
       )) {
         if (!mounted) return;
         if (event.type == 'status') {
-          _setTranslateStatus(event.message ?? '', recognizing: true);
+          _ocrBaseStatus = event.message ?? _ocrBaseStatus;
+          _updateRecognizeStatus();
         } else if (event.type == 'region' && event.region != null) {
           regions.add(event.region!);
+          _ocrRegions = regions.length;
+          _updateRecognizeStatus();
         } else if (event.type == 'error') {
           _showMessage('识别失败：${event.message ?? ''}');
           return;
@@ -2030,6 +2206,7 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
     } on Object catch (error) {
       _showMessage('识别出错：$error');
     } finally {
+      _stopRecognizeElapsed();
       if (mounted) {
         setState(() {
           _recognizing = false;
@@ -2071,9 +2248,7 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
                 if (!dialogContext.mounted) return;
                 ScaffoldMessenger.of(dialogContext).showSnackBar(
                   SnackBar(
-                    content: Text(
-                      ok ? '已复制到剪贴板' : '复制失败，详见 $clipboardLogPath',
-                    ),
+                    content: Text(ok ? '已复制到剪贴板' : '复制失败，详见 $clipboardLogPath'),
                     duration: const Duration(seconds: 2),
                   ),
                 );
@@ -2094,8 +2269,10 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
     _setTranslateStatus('准备翻译…');
     try {
       final useApi = _settings.translateBackend == 'api';
-      debugPrint('[translate] backend=${_settings.translateBackend} '
-          'target=${_settings.translateTarget}');
+      debugPrint(
+        '[translate] backend=${_settings.translateBackend} '
+        'target=${_settings.translateTarget}',
+      );
       if (useApi && _settings.apiEndpoint.trim().isEmpty) {
         // LLM/API 不默认开启：没配置就引导用户去设置。
         _showMessage('请先在设置中配置翻译 API');
@@ -2116,8 +2293,9 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
         _showMessage('生成快照失败，无法翻译');
         return;
       }
-      final inputFile =
-          File('${Directory.systemTemp.path}/screenshot_tool_translate.png');
+      final inputFile = File(
+        '${Directory.systemTemp.path}/screenshot_tool_translate.png',
+      );
       await inputFile.writeAsBytes(png);
 
       final target = _resolveTranslateTarget();
@@ -2137,8 +2315,10 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
             _setTranslateStatus(event.message ?? '');
           case 'region':
             if (event.region != null) {
-              debugPrint('[translate] region ${event.region!.source} -> '
-                  '${event.region!.translated}');
+              debugPrint(
+                '[translate] region ${event.region!.source} -> '
+                '${event.region!.translated}',
+              );
               _applyTranslateRegion(event.region!);
               translatedCount++;
               _setTranslateStatus('已翻译 $translatedCount 块…');
@@ -2188,15 +2368,12 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
     // 先按块高估一个字号，装不下就在蒙版宽度内换行、逐级缩小；中译英这种
     // 变长的情况靠这两步消化。
     TextPainter layout(double size) => TextPainter(
-          text: TextSpan(
-            text: region.translated,
-            style: TextStyle(
-              fontSize: size,
-              fontWeight: FontWeight.bold,
-            ),
-          ),
-          textDirection: TextDirection.ltr,
-        )..layout(maxWidth: maxTextWidth);
+      text: TextSpan(
+        text: region.translated,
+        style: TextStyle(fontSize: size, fontWeight: FontWeight.bold),
+      ),
+      textDirection: TextDirection.ltr,
+    )..layout(maxWidth: maxTextWidth);
 
     var fontSize = (onCanvas.height * 0.6).clamp(9.0, 40.0);
     var painter = layout(fontSize);
@@ -2220,25 +2397,29 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
     final fontStroke = fontSize / 4;
 
     setState(() {
-      _pushCommand(DrawCommand(
-        type: ScreenshotToolType.mask,
-        start: maskRect.topLeft,
-        end: maskRect.bottomRight,
-        path: Path(),
-        rect: maskRect,
-        fillColor: _settings.translateMaskColorValue,
-      ));
-      _pushCommand(DrawCommand(
-        type: ScreenshotToolType.text,
-        start: onCanvas.topLeft,
-        end: onCanvas.bottomRight,
-        path: Path(),
-        text: region.translated,
-        rect: onCanvas,
-        color: _settings.translateTextColorValue,
-        strokeWidth: fontStroke,
-        textMaxWidth: maxTextWidth,
-      ));
+      _pushCommand(
+        DrawCommand(
+          type: ScreenshotToolType.mask,
+          start: maskRect.topLeft,
+          end: maskRect.bottomRight,
+          path: Path(),
+          rect: maskRect,
+          fillColor: _settings.translateMaskColorValue,
+        ),
+      );
+      _pushCommand(
+        DrawCommand(
+          type: ScreenshotToolType.text,
+          start: onCanvas.topLeft,
+          end: onCanvas.bottomRight,
+          path: Path(),
+          text: region.translated,
+          rect: onCanvas,
+          color: _settings.translateTextColorValue,
+          strokeWidth: fontStroke,
+          textMaxWidth: maxTextWidth,
+        ),
+      );
     });
   }
 
@@ -2356,6 +2537,9 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
         apiKey: _settings.apiKey,
         model: _settings.apiModel,
         apiAppId: _settings.apiAppId,
+        onRetry: (note) {
+          if (mounted) setState(() => _apiNote = note);
+        },
       );
     } on Object catch (error) {
       _stopApiElapsed();
@@ -2383,7 +2567,7 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
     _showMessage(
       unchanged == regions.length
           ? '翻译完成：${regions.length} 块，但译文与原文一致'
-              '（模型可能没按「1. 」编号返回，换模型或检查返回格式）'
+                '（模型可能没按「1. 」编号返回，换模型或检查返回格式）'
           : '翻译完成：${regions.length} 个文字块',
     );
   }
@@ -2408,7 +2592,10 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
       return png;
     }
     final imageRect = displayedImageRect(
-        box.size, decoded.width.toDouble(), decoded.height.toDouble());
+      box.size,
+      decoded.width.toDouble(),
+      decoded.height.toDouble(),
+    );
     if (imageRect.width < 1 || imageRect.height < 1) return png;
 
     final codec = await ui.instantiateImageCodec(png);
@@ -2423,9 +2610,10 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
       Offset.zero & imageRect.size,
       Paint()..filterQuality = FilterQuality.medium,
     );
-    final cropped = await recorder
-        .endRecording()
-        .toImage(imageRect.width.round(), imageRect.height.round());
+    final cropped = await recorder.endRecording().toImage(
+      imageRect.width.round(),
+      imageRect.height.round(),
+    );
     full.dispose();
     final data = await cropped.toByteData(format: ui.ImageByteFormat.png);
     cropped.dispose();
@@ -2521,7 +2709,10 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
 
   void _showMessage(String message, {int seconds = 3}) {
     ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(content: Text(message), duration: Duration(seconds: seconds)),
+      SnackBar(
+        content: Text(message),
+        duration: Duration(seconds: seconds),
+      ),
     );
   }
 
@@ -2537,8 +2728,9 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
     // Preferred path: the runner shows the snapshot as a transient floating
     // card (out of the tiling layout) and hides the editor window. The
     // drawing history lives on this State, untouched, until 继续编辑.
-    final pinFile =
-        File('${Directory.systemTemp.path}/screenshot_tool_pin.png');
+    final pinFile = File(
+      '${Directory.systemTemp.path}/screenshot_tool_pin.png',
+    );
     try {
       await pinFile.writeAsBytes(png);
     } on IOException {
@@ -2599,8 +2791,10 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
           children: [
             Icon(icon, size: 14, color: Colors.white),
             const SizedBox(width: 4),
-            Text(label,
-                style: const TextStyle(color: Colors.white, fontSize: 12)),
+            Text(
+              label,
+              style: const TextStyle(color: Colors.white, fontSize: 12),
+            ),
           ],
         ),
       ),
@@ -2744,11 +2938,11 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
   }
 
   Rect _normalizedRect(Offset first, Offset second) => Rect.fromLTRB(
-        math.min(first.dx, second.dx),
-        math.min(first.dy, second.dy),
-        math.max(first.dx, second.dx),
-        math.max(first.dy, second.dy),
-      );
+    math.min(first.dx, second.dx),
+    math.min(first.dy, second.dy),
+    math.max(first.dx, second.dx),
+    math.max(first.dy, second.dy),
+  );
 
   DrawCommand? _buildPreviewCommand() {
     final start = _dragStart;
@@ -2765,8 +2959,9 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
       path: _dragPath ?? Path(),
       rect: _normalizedRect(start, end),
       color: currentColor,
-      strokeWidth:
-          currentTool == ScreenshotToolType.eraser ? eraserSize : strokeWidth,
+      strokeWidth: currentTool == ScreenshotToolType.eraser
+          ? eraserSize
+          : strokeWidth,
       fillColor: maskColor,
     );
   }
@@ -2831,8 +3026,9 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
         _movingOriginalCommand != null &&
         _movingStartPosition != null) {
       final delta = details.localPosition - _movingStartPosition!;
-      history[_editingCommandIndex!] =
-          _movingOriginalCommand!.translated(delta);
+      history[_editingCommandIndex!] = _movingOriginalCommand!.translated(
+        delta,
+      );
       setState(() {});
       _invalidateCommands();
       return;
@@ -2889,8 +3085,9 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
         rect: rect,
         color: currentColor,
         // 橡皮痕迹的宽度 = 橡皮粗细（像素擦除的扫宽）。
-        strokeWidth:
-            currentTool == ScreenshotToolType.eraser ? eraserSize : strokeWidth,
+        strokeWidth: currentTool == ScreenshotToolType.eraser
+            ? eraserSize
+            : strokeWidth,
         fillColor: maskColor,
       );
       if (currentTool != ScreenshotToolType.brush &&
