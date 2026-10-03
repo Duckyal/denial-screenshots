@@ -84,6 +84,51 @@ String? _discoverXDisplay() {
   }
 }
 
+/// 把纯文本写入系统剪贴板（识字结果复制用）。
+///
+/// 与 PNG 走同一批命令：wl-copy（声明 text/plain）优先，失败后退回 xclip。
+Future<bool> copyTextToClipboard(String text) async {
+  if (text.isEmpty) {
+    _log('empty text, nothing to copy');
+    return false;
+  }
+  _log('copy text ${text.length} chars');
+  final environment = _childEnvironment();
+  final bytes = utf8.encode(text);
+  for (final command in <List<String>>[
+    <String>['wl-copy', '--type', 'text/plain'],
+    <String>['wl-copy'],
+    <String>['xclip', '-selection', 'clipboard', '-t', 'text/plain', '-i'],
+  ]) {
+    try {
+      final process = await Process.start(
+        command.first,
+        command.skip(1).toList(growable: false),
+        environment: environment,
+      );
+      final errors = process.stderr
+          .transform(utf8.decoder)
+          .join()
+          .catchError((Object _) => '');
+      process.stdin.add(bytes);
+      await process.stdin.close();
+      final code = await process.exitCode.timeout(
+        const Duration(seconds: 5),
+        onTimeout: () => -1,
+      );
+      final message = await errors.timeout(
+        const Duration(seconds: 1),
+        onTimeout: () => '',
+      );
+      _log('  ${command.join(' ')} -> exit=$code stderr=${message.trim()}');
+      if (code == 0) return true;
+    } on Object catch (error) {
+      _log('  ${command.join(' ')} -> error=$error');
+    }
+  }
+  return false;
+}
+
 /// 把 PNG 写入系统剪贴板。
 ///
 /// wl-copy 优先（多种参数写法都试一遍，兼容不同版本的 wl-clipboard），

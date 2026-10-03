@@ -924,6 +924,8 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
       divider(),
       dockButton(Icons.undo, '撤销 (Ctrl+Z)', _undo),
       dockButton(Icons.redo, '重做 (Ctrl+Shift+Z)', _redo),
+      dockButton(Icons.text_snippet, '识字（识别并复制图中文字）', _recognize,
+          active: _translating),
       dockButton(Icons.translate, '翻译', _translate, active: _translating),
       dockButton(Icons.push_pin, '置顶显示', _toggleToolbarPin),
       dockButton(Icons.check, '保存 (Enter)', _save),
@@ -1916,6 +1918,106 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
     });
   }
 
+  /// 识字：只跑 OCR，把图里认到的文字列出来，方便直接复制走。
+  Future<void> _recognize() async {
+    if (_translating) return;
+    _setTranslateStatus('正在识别文字…');
+    try {
+      final png = await _renderPinSnapshot();
+      if (png == null) {
+        _showMessage('生成快照失败，无法识别');
+        return;
+      }
+      final inputFile =
+          File('${Directory.systemTemp.path}/screenshot_tool_ocr.png');
+      await inputFile.writeAsBytes(png);
+
+      final regions = <TranslateRegion>[];
+      await for (final event in _translateService.run(
+        imagePath: inputFile.path,
+        target: _resolveTranslateTarget(),
+        mode: 'ocr',
+      )) {
+        if (!mounted) return;
+        if (event.type == 'status') {
+          _setTranslateStatus(event.message ?? '');
+        } else if (event.type == 'region' && event.region != null) {
+          regions.add(event.region!);
+        } else if (event.type == 'error') {
+          _showMessage('识别失败：${event.message ?? ''}');
+          return;
+        }
+      }
+      if (!mounted) return;
+      if (regions.isEmpty) {
+        _showMessage('未识别到文字');
+        return;
+      }
+      // 按视觉阅读顺序：先上下（同一行的容差按块高的一半），再左右。
+      regions.sort((a, b) {
+        final tolerance = math.min(a.rect.height, b.rect.height) * 0.5;
+        if ((a.rect.top - b.rect.top).abs() > tolerance) {
+          return a.rect.top.compareTo(b.rect.top);
+        }
+        return a.rect.left.compareTo(b.rect.left);
+      });
+      await _showRecognizedText(
+        regions.map((region) => region.source).join('\n'),
+      );
+    } on Object catch (error) {
+      _showMessage('识别出错：$error');
+    } finally {
+      if (mounted) setState(() => _translating = false);
+    }
+  }
+
+  /// 识字结果：可编辑的文本框 + 复制按钮（走 wl-copy / xclip，不依赖
+  /// Flutter 的剪贴板通道）。
+  Future<void> _showRecognizedText(String text) async {
+    final controller = TextEditingController(text: text);
+    await showDialog<void>(
+      context: context,
+      builder: (dialogContext) {
+        return AlertDialog(
+          title: const Text('识别到的文字'),
+          content: SizedBox(
+            width: 420,
+            child: TextField(
+              controller: controller,
+              maxLines: 14,
+              style: const TextStyle(fontSize: 13),
+              decoration: const InputDecoration(
+                border: OutlineInputBorder(),
+                isDense: true,
+              ),
+            ),
+          ),
+          actions: <Widget>[
+            TextButton(
+              onPressed: () => Navigator.of(dialogContext).pop(),
+              child: const Text('关闭'),
+            ),
+            TextButton(
+              onPressed: () async {
+                final ok = await copyTextToClipboard(controller.text);
+                if (!dialogContext.mounted) return;
+                ScaffoldMessenger.of(dialogContext).showSnackBar(
+                  SnackBar(
+                    content: Text(
+                      ok ? '已复制到剪贴板' : '复制失败，详见 $clipboardLogPath',
+                    ),
+                    duration: const Duration(seconds: 2),
+                  ),
+                );
+              },
+              child: const Text('复制'),
+            ),
+          ],
+        );
+      },
+    );
+  }
+
   /// 翻译：快照 → sidecar OCR+翻译 → 每个文字块生成蒙版+译文两条命令。
   /// 依赖未就绪时先弹安装向导（在线装一次，之后离线）。
   Future<void> _translate() async {
@@ -1994,7 +2096,14 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
   void _applyTranslateRegion(TranslateRegion region) {
     final box = _canvasKey.currentContext?.findRenderObject() as RenderBox?;
     final decoded = _decodedImage;
-    if (box == null || !box.hasSize || decoded == null) return;
+    if (box == null || !box.hasSize || decoded == null) {
+      // 以前这里是静默 return：API 调了、钱花了，画布却毫无变化。至少留个提示。
+      debugPrint(
+        '[translate] apply skipped: hasBox=${box?.hasSize} hasImage=${decoded != null}',
+      );
+      _showMessage('译文无法落回画布：画布尚未就绪，请重试');
+      return;
+    }
     final imageRect = displayedImageRect(
       box.size,
       decoded.width.toDouble(),
@@ -2002,23 +2111,45 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
     );
     final onCanvas = region.rect.shift(imageRect.topLeft);
 
-    // 蒙版略大于文字块，彻底盖住原文；译文太长则缩小字号塞回块内。
-    final maskRect = onCanvas.inflate(2);
-    var fontStroke = (onCanvas.height / 5).clamp(3.0, 40.0);
-    final textSpan = TextPainter(
-      text: TextSpan(
-        text: region.translated,
-        style: TextStyle(
-          fontSize: fontStroke * 4,
-          fontWeight: FontWeight.bold,
-        ),
-      ),
-      textDirection: TextDirection.ltr,
-    )..layout();
-    if (textSpan.width > maskRect.width - 4 && textSpan.width > 0) {
-      fontStroke = (fontStroke * (maskRect.width - 4) / textSpan.width)
-          .clamp(2.0, fontStroke);
+    // 蒙版略大于文字块，彻底盖住原文。
+    final baseMask = onCanvas.inflate(2);
+    const padding = 4.0;
+    final maxTextWidth = math.max(12.0, baseMask.width - padding * 2);
+    final maxTextHeight = math.max(12.0, baseMask.height - padding);
+
+    // 先按块高估一个字号，装不下就在蒙版宽度内换行、逐级缩小；中译英这种
+    // 变长的情况靠这两步消化。
+    TextPainter layout(double size) => TextPainter(
+          text: TextSpan(
+            text: region.translated,
+            style: TextStyle(
+              fontSize: size,
+              fontWeight: FontWeight.bold,
+            ),
+          ),
+          textDirection: TextDirection.ltr,
+        )..layout(maxWidth: maxTextWidth);
+
+    var fontSize = (onCanvas.height * 0.6).clamp(9.0, 40.0);
+    var painter = layout(fontSize);
+    var attempts = 0;
+    while (painter.height > maxTextHeight && fontSize > 7 && attempts < 12) {
+      fontSize = (fontSize * 0.86).clamp(7.0, 40.0);
+      painter = layout(fontSize);
+      attempts++;
     }
+
+    // 缩到最小仍塞不下：把蒙版撑高，保证文字永远在蒙版里（不越界压到别的字）。
+    var maskRect = baseMask;
+    if (painter.height > maxTextHeight) {
+      maskRect = Rect.fromLTWH(
+        baseMask.left,
+        baseMask.top,
+        baseMask.width,
+        painter.height + padding * 2,
+      );
+    }
+    final fontStroke = fontSize / 4;
 
     setState(() {
       _pushCommand(DrawCommand(
@@ -2038,6 +2169,7 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
         rect: onCanvas,
         color: _settings.translateTextColorValue,
         strokeWidth: fontStroke,
+        textMaxWidth: maxTextWidth,
       ));
     });
   }
@@ -2154,7 +2286,12 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
       model: _settings.apiModel,
       apiAppId: _settings.apiAppId,
     );
+    var unchanged = 0;
     for (var i = 0; i < regions.length; i++) {
+      final source = regions[i].source.trim();
+      final result = translated[i].trim();
+      if (result.isEmpty || result == source) unchanged++;
+      debugPrint('[translate] "$source" -> "$result"');
       _applyTranslateRegion(
         TranslateRegion(
           rect: regions[i].rect,
@@ -2165,7 +2302,12 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
         ),
       );
     }
-    _showMessage('翻译完成：${regions.length} 个文字块');
+    _showMessage(
+      unchanged == regions.length
+          ? '翻译完成：${regions.length} 块，但译文与原文一致'
+              '（模型可能没按「1. 」编号返回，换模型或检查返回格式）'
+          : '翻译完成：${regions.length} 个文字块',
+    );
   }
 
   Future<Uint8List?> _renderCanvas() async {

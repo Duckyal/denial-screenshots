@@ -472,14 +472,32 @@ class TranslateService {
       if (content == null || content.trim().isEmpty) {
         throw Exception('API 返回为空');
       }
-      final pattern = RegExp(r'^\s*(\d+)[.、)\]]\s*(.*)$');
+      // 有些模型会把结果包在 markdown 代码块里，或不用「1. 」这种编号。
+      // 先剥围栏，再按编号对齐；编号解析不出来时按行顺序兜底，避免整批
+      // 退回原文（表现为「调了 API 但画布没变化」）。
+      final lines = content
+          .replaceAll(RegExp(r'```[A-Za-z0-9]*'), '')
+          .split('\n')
+          .map((line) => line.trim())
+          .where((line) => line.isNotEmpty)
+          .toList();
+      final pattern = RegExp(r'^\s*(\d+)\s*[.、)\]:：]\s*(.*)$');
       final translated = List<String>.filled(texts.length, '');
-      for (final line in content.split('\n')) {
+      final unmatched = <String>[];
+      for (final line in lines) {
         final match = pattern.firstMatch(line);
-        if (match == null) continue;
-        final index = int.tryParse(match.group(1)!);
-        if (index == null || index < 1 || index > texts.length) continue;
-        translated[index - 1] = match.group(2)!.trim();
+        final index = match == null ? null : int.tryParse(match.group(1)!);
+        if (index == null || index < 1 || index > texts.length) {
+          unmatched.add(line);
+          continue;
+        }
+        translated[index - 1] = match!.group(2)!.trim();
+      }
+      var cursor = 0;
+      for (var i = 0; i < translated.length && cursor < unmatched.length; i++) {
+        if (translated[i].isEmpty) {
+          translated[i] = unmatched[cursor++];
+        }
       }
       return [
         for (var i = 0; i < texts.length; i++)

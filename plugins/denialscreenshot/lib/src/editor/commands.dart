@@ -60,18 +60,24 @@ class DrawCommand {
   final double strokeWidth;
   final Color fillColor;
 
+  /// 文字排版的换行宽度（翻译落回画布时按蒙版宽度收紧，避免译文超出蒙版）。
+  /// 默认不限宽，即手绘文字仍是一行。
+  final double textMaxWidth;
+
   /// 文字命令的排版缓存。绘制与命中测试都用它，避免每帧重新 layout；
   /// 字号（strokeWidth * 4）或颜色变化时自动失效。
   TextPainter? _textLayout;
   double? _textLayoutFontSize;
   Color? _textLayoutColor;
+  double? _textLayoutMaxWidth;
 
   TextPainter textLayout() {
     final fontSize = strokeWidth * 4;
     final cached = _textLayout;
     if (cached != null &&
         _textLayoutFontSize == fontSize &&
-        _textLayoutColor == color) {
+        _textLayoutColor == color &&
+        _textLayoutMaxWidth == textMaxWidth) {
       return cached;
     }
     final painter = TextPainter(
@@ -84,10 +90,11 @@ class DrawCommand {
         ),
       ),
       textDirection: TextDirection.ltr,
-    )..layout();
+    )..layout(maxWidth: textMaxWidth);
     _textLayout = painter;
     _textLayoutFontSize = fontSize;
     _textLayoutColor = color;
+    _textLayoutMaxWidth = textMaxWidth;
     return painter;
   }
 
@@ -101,6 +108,7 @@ class DrawCommand {
     this.color = const Color(0xffff0000),
     this.strokeWidth = 3,
     this.fillColor = const Color(0xffffffff),
+    this.textMaxWidth = double.infinity,
   });
 
   DrawCommand translated(Offset delta) {
@@ -114,6 +122,7 @@ class DrawCommand {
       color: color,
       strokeWidth: strokeWidth,
       fillColor: fillColor,
+      textMaxWidth: textMaxWidth,
     );
   }
 
