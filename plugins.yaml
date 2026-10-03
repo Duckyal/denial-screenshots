@@ -1,4 +1,4 @@
 schema: 1
 plugins:
-  - git: https://github.com/denialwm/denial-plugins.git
+  - git: https://github.com/Duckyal/denial-screenshots.git
     path: plugins/denialscreenshot
