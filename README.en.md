@@ -6,6 +6,8 @@ implemented as a Denial plugin per the
 
 English | [简体中文](README.md)
 
+> Porting this to other desktops? See [docs/PORTING.md](docs/PORTING.md) — multi-desktop plan (on hold).
+
 ## What it is
 
 Capture, region selection, PNG encoding and clipboard publishing are all done by

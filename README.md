@@ -5,6 +5,8 @@ QQ 风格截图标注工具，按 [denial-plugins](https://github.com/denialwm/d
 
 [English](README.en.md) | 简体中文
 
+> 想把它搬到别的桌面？见 [docs/PORTING.md](docs/PORTING.md)：多桌面适配计划（暂缓实施）。
+
 ## 这是什么
 
 捕获、区域选择、写 PNG、发布剪贴板全部由合成器 `deniald` 完成；
