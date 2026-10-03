@@ -99,6 +99,39 @@ denialctl ui activate /home/wu/.local/state/denial/plugins/candidates/<CANDIDATE
 | `Delete` / `Backspace` | 删除选中图形 |
 | `Esc` | 关闭编辑器 |
 
+## 配置翻译 API
+
+翻译有两条链路：**本地模型**（RapidOCR + Argos sidecar）和**在线 API**。用在线 API 时：
+
+1. 编辑器工具栏 → 齿轮「设置」→ 翻译接口选「在线翻译 API」。
+2. 翻译协议选一个（默认 OpenAI 兼容）：
+
+| 协议 | 要填的字段 | 说明 |
+|---|---|---|
+| OpenAI 兼容 | 地址 / 密钥 / 模型名 | DeepSeek、OpenAI、Moonshot、本地 Ollama 等都走这条；**模型名必填** |
+| 百度翻译 | APP ID / 密钥 | 在 fanyi-api.baidu.com 免费申请 |
+| DeepL | 密钥 | `…:fx` 结尾的是免费版 |
+| LibreTranslate | 地址 / 密钥（可留空） | 自建或公共实例 |
+
+3. 地址会自动补全：填 `https://api.deepseek.com` → 实际请求 `https://api.deepseek.com/v1/chat/completions`；地址里已含 `/v1` 就只补 `/chat/completions`；已经写全 `.../chat/completions` 则原样使用。
+4. 点「**测试连接**」——它会真的翻译一句 `Hello, world`，把译文或报错直接显示在按钮下方。**推荐先用它确认配置，不用先去截图。**
+
+想先单独验证后端，可以用 curl：
+
+```sh
+curl https://api.deepseek.com/chat/completions \
+  -H "Authorization: Bearer sk-你的key" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"deepseek-chat","temperature":0,"messages":[{"role":"user","content":"1. hello"}]}'
+```
+
+注意事项：
+
+- **翻译前先要 OCR**（本地 sidecar）。首次使用会自动安装 `rapidocr-onnxruntime` 等依赖并下载模型，头一次可能要几分钟。想快一点就先手动装：
+  `pip install rapidocr-onnxruntime ctranslate2 sentencepiece pillow -i https://pypi.tuna.tsinghua.edu.cn/simple`
+- 配置保存在 `~/.config/denial-screenshots/settings.json`（`apiType` / `apiEndpoint` / `apiKey` / `apiModel` / `apiAppId`），改完重启编辑器生效。
+- 翻译**不写日志**，成功或失败都只在编辑器底部的提示条里显示一次（失败信息含 HTTP 状态码和返回体）。
+
 ## 依赖
 
 | 用途 | 依赖 | 说明 |

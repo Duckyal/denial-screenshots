@@ -104,6 +104,39 @@ to the packaged build); no rebuild is needed.
 | `Delete` / `Backspace` | Delete the selected shape |
 | `Esc` | Close the editor |
 
+## Configuring the translation API
+
+Translation has two paths: **local models** (RapidOCR + Argos sidecar) and an **online API**. To use an online API:
+
+1. Editor toolbar → gear "Settings" → set Translation backend to "Online translation API".
+2. Pick a protocol (defaults to OpenAI-compatible):
+
+| Protocol | Fields | Notes |
+|---|---|---|
+| OpenAI-compatible | Endpoint / Key / Model | DeepSeek, OpenAI, Moonshot, local Ollama…; **model name is required** |
+| Baidu | APP ID / Key | Free tier at fanyi-api.baidu.com |
+| DeepL | Key | Keys ending in `…:fx` are the free tier |
+| LibreTranslate | Endpoint / Key (optional) | Self-hosted or public instance |
+
+3. The endpoint is completed automatically: `https://api.deepseek.com` → requests `https://api.deepseek.com/v1/chat/completions`; if the URL already contains `/v1`, only `/chat/completions` is appended; a full `.../chat/completions` URL is used as-is.
+4. Press **"Test connection"** — it actually translates `Hello, world` and shows the result or the error right below the button. **Use this to validate your config before taking any screenshot.**
+
+To validate the backend on its own first:
+
+```sh
+curl https://api.deepseek.com/chat/completions \
+  -H "Authorization: Bearer sk-your-key" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"deepseek-chat","temperature":0,"messages":[{"role":"user","content":"1. hello"}]}'
+```
+
+Notes:
+
+- **OCR runs before translation** (local sidecar). The first run installs `rapidocr-onnxruntime` and friends and downloads the model — expect a few minutes. To speed it up, pre-install:
+  `pip install rapidocr-onnxruntime ctranslate2 sentencepiece pillow -i https://pypi.tuna.tsinghua.edu.cn/simple`
+- Config lives in `~/.config/denial-screenshots/settings.json` (`apiType` / `apiEndpoint` / `apiKey` / `apiModel` / `apiAppId`); restart the editor after editing it by hand.
+- Translation **writes no log**; success and failure appear once in the editor's bottom snackbar (failures include the HTTP status and response body).
+
 ## Dependencies
 
 | Purpose | Requirement | Notes |

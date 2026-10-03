@@ -1479,6 +1479,8 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
   Future<void> _openSettings() async {
     var settings = _settings;
     var capturingAction = '';
+    var apiTesting = false;
+    var apiTestResult = '';
     final captureFocusNode = FocusNode();
     _settingsDialogOpen = true;
     await showDialog<void>(
@@ -1663,6 +1665,18 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
                             ),
                           ),
                           if (settings.translateBackend == 'api') ...[
+                            group(
+                              '翻译协议',
+                              settings.apiType,
+                              const [
+                                ('openai', 'OpenAI 兼容（DeepSeek / OpenAI / Ollama…）'),
+                                ('baidu', '百度翻译'),
+                                ('deepl', 'DeepL'),
+                                ('libre', 'LibreTranslate'),
+                              ],
+                              (value) =>
+                                  apply(settings.copyWith(apiType: value)),
+                            ),
                             if (settings.apiType == 'openai') ...[
                               apiField(
                                 'API 地址',
@@ -1730,6 +1744,52 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
                                 obscure: true,
                               ),
                             ],
+                            Padding(
+                              padding: const EdgeInsets.only(top: 8),
+                              child: OutlinedButton(
+                                onPressed: apiTesting
+                                    ? null
+                                    : () async {
+                                        setDialogState(() {
+                                          apiTesting = true;
+                                          apiTestResult = '正在测试…';
+                                        });
+                                        try {
+                                          final result = await _translateService
+                                              .translateViaApi(
+                                            texts: const ['Hello, world'],
+                                            target: _resolveTranslateTarget(),
+                                            apiType: settings.apiType,
+                                            endpoint: settings.apiEndpoint,
+                                            apiKey: settings.apiKey,
+                                            model: settings.apiModel,
+                                            apiAppId: settings.apiAppId,
+                                          );
+                                          setDialogState(() {
+                                            apiTesting = false;
+                                            apiTestResult =
+                                                '可用：Hello, world → ${result.first}';
+                                          });
+                                        } on Object catch (error) {
+                                          setDialogState(() {
+                                            apiTesting = false;
+                                            apiTestResult = '失败：$error';
+                                          });
+                                        }
+                                      },
+                                child: Text(apiTesting ? '测试中…' : '测试连接'),
+                              ),
+                            ),
+                            if (apiTestResult.isNotEmpty)
+                              Padding(
+                                padding: const EdgeInsets.only(top: 6),
+                                child: Text(
+                                  apiTestResult,
+                                  style: const TextStyle(fontSize: 12),
+                                  maxLines: 4,
+                                  overflow: TextOverflow.ellipsis,
+                                ),
+                              ),
                           ],
                           if (settings.translateBackend == 'local')
                             Padding(
