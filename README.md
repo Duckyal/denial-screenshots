@@ -113,7 +113,8 @@ denialctl ui activate /home/wu/.local/state/denial/plugins/candidates/<CANDIDATE
 | DeepL | 密钥 | `…:fx` 结尾的是免费版 |
 | LibreTranslate | 地址 / 密钥（可留空） | 自建或公共实例 |
 
-3. 地址会自动补全：填 `https://api.deepseek.com` → 实际请求 `https://api.deepseek.com/v1/chat/completions`；地址里已含 `/v1` 就只补 `/chat/completions`；已经写全 `.../chat/completions` 则原样使用。
+3. 地址会自动补全：填 `https://api.deepseek.com` → 实际请求 `https://api.deepseek.com/v1/chat/completions`；地址已带版本段（`/v1`、智谱的 `/v4`…）就只补 `/chat/completions`；已经写全 `.../chat/completions` 则原样使用。
+   例：智谱填 `https://open.bigmodel.cn/api/paas/v4` + 模型 `GLM-4.7-Flash` 即可。`
 4. 点「**测试连接**」——它会真的翻译一句 `Hello, world`，把译文或报错直接显示在按钮下方。**推荐先用它确认配置，不用先去截图。**
 
 想先单独验证后端，可以用 curl：

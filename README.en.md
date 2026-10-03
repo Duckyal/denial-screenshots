@@ -118,7 +118,8 @@ Translation has two paths: **local models** (RapidOCR + Argos sidecar) and an **
 | DeepL | Key | Keys ending in `…:fx` are the free tier |
 | LibreTranslate | Endpoint / Key (optional) | Self-hosted or public instance |
 
-3. The endpoint is completed automatically: `https://api.deepseek.com` → requests `https://api.deepseek.com/v1/chat/completions`; if the URL already contains `/v1`, only `/chat/completions` is appended; a full `.../chat/completions` URL is used as-is.
+3. The endpoint is completed automatically: `https://api.deepseek.com` → requests `https://api.deepseek.com/v1/chat/completions`; if the URL already ends with a version segment (`/v1`, Zhipu's `/v4`, …) only `/chat/completions` is appended; a full `.../chat/completions` URL is used as-is.
+   Example: Zhipu — endpoint `https://open.bigmodel.cn/api/paas/v4`, model `GLM-4.7-Flash`.
 4. Press **"Test connection"** — it actually translates `Hello, world` and shows the result or the error right below the button. **Use this to validate your config before taking any screenshot.**
 
 To validate the backend on its own first:

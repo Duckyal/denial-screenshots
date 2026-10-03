@@ -425,7 +425,10 @@ class TranslateService {
     }
     var url = endpoint.trim().replaceAll(RegExp(r'/+$'), '');
     if (!url.contains('chat/completions')) {
-      url = Uri.parse(url).path.contains('/v1')
+      // 路径已经带版本段（DeepSeek 的 /v1、智谱的 /v4…）就只补
+      // chat/completions，否则按 OpenAI 默认补 /v1/chat/completions。
+      final path = Uri.parse(url).path;
+      url = path.contains('/v1') || RegExp(r'/v\d+$').hasMatch(path)
           ? '$url/chat/completions'
           : '$url/v1/chat/completions';
     }
