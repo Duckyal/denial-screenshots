@@ -34,11 +34,12 @@ which is what you look for in **Settings → Shortcuts → Denial actions**.
 | Area | Details |
 |---|---|
 | Tools | Select, brush, line, arrow, rectangle, circle, text, mosaic, eraser |
-| Editing | Undo / redo, select an existing shape to recolor or resize it, delete selection |
+| Editing | Undo / redo, select an existing shape to recolor or resize it, delete selection; in cursor mode **double-click a text to edit it in place** (clearing it deletes the text) |
 | Toolbar | Dockable at `auto` / `left` / `right` / `top` / `bottom`; `Tab` collapses or reveals it |
 | Output | Save / save-as (file picker), copy PNG to clipboard; the copy button shows its state (copying / copied / failed) with icon and color, and by default closes the editor after a successful copy (toggle in settings) |
 | Pin | Turn the annotated snapshot into a small draggable card, keep editing or close it |
 | OCR + translation | Local RapidOCR + Argos sidecar, or any OpenAI-compatible API; the result is painted back over the original text |
+| Visible progress | Both OCR and translation show a status overlay: OCR reports "elapsed Ns / N blocks found", translation reports "elapsed Ns · model", and failures name the actual cause (timeout, unreachable, 401/429, out of credit…) |
 | Auto-open | Watches the screenshot directory and opens the editor as soon as a new capture lands |
 | Settings | Shortcuts, toolbar dock, close-after-copy, translation backend and API are configurable and persisted |
 
@@ -119,8 +120,16 @@ Translation has two paths: **local models** (RapidOCR + Argos sidecar) and an **
 | LibreTranslate | Endpoint / Key (optional) | Self-hosted or public instance |
 
 3. The endpoint is completed automatically: `https://api.deepseek.com` → requests `https://api.deepseek.com/v1/chat/completions`; if the URL already ends with a version segment (`/v1`, Zhipu's `/v4`, …) only `/chat/completions` is appended; a full `.../chat/completions` URL is used as-is.
-   Example: Zhipu — endpoint `https://open.bigmodel.cn/api/paas/v4`, model `GLM-4.7-Flash`.
-4. Press **"Test connection"** — it actually translates `Hello, world` and shows the result or the error right below the button. **Use this to validate your config before taking any screenshot.**
+   Example: Zhipu — endpoint `https://open.bigmodel.cn/api/paas/v4`, model `glm-4-flash`.
+4. Below the model field there are **preset chips** (guessed from the endpoint: Zhipu / DeepSeek / SiliconFlow / Moonshot / Qwen / OpenAI). Click one to fill it in instead of typing the model name by hand.
+5. Press **"Test connection"** — it actually translates `Hello, world` and shows the result (with the round-trip time) or the error right below the button. **Use this to validate your config before taking any screenshot.**
+
+What happens during an API call:
+
+- 10s connect timeout, 60s response timeout; a timeout says so instead of spinning forever.
+- 429 / 5xx are retried twice with backoff (2s, 4s) and the overlay says "rate limited, retrying in Ns".
+- Failures quote the server's own reason, e.g. `translation failed (HTTP 429 · rate limited or out of credit): your account has reached the rate limit`.
+- Zhipu endpoints get `thinking: disabled` automatically — otherwise reasoning models like GLM-4.6/4.7 spend tens of seconds on a translation.
 
 To validate the backend on its own first:
 
@@ -136,7 +145,8 @@ Notes:
 - **OCR runs before translation** (local sidecar). The first run installs `rapidocr-onnxruntime` and friends and downloads the model — expect a few minutes. To speed it up, pre-install:
   `pip install rapidocr-onnxruntime ctranslate2 sentencepiece pillow -i https://pypi.tuna.tsinghua.edu.cn/simple`
 - Config lives in `~/.config/denial-screenshots/settings.json` (`apiType` / `apiEndpoint` / `apiKey` / `apiModel` / `apiAppId`); restart the editor after editing it by hand.
-- Translation **writes no log**; success and failure appear once in the editor's bottom snackbar (failures include the HTTP status and response body).
+- Translation **writes no log**; success and failure appear once in the editor's bottom snackbar (failures include the HTTP status and the server's reason).
+- While translating, the overlay refreshes every second with the elapsed time and model name; while recognizing text it shows elapsed time and the number of blocks found, so you can tell "working" from "stuck".
 
 ## Dependencies
 
