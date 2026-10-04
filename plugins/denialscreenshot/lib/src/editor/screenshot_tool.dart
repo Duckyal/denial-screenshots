@@ -56,6 +56,9 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
   final FocusNode _textFocusNode = FocusNode();
   final GlobalKey _canvasKey = GlobalKey();
   bool _showTextDialog = false;
+
+  /// 弹窗改的是哪条文字命令（null = 新建）。
+  int? _editingTextIndex;
   Offset _textDialogPosition = Offset.zero;
 
   /// 弹窗是窗口坐标定位的 UI，而 [_textDialogPosition] 是 world 坐标
@@ -536,6 +539,11 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
                                           },
                                           cursor: _canvasCursor,
                                           child: GestureDetector(
+                                            // 光标模式下双击文字就地改字。
+                                            onDoubleTapDown: (details) =>
+                                                _onCanvasDoubleTap(
+                                              details.localPosition,
+                                            ),
                                             onPanStart: _onPanStart,
                                             onPanUpdate: _onPanUpdate,
                                             onPanEnd: _onPanEnd,
@@ -721,10 +729,12 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
                     controller: _textController,
                     focusNode: _textFocusNode,
                     style: const TextStyle(fontSize: 13),
-                    decoration: const InputDecoration(
+                    decoration: InputDecoration(
                       isDense: true,
-                      border: OutlineInputBorder(),
-                      hintText: '输入文字，回车确认',
+                      border: const OutlineInputBorder(),
+                      hintText: _editingTextIndex == null
+                          ? '输入文字，回车确认'
+                          : '修改文字，回车确认（清空即删除）',
                       contentPadding: EdgeInsets.symmetric(
                         horizontal: 8,
                         vertical: 8,
@@ -867,7 +877,7 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
     );
 
     const tools = [
-      (ScreenshotToolType.select, Icons.near_me, '光标'),
+      (ScreenshotToolType.select, Icons.near_me, '光标（双击文字可修改）'),
       (ScreenshotToolType.brush, Icons.brush, '画笔'),
       (ScreenshotToolType.line, Icons.straighten, '直线'),
       (ScreenshotToolType.arrow, Icons.arrow_forward, '箭头'),
@@ -2906,6 +2916,7 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
   }
 
   void _openTextDialog(Offset position) {
+    _editingTextIndex = null;
     _textDialogPosition = position;
     final box = _canvasKey.currentContext?.findRenderObject() as RenderBox?;
     _textDialogWindowAnchor = box?.localToGlobal(position) ?? position;
@@ -2921,18 +2932,83 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
     _ffi.showTextDialog(position.dx.toInt(), position.dy.toInt());
   }
 
-  /// 确认输入（弹窗确定按钮 / 回车）。
+  /// 确认输入（弹窗确定按钮 / 回车）：新建或改掉已有文字。
   void _confirmTextInput() {
-    if (_textController.text.isNotEmpty) {
-      _addText(_textController.text);
-      _ffi.inputText(_textController.text);
+    final value = _textController.text;
+    final editing = _editingTextIndex;
+    if (editing != null && editing < history.length) {
+      if (value.trim().isEmpty) {
+        // 清空内容等于删掉这条文字，省得留一个看不见的空命令。
+        _eraseCommandAt(editing);
+      } else {
+        _updateTextCommand(editing, value);
+      }
+    } else if (value.isNotEmpty) {
+      _addText(value);
+      _ffi.inputText(value);
     }
     _hideTextDialog();
+  }
+
+  /// 改掉已有文字：保持原位置、原颜色、原字号，只换内容和包围框。
+  void _updateTextCommand(int index, String text) {
+    final old = history[index];
+    final painter = TextPainter(
+      text: TextSpan(
+        text: text,
+        style: TextStyle(
+          color: old.color,
+          fontSize: old.strokeWidth * 4,
+          fontWeight: FontWeight.bold,
+        ),
+      ),
+      textDirection: TextDirection.ltr,
+    )..layout(maxWidth: old.textMaxWidth);
+    setState(() {
+      _undoSnapshots.add(List<DrawCommand>.from(history));
+      _redoSnapshots.clear();
+      history[index] = old.copyWith(
+        text: text,
+        rect: Rect.fromLTWH(
+          old.rect.left,
+          old.rect.top,
+          painter.width,
+          painter.height,
+        ),
+      );
+      _invalidateCommands();
+    });
+  }
+
+  /// 光标模式双击：命中文字就就地改字（弹窗预填原文，可直接覆盖）。
+  Future<void> _onCanvasDoubleTap(Offset position) async {
+    if (currentTool != ScreenshotToolType.select) return;
+    final index = findManipulableCommandIndex(history, position);
+    if (index == null) return;
+    final command = history[index];
+    if (command.type != ScreenshotToolType.text) {
+      _showMessage('这个对象不能改文字：拖动可移动，Delete 可删除');
+      return;
+    }
+    _editingTextIndex = index;
+    _textDialogPosition = command.start;
+    final box = _canvasKey.currentContext?.findRenderObject() as RenderBox?;
+    _textDialogWindowAnchor =
+        box?.localToGlobal(command.start) ?? command.start;
+    _textController.text = command.text;
+    _textController.selection = TextSelection(
+      baseOffset: 0,
+      extentOffset: command.text.length,
+    );
+    setState(() => _showTextDialog = true);
+    await Future<void>.delayed(Duration.zero);
+    if (mounted) _textFocusNode.requestFocus();
   }
 
   void _hideTextDialog() {
     setState(() {
       _showTextDialog = false;
+      _editingTextIndex = null;
     });
     _ffi.hideTextDialog();
   }

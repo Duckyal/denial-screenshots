@@ -126,23 +126,26 @@ class DrawCommand {
     );
   }
 
-  /// 光标模式下编辑选中对象的外观（颜色/粗细/蒙版填充色/包围框）。
+  /// 光标模式下编辑选中对象（文字内容 / 颜色 / 粗细 / 蒙版填充色 / 包围框）。
   DrawCommand copyWith({
     Color? color,
     double? strokeWidth,
     Color? fillColor,
     Rect? rect,
+    String? text,
   }) {
     return DrawCommand(
       type: type,
       start: start,
       end: end,
       path: path,
-      text: text,
+      text: text ?? this.text,
       rect: rect ?? this.rect,
       color: color ?? this.color,
       strokeWidth: strokeWidth ?? this.strokeWidth,
       fillColor: fillColor ?? this.fillColor,
+      // 不带上换行宽度，译文就会在改色/移动后散成一行。
+      textMaxWidth: textMaxWidth,
     );
   }
 }
