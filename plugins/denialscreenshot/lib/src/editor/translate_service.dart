@@ -37,6 +37,15 @@ class ApiTranslateException implements Exception {
 class TranslateService {
   TranslateService();
 
+  /// 常驻 sidecar 进程与请求队列：OCR/翻译只 spawn 一次 Python，模型在
+  /// 进程内复用（onnx 加载是初始识别最耗时的一步）。进程一次只服务一个
+  /// 请求，并发调用按序排队，避免两个请求抢读同一路 stdout。
+  Process? _proc;
+  bool _procAlive = false;
+  final List<String> _lineQueue = <String>[];
+  Completer<String>? _lineWait;
+  Future<void> _serialTail = Future<void>.value();
+
   static const _mirror = 'https://pypi.tuna.tsinghua.edu.cn/simple';
   static const _packages = [
     'rapidocr-onnxruntime',
@@ -114,8 +123,14 @@ class TranslateService {
   static String get venvPython => '$dataDir/venv/bin/python';
   static String get sidecarScript => '$dataDir/sidecar/translate.py';
 
-  /// 依赖是否就绪（venv + sidecar 脚本 + 关键包）。
-  Future<bool> isReady() async {
+  Future<bool>? _readyCache;
+
+  /// 依赖是否就绪（venv + sidecar 脚本 + 关键包）。会话内缓存：每次判定
+  /// 都要跑一个 python -c import 子进程（约 0.5s），进编辑器一上来就看
+  /// 后台 OCR + run 各调一次，缓存能省下这半秒。
+  Future<bool> isReady() => _readyCache ??= _probeReady();
+
+  Future<bool> _probeReady() async {
     if (!await File(venvPython).exists()) return false;
     // 每次都同步部署 sidecar：开发迭代频繁，部署的旧脚本曾导致运行崩溃。
     await deploySidecar();
@@ -146,6 +161,7 @@ class TranslateService {
 
   /// 安装/修复依赖。事件流汇报进度；完成时发出 ready=true。
   Stream<TranslateSetupEvent> install() async* {
+    _readyCache = null;
     try {
       yield const TranslateSetupEvent('status', '创建 Python 环境…');
       final directory = Directory(dataDir);
@@ -251,25 +267,18 @@ class TranslateService {
     if (!await isReady()) {
       throw Exception('翻译组件未安装，请先在设置中安装');
     }
-    final process = await Process.start(venvPython, [sidecarScript]);
-    process.stdin.writeln(
-      jsonEncode({'target': target, 'mode': 'texts', 'texts': texts}),
-    );
-    await process.stdin.close();
+    final events = await _serialized(() async {
+      await _ensureStarted();
+      return _requestEvents({
+        'target': target,
+        'mode': 'texts',
+        'texts': texts,
+      });
+    });
 
     List<(String, bool)>? translations;
     String? errorMessage;
-    final lines = process.stdout
-        .transform(utf8.decoder)
-        .transform(const LineSplitter());
-    await for (final line in lines) {
-      if (line.trim().isEmpty) continue;
-      Map<String, dynamic> event;
-      try {
-        event = jsonDecode(line) as Map<String, dynamic>;
-      } on FormatException {
-        continue;
-      }
+    for (final event in events) {
       switch (event['event']) {
         case 'done':
           translations = [
@@ -285,10 +294,116 @@ class TranslateService {
           onStatus?.call(event['message'] as String? ?? '');
       }
     }
-    await process.exitCode;
     if (errorMessage != null) throw Exception(errorMessage);
     if (translations == null) throw Exception('翻译组件没有返回结果');
     return translations;
+  }
+
+  /// 启动（或在进程退出后重启）常驻 sidecar，并挂上 stdout 逐行分发。
+  Future<void> _ensureStarted() async {
+    if (_procAlive) return;
+    _lineQueue.clear();
+    _lineWait = null;
+    final process = await Process.start(venvPython, [sidecarScript]);
+    _proc = process;
+    _procAlive = true;
+    final lines = process.stdout
+        .transform(utf8.decoder)
+        .transform(const LineSplitter());
+    unawaited(_drainLines(lines, process));
+    unawaited(
+      process.exitCode.whenComplete(() {
+        _procAlive = false;
+        final waiting = _lineWait;
+        if (waiting != null) {
+          _lineWait = null;
+          waiting.complete('{"event":"error","message":"翻译进程已退出"}');
+        }
+      }),
+    );
+  }
+
+  Future<void> _drainLines(Stream<String> lines, Process process) async {
+    try {
+      await for (final line in lines) {
+        final waiting = _lineWait;
+        if (waiting != null) {
+          _lineWait = null;
+          waiting.complete(line);
+        } else {
+          _lineQueue.add(line);
+        }
+      }
+    } on Object {
+      // 进程被结束/崩溃：标记失效，下次请求按需重启。
+    }
+    _procAlive = false;
+  }
+
+  /// 取 sidecar 应答的下一行。请求按序串行，抢读/排队逻辑在此收敛。
+  Future<String> _nextLine() {
+    if (_lineQueue.isNotEmpty) {
+      return Future.value(_lineQueue.removeAt(0));
+    }
+    if (!_procAlive) {
+      return Future.value('{"event":"error","message":"翻译进程已退出"}');
+    }
+    final completer = Completer<String>();
+    _lineWait = completer;
+    return completer.future;
+  }
+
+  /// 常驻进程一次只服务一个请求：把并发调用按序排队，避免两个请求抢读
+  /// 同一条 stdout。
+  Future<T> _serialized<T>(Future<T> Function() action) {
+    final run = _serialTail.then((_) => action());
+    _serialTail = run.then((_) {}, onError: (Object _) {});
+    return run;
+  }
+
+  /// 向常驻进程发送一个 JSON 请求，收齐本次响应行（读到 done/error 停）。
+  Future<List<Map<String, dynamic>>> _requestEvents(
+    Map<String, dynamic> request,
+  ) async {
+    final process = _proc;
+    if (process == null || !_procAlive) {
+      throw Exception('翻译进程不可用');
+    }
+    process.stdin.writeln(jsonEncode(request));
+    await process.stdin.flush();
+    final events = <Map<String, dynamic>>[];
+    while (true) {
+      final line = await _nextLine();
+      if (line.trim().isEmpty) continue;
+      Map<String, dynamic> event;
+      try {
+        final decoded = jsonDecode(line);
+        if (decoded is! Map) continue;
+        event = decoded.cast<String, dynamic>();
+      } on FormatException {
+        continue;
+      }
+      events.add(event);
+      if (event['event'] == 'done' || event['event'] == 'error') break;
+    }
+    return events;
+  }
+
+  /// 释放常驻翻译进程（编辑器关闭时调用）。
+  void dispose() {
+    final process = _proc;
+    _proc = null;
+    _procAlive = false;
+    if (process != null) {
+      try {
+        process.stdin
+          ..writeln(jsonEncode({'quit': true}))
+          ..close();
+      } on Object {
+        // 已退出/没有 stdin 属正常。
+      }
+      process.kill();
+    }
   }
 
   /// 运行一次翻译。[imagePath] 传裁剪后的快照，[target] 是目标语言码。
@@ -309,28 +424,17 @@ class TranslateService {
     await tempInput.parent.create(recursive: true);
     await tempInput.writeAsBytes(await File(imagePath).readAsBytes());
 
-    final process = await Process.start(venvPython, [sidecarScript]);
-    process.stdin.writeln(
-      jsonEncode({
+    final events = await _serialized(() async {
+      await _ensureStarted();
+      return _requestEvents({
         'image': tempInput.path,
         'target': target,
         'mode': mode,
         'ocr_model': ocrModel,
-      }),
-    );
-    await process.stdin.close();
+      });
+    });
 
-    final lines = process.stdout
-        .transform(utf8.decoder)
-        .transform(const LineSplitter());
-    await for (final line in lines) {
-      if (line.trim().isEmpty) continue;
-      Map<String, dynamic> event;
-      try {
-        event = jsonDecode(line) as Map<String, dynamic>;
-      } on FormatException {
-        continue;
-      }
+    for (final event in events) {
       final type = event['event'] as String? ?? '';
       if (type == 'region') {
         final rect = (event['rect'] as List).cast<num>();
@@ -379,13 +483,19 @@ class TranslateService {
         );
       }
     }
-    await process.exitCode;
   }
 
   static Future<void> _download(String url, File dest) async {
     final client = HttpClient();
     try {
       final request = await client.getUrl(Uri.parse(url));
+      // ModelScope/HF 对缺少 User-Agent 的请求直接 403；Dart HttpClient 默认
+      // 不发 UA，这里显式伪装成浏览器，否则镜像下载全部失败。
+      request.headers.set(
+        HttpHeaders.userAgentHeader,
+        'Mozilla/5.0 (X11; Linux x86_64) denial-screenshots',
+      );
+      request.followRedirects = true;
       final response = await request.close();
       if (response.statusCode != HttpStatus.ok) {
         throw HttpException('HTTP ${response.statusCode}');

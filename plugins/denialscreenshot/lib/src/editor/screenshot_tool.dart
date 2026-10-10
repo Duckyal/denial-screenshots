@@ -13,6 +13,7 @@ import 'package:flutter/services.dart';
 import '../clipboard.dart';
 import '../editor_bus.dart';
 import '../scroll_capture.dart';
+import 'dialog_style.dart';
 import 'ffi.dart';
 import 'file_picker.dart';
 import 'host_bridge.dart';
@@ -177,6 +178,13 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
   DrawCommand? _movingOriginalCommand;
   Offset? _movingStartPosition;
   int? _selectedCommandIndex;
+
+  /// 当前正在拖拽的缩放手柄；非空表示这次拖动是改大小而不是整体移动。
+  ResizeHandle? _resizeHandle;
+
+  /// world → 屏幕的显示比例，由画布布局阶段刷新，用于把缩放手柄的屏幕
+  /// 像素尺寸换算成 world 单位。
+  double _canvasDisplayScale = 1.0;
   ui.Image? _decodedImage;
 
   /// 文本工具拖拽圈定的文本框（约束换行宽度）；null = 点击创建的单行文本。
@@ -452,6 +460,8 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
     HardwareKeyboard.instance.removeHandler(_handleKeyEvent);
     _scrollCaptureSubscription?.cancel();
     _settingsCaptureFocus.dispose();
+    // 关掉常驻翻译/OCR 进程，避免留下孤儿 python。
+    _translateService.dispose();
     EditorHostBridge.instance.unbindEditor(this);
     _dockRevealTimer?.cancel();
     _ocrElapsedTimer?.cancel();
@@ -696,10 +706,14 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
         return true;
       }
     }
-    // 设置面板打开时：Esc 先关闭设置面板，其余键照常。
+    // 设置面板打开时：Esc 先关闭设置面板（连带模型管理/API 配置浮层），其余键照常。
     if (_settingsOpen) {
       if (event.logicalKey == LogicalKeyboardKey.escape) {
-        setState(() => _settingsOpen = false);
+        setState(() {
+          _settingsOpen = false;
+          _modelManagerOpen = false;
+          _apiConfigOpen = false;
+        });
         return true;
       }
       return false;
@@ -828,6 +842,8 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
               _updateFontFamilyPlacement(placement);
               _updateSettingsPanelPlacement(placement);
               _updateFilePanelPlacement(placement);
+              _updateModelManagerPlacement(placement);
+              _updateApiConfigPlacement(placement);
             });
             return Stack(
               children: [
@@ -853,6 +869,19 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
                           child: LayoutBuilder(
                             builder: (context, constraints) {
                               final viewport = constraints.biggest;
+                              // world → 屏幕的显示比例（FittedBox contain ×
+                              // 用户缩放）：缩放手柄要按屏幕像素保持恒定
+                              // 大小，绘制/命中前用它把像素换算成 world 单位。
+                              if (_worldSize.width > 0 &&
+                                  _worldSize.height > 0 &&
+                                  viewport.width > 0 &&
+                                  viewport.height > 0) {
+                                final fit = math.min(
+                                  viewport.width / _worldSize.width,
+                                  viewport.height / _worldSize.height,
+                                );
+                                _canvasDisplayScale = fit * _canvasZoom;
+                              }
                               return Listener(
                                 behavior: HitTestBehavior.translucent,
                                 onPointerSignal: (event) =>
@@ -908,8 +937,6 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
                                                               _visibleCommands,
                                                           version:
                                                               _commandsVersion,
-                                                          selectedIndex:
-                                                              _selectedCommandIndex,
                                                           backgroundImage:
                                                               _decodedImage,
                                                           annotationImage:
@@ -1013,6 +1040,27 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
                                                     _buildTextSelectOverlay(),
                                               ),
                                             ),
+                                          // 选中对象高亮框 + 缩放手柄：同样
+                                          // 在世界坐标里、但在 RepaintBoundary
+                                          // 之外，保存/置顶不会带上，也不会
+                                          // 因为进光标模式而被烙进图片。
+                                          if (currentTool ==
+                                                  ScreenshotToolType.select &&
+                                              _selectedCommandIndex != null &&
+                                              _selectedCommandIndex! <
+                                                  _visibleCommands.length)
+                                            Positioned.fill(
+                                              child: IgnorePointer(
+                                                child: CustomPaint(
+                                                  painter: SelectionPainter(
+                                                    command:
+                                                        _visibleCommands[_selectedCommandIndex!],
+                                                    handleSize:
+                                                        _resizeHandleWorldSize,
+                                                  ),
+                                                ),
+                                              ),
+                                            ),
                                           // Pointer ring inside the world (scales with it)
                                           // but OUTSIDE the RepaintBoundary so saves and
                                           // pins never contain it.
@@ -1080,6 +1128,10 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
                   _buildSettingsPanelOverlay(dockShown: showToolbar),
                   // 文件面板：锚在打开/保存按钮旁，替代弹窗。
                   _buildFilePanelOverlay(dockShown: showToolbar),
+                  // 本地翻译模型管理：贴着设置面板弹出的三级浮层。
+                  _buildModelManagerOverlay(dockShown: showToolbar),
+                  // 在线翻译 API 配置：同款式贴设置面板的三级浮层。
+                  _buildApiConfigOverlay(dockShown: showToolbar),
                   // 识字和翻译都要显示过程浮层，否则点了像没反应。
                   if (_translating || _recognizing)
                     Positioned(
@@ -1522,6 +1574,9 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
   /// 展开选项行的内容：随工具变化（颜色/粗细/蒙版填充方式）。
   /// 光标模式选中对象时展示该对象的可编辑项。返回 null 表示不展开。
   Widget? _buildOptionsPanelContent() {
+    // 设置/文件面板打开时收起工具二级菜单及其三级面板（调色板/字体），
+    // 一次只跟随一个按钮展开。
+    if (_settingsOpen || _filePanelOpen) return null;
     final editingSelected = _editingSelectedObject;
     if (currentTool == ScreenshotToolType.select && !editingSelected) {
       return null;
@@ -2457,6 +2512,11 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
       showSizeSlider = false;
       _paletteVisible = false;
       _fontFamilyVisible = false;
+      // 一次只跟随一个按钮展开：切工具就收起设置/文件面板。
+      _settingsOpen = false;
+      _filePanelOpen = false;
+      _modelManagerOpen = false;
+      _apiConfigOpen = false;
       _selectedCommandIndex = null;
       // 离开光标模式就把文字选区清掉，别让高亮残留在画笔/形状模式下。
       _resetOcrSelectionState();
@@ -2467,6 +2527,11 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
   /// 光标模式选中对象时，颜色/粗细控件作用于该对象而不是全局工具状态。
   bool get _editingSelectedObject =>
       currentTool == ScreenshotToolType.select && _selectedCommandIndex != null;
+
+  /// 缩放手柄的 world 尺寸：按屏幕约 10px 恒定大小换算，避免大图/缩放后
+  /// 手柄小到抓不住。
+  double get _resizeHandleWorldSize =>
+      10.0 / (_canvasDisplayScale <= 0 ? 1.0 : _canvasDisplayScale);
 
   void _mutateSelected(DrawCommand Function(DrawCommand) mutate) {
     final index = _selectedCommandIndex;
@@ -2691,121 +2756,577 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
     );
   }
 
-  /// 本地语言包管理：列出目录里的候选包，已装的给删除，没装的给下载。
+  /// 打开本地语言包管理浮层：列出目录里的候选包，已装的给删除，没装的给下载。
   Future<void> _showModelManager() async {
+    setState(() {
+      _modelManagerOpen = true;
+      _apiConfigOpen = false;
+    });
     final service = _translateService;
     final installed = <(String, String), bool>{};
     for (final (from, to, _) in TranslateService.packCatalog) {
       installed[(from, to)] = await service.isPackInstalled(from, to);
     }
-    var busyPair = const ('', '');
-    var busyMessage = '';
+    if (mounted) setState(() => _modelInstalled = installed);
+  }
 
-    await showDialog<void>(
-      context: context,
-      builder: (dialogContext) {
-        return StatefulBuilder(
-          builder: (dialogContext, setDialogState) {
-            Future<void> toggle(String from, String to) async {
-              setDialogState(() {
-                busyPair = (from, to);
-                busyMessage = '';
-              });
-              try {
-                if (installed[(from, to)] ?? false) {
-                  await service.deletePack(from, to);
-                  installed[(from, to)] = false;
-                } else {
-                  await service.installPack(
-                    from,
-                    to,
-                    onStatus: (status) =>
-                        setDialogState(() => busyMessage = status),
-                  );
-                  installed[(from, to)] = true;
-                }
-              } on Object catch (error) {
-                setDialogState(() => busyMessage = '$error');
-              }
-              setDialogState(() => busyPair = const ('', ''));
-            }
+  Future<void> _toggleModelPack(String from, String to) async {
+    final service = _translateService;
+    setState(() {
+      _modelBusyPair = (from, to);
+      _modelBusyMessage = '';
+    });
+    try {
+      if (_modelInstalled[(from, to)] ?? false) {
+        await service.deletePack(from, to);
+      } else {
+        await service.installPack(
+          from,
+          to,
+          onStatus: (status) {
+            if (mounted) setState(() => _modelBusyMessage = status);
+          },
+        );
+      }
+      if (mounted) {
+        setState(() {
+          _modelInstalled = {
+            ..._modelInstalled,
+            (from, to): !(_modelInstalled[(from, to)] ?? false),
+          };
+        });
+      }
+    } on Object catch (error) {
+      if (mounted) setState(() => _modelBusyMessage = '$error');
+    }
+    if (mounted) setState(() => _modelBusyPair = const ('', ''));
+  }
 
-            return AlertDialog(
-              title: const Text('本地翻译模型'),
-              content: SizedBox(
-                width: 380,
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
+  /// 模型管理浮层：锚在设置面板旁（右侧放不下就翻到左侧），随设置一起收起。
+  Widget _buildModelManagerOverlay({required bool dockShown}) {
+    final visible = dockShown && _settingsOpen && _modelManagerOpen;
+    if (_modelManagerPanelVisible != visible) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted && _modelManagerPanelVisible != visible) {
+          setState(() => _modelManagerPanelVisible = visible);
+        }
+      });
+    }
+    return Positioned(
+      left: _modelManagerPanelOffset?.dx ?? 0,
+      top: _modelManagerPanelOffset?.dy ?? 0,
+      child: IgnorePointer(
+        ignoring: !visible,
+        child: AnimatedOpacity(
+          opacity: visible ? 1 : 0,
+          duration: const Duration(milliseconds: 120),
+          child: _buildModelManagerPanel(),
+        ),
+      ),
+    );
+  }
+
+  void _updateModelManagerPlacement(
+    ({bool vertical, bool atStart, bool hidden, bool reserved}) placement,
+  ) {
+    if (!mounted) return;
+    final shouldShow =
+        showToolbar &&
+        (!placement.hidden || _dockRevealed) &&
+        _settingsOpen &&
+        _modelManagerOpen;
+    if (!shouldShow) {
+      if (_modelManagerPanelVisible) {
+        setState(() => _modelManagerPanelVisible = false);
+      }
+      return;
+    }
+    final settingsBox =
+        _settingsPanelKey.currentContext?.findRenderObject() as RenderBox?;
+    final panelBox =
+        _modelManagerPanelKey.currentContext?.findRenderObject() as RenderBox?;
+    if (settingsBox == null || !settingsBox.attached || !settingsBox.hasSize) {
+      return;
+    }
+    final origin = settingsBox.localToGlobal(Offset.zero);
+    final panelSize =
+        (panelBox != null && panelBox.attached && panelBox.hasSize)
+        ? panelBox.size
+        : const Size(340, 420);
+    final window = MediaQuery.sizeOf(context);
+    var left = origin.dx + settingsBox.size.width + 6;
+    if (left + panelSize.width > window.width - 8) {
+      left = origin.dx - panelSize.width - 6;
+    }
+    left = left
+        .clamp(8.0, math.max(8.0, window.width - panelSize.width - 8))
+        .toDouble();
+    final top = origin.dy
+        .clamp(8.0, math.max(8.0, window.height - panelSize.height - 8))
+        .toDouble();
+    final next = Offset(left, top);
+    final changed =
+        !_modelManagerPanelVisible ||
+        _modelManagerPanelOffset == null ||
+        (next - _modelManagerPanelOffset!).distance > 0.5;
+    if (changed) {
+      setState(() {
+        _modelManagerPanelOffset = next;
+        _modelManagerPanelVisible = true;
+      });
+    }
+  }
+
+  Widget _buildModelManagerPanel() {
+    return Theme(
+      data: ThemeData.dark(useMaterial3: true),
+      child: DefaultTextStyle.merge(
+        style: const TextStyle(color: Colors.white),
+        child: Container(
+          key: _modelManagerPanelKey,
+          width: 340,
+          constraints: const BoxConstraints(maxHeight: 460),
+          decoration: BoxDecoration(
+            color: Colors.black.withValues(alpha: 0.82),
+            borderRadius: BorderRadius.circular(12),
+            boxShadow: const [
+              BoxShadow(
+                color: Colors.black38,
+                blurRadius: 10,
+                offset: Offset(0, 2),
+              ),
+            ],
+          ),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Padding(
+                padding: const EdgeInsets.fromLTRB(14, 10, 10, 6),
+                child: Row(
                   children: [
-                    if (busyPair != const ('', ''))
-                      Padding(
-                        padding: const EdgeInsets.only(bottom: 8),
-                        child: Row(
-                          children: [
-                            const SizedBox(
-                              width: 14,
-                              height: 14,
-                              child: CircularProgressIndicator(strokeWidth: 2),
-                            ),
-                            const SizedBox(width: 10),
-                            Expanded(
-                              child: Text(
-                                busyMessage,
-                                style: const TextStyle(fontSize: 12),
-                              ),
-                            ),
-                          ],
-                        ),
+                    const Text(
+                      '本地翻译模型',
+                      style: TextStyle(
+                        fontSize: 13,
+                        fontWeight: FontWeight.w600,
                       ),
-                    Flexible(
-                      child: SingleChildScrollView(
-                        child: Column(
-                          mainAxisSize: MainAxisSize.min,
-                          children: [
-                            for (final (from, to, label)
-                                in TranslateService.packCatalog)
-                              ListTile(
-                                dense: true,
-                                visualDensity: VisualDensity.compact,
-                                title: Text(
-                                  label,
-                                  style: const TextStyle(fontSize: 13),
-                                ),
-                                trailing: busyPair == (from, to)
-                                    ? const SizedBox(
-                                        width: 16,
-                                        height: 16,
-                                        child: CircularProgressIndicator(
-                                          strokeWidth: 2,
-                                        ),
-                                      )
-                                    : TextButton(
-                                        onPressed: () => toggle(from, to),
-                                        child: Text(
-                                          installed[(from, to)] ?? false
-                                              ? '删除'
-                                              : '下载',
-                                          style: const TextStyle(fontSize: 12),
-                                        ),
-                                      ),
-                              ),
-                          ],
+                    ),
+                    const Spacer(),
+                    Tooltip(
+                      message: '关闭',
+                      child: GestureDetector(
+                        onTap: () => setState(() => _modelManagerOpen = false),
+                        child: const Icon(
+                          Icons.close,
+                          size: 18,
+                          color: Colors.white70,
                         ),
                       ),
                     ),
                   ],
                 ),
               ),
-              actions: [
-                TextButton(
-                  onPressed: () => Navigator.of(dialogContext).pop(),
-                  child: const Text('完成'),
+              if (_modelBusyPair != const ('', ''))
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(14, 0, 12, 6),
+                  child: Row(
+                    children: [
+                      const SizedBox(
+                        width: 14,
+                        height: 14,
+                        child: CircularProgressIndicator(strokeWidth: 2),
+                      ),
+                      const SizedBox(width: 10),
+                      Expanded(
+                        child: Text(
+                          _modelBusyMessage,
+                          style: const TextStyle(fontSize: 12),
+                        ),
+                      ),
+                    ],
+                  ),
                 ),
-              ],
-            );
-          },
-        );
-      },
+              Flexible(
+                child: SingleChildScrollView(
+                  padding: const EdgeInsets.fromLTRB(8, 0, 8, 10),
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      for (final (from, to, label)
+                          in TranslateService.packCatalog)
+                        ListTile(
+                          dense: true,
+                          visualDensity: VisualDensity.compact,
+                          title: Text(
+                            label,
+                            style: const TextStyle(fontSize: 13),
+                          ),
+                          trailing: _modelBusyPair == (from, to)
+                              ? const SizedBox(
+                                  width: 16,
+                                  height: 16,
+                                  child: CircularProgressIndicator(
+                                    strokeWidth: 2,
+                                  ),
+                                )
+                              : TextButton(
+                                  onPressed: () => _toggleModelPack(from, to),
+                                  child: Text(
+                                    (_modelInstalled[(from, to)] ?? false)
+                                        ? '删除'
+                                        : '下载',
+                                    style: const TextStyle(fontSize: 12),
+                                  ),
+                                ),
+                        ),
+                    ],
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  /// 翻译页里「在线翻译」的当前接口摘要：最近一次改动即本次持久化后的
+  /// 配置，点「配置」按钮进三级面板微调。
+  String _apiTypeLabel(String type) => switch (type) {
+    'openai' => 'OpenAI 兼容',
+    'baidu' => '百度翻译',
+    'deepl' => 'DeepL',
+    'libre' => 'LibreTranslate',
+    _ => type,
+  };
+
+  Widget _apiConfigSummary() {
+    final details = <String>[
+      _apiTypeLabel(_settings.apiType),
+      if (_settings.apiEndpoint.trim().isNotEmpty) _settings.apiEndpoint.trim(),
+      if (_settings.apiModel.trim().isNotEmpty) _settings.apiModel.trim(),
+      if (_settings.apiType == 'baidu' && _settings.apiAppId.trim().isNotEmpty)
+        'APP ID ${_settings.apiAppId.trim()}',
+      _settings.apiKey.trim().isNotEmpty ? '密钥已填' : '密钥未填',
+    ];
+    return Padding(
+      padding: const EdgeInsets.only(top: 6),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Text(
+            '当前接口：${details.join(' · ')}',
+            style: const TextStyle(fontSize: 12, color: Colors.white70),
+          ),
+          if (_apiTestResult.isNotEmpty)
+            Padding(
+              padding: const EdgeInsets.only(top: 2),
+              child: Text(
+                '上次测试：$_apiTestResult',
+                style: const TextStyle(fontSize: 12),
+                maxLines: 2,
+                overflow: TextOverflow.ellipsis,
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+
+  Future<void> _runApiTest() async {
+    if (_apiTesting) return;
+    setState(() {
+      _apiTesting = true;
+      _apiTestResult = '正在测试…';
+    });
+    final sw = Stopwatch()..start();
+    try {
+      final result = await _translateService.translateViaApi(
+        texts: const ['Hello, world'],
+        target: _resolveTranslateTarget(),
+        apiType: _settings.apiType,
+        endpoint: _settings.apiEndpoint,
+        apiKey: _settings.apiKey,
+        model: _settings.apiModel,
+        apiAppId: _settings.apiAppId,
+      );
+      setState(() {
+        _apiTesting = false;
+        _apiTestResult =
+            '可用（${sw.elapsedMilliseconds}ms）：'
+            'Hello, world → ${result.first}';
+      });
+    } on Object catch (error) {
+      setState(() {
+        _apiTesting = false;
+        _apiTestResult = _describeApiError(error);
+      });
+    }
+  }
+
+  /// 在线翻译 API 配置的三级浮层：锚在设置面板旁，样式与模型管理一致。
+  Widget _buildApiConfigOverlay({required bool dockShown}) {
+    final visible =
+        dockShown &&
+        _settingsOpen &&
+        _apiConfigOpen &&
+        _settings.translateBackend == 'api';
+    if (_apiConfigPanelVisible != visible) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted && _apiConfigPanelVisible != visible) {
+          setState(() => _apiConfigPanelVisible = visible);
+        }
+      });
+    }
+    return Positioned(
+      left: _apiConfigPanelOffset?.dx ?? 0,
+      top: _apiConfigPanelOffset?.dy ?? 0,
+      child: IgnorePointer(
+        ignoring: !visible,
+        child: AnimatedOpacity(
+          opacity: visible ? 1 : 0,
+          duration: const Duration(milliseconds: 120),
+          child: _buildApiConfigPanel(),
+        ),
+      ),
+    );
+  }
+
+  void _updateApiConfigPlacement(
+    ({bool vertical, bool atStart, bool hidden, bool reserved}) placement,
+  ) {
+    if (!mounted) return;
+    final shouldShow =
+        showToolbar &&
+        (!placement.hidden || _dockRevealed) &&
+        _settingsOpen &&
+        _apiConfigOpen &&
+        _settings.translateBackend == 'api';
+    if (!shouldShow) {
+      if (_apiConfigPanelVisible) {
+        setState(() => _apiConfigPanelVisible = false);
+      }
+      return;
+    }
+    final settingsBox =
+        _settingsPanelKey.currentContext?.findRenderObject() as RenderBox?;
+    final panelBox =
+        _apiConfigPanelKey.currentContext?.findRenderObject() as RenderBox?;
+    if (settingsBox == null || !settingsBox.attached || !settingsBox.hasSize) {
+      return;
+    }
+    final origin = settingsBox.localToGlobal(Offset.zero);
+    final panelSize =
+        (panelBox != null && panelBox.attached && panelBox.hasSize)
+        ? panelBox.size
+        : const Size(380, 460);
+    final window = MediaQuery.sizeOf(context);
+    var left = origin.dx + settingsBox.size.width + 6;
+    if (left + panelSize.width > window.width - 8) {
+      left = origin.dx - panelSize.width - 6;
+    }
+    left = left
+        .clamp(8.0, math.max(8.0, window.width - panelSize.width - 8))
+        .toDouble();
+    final top = origin.dy
+        .clamp(8.0, math.max(8.0, window.height - panelSize.height - 8))
+        .toDouble();
+    final next = Offset(left, top);
+    final changed =
+        !_apiConfigPanelVisible ||
+        _apiConfigPanelOffset == null ||
+        (next - _apiConfigPanelOffset!).distance > 0.5;
+    if (changed) {
+      setState(() {
+        _apiConfigPanelOffset = next;
+        _apiConfigPanelVisible = true;
+      });
+    }
+  }
+
+  Widget _buildApiConfigPanel() {
+    return Theme(
+      data: ThemeData.dark(useMaterial3: true),
+      child: DefaultTextStyle.merge(
+        style: const TextStyle(color: Colors.white),
+        child: Container(
+          key: _apiConfigPanelKey,
+          width: 380,
+          constraints: const BoxConstraints(maxHeight: 460),
+          padding: const EdgeInsets.fromLTRB(14, 10, 14, 12),
+          decoration: BoxDecoration(
+            color: Colors.black.withValues(alpha: 0.82),
+            borderRadius: BorderRadius.circular(12),
+            boxShadow: const [
+              BoxShadow(
+                color: Colors.black38,
+                blurRadius: 10,
+                offset: Offset(0, 2),
+              ),
+            ],
+          ),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                children: [
+                  const Text(
+                    '翻译 API 配置',
+                    style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600),
+                  ),
+                  const Spacer(),
+                  Tooltip(
+                    message: '关闭',
+                    child: GestureDetector(
+                      onTap: () => setState(() => _apiConfigOpen = false),
+                      child: const Icon(
+                        Icons.close,
+                        size: 18,
+                        color: Colors.white70,
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+              Flexible(
+                child: SingleChildScrollView(
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      _settingsGroup(
+                        '翻译协议',
+                        _settings.apiType,
+                        const [
+                          ('openai', 'OpenAI 兼容（DeepSeek / OpenAI / Ollama…）'),
+                          ('baidu', '百度翻译'),
+                          ('deepl', 'DeepL'),
+                          ('libre', 'LibreTranslate'),
+                        ],
+                        (value) =>
+                            _applySettings(_settings.copyWith(apiType: value)),
+                      ),
+                      if (_settings.apiType == 'openai') ...[
+                        _settingsApiField(
+                          'API 地址',
+                          _settings.apiEndpoint,
+                          'https://api.deepseek.com',
+                          (value) => _applySettings(
+                            _settings.copyWith(apiEndpoint: value),
+                          ),
+                        ),
+                        _settingsApiField(
+                          'API 密钥',
+                          _settings.apiKey,
+                          'sk-…',
+                          (value) =>
+                              _applySettings(_settings.copyWith(apiKey: value)),
+                          obscure: true,
+                        ),
+                        _settingsApiField(
+                          '模型名',
+                          _settings.apiModel,
+                          'deepseek-chat',
+                          (value) => _applySettings(
+                            _settings.copyWith(apiModel: value),
+                          ),
+                        ),
+                        // 模型名写错是最常见的「调了没反应」，按厂商给几个
+                        // 可直接点的预设，省得手抄。
+                        Padding(
+                          padding: const EdgeInsets.only(top: 6),
+                          child: Wrap(
+                            spacing: 6,
+                            runSpacing: 4,
+                            children: [
+                              for (final preset in _modelPresets(
+                                _settings.apiEndpoint,
+                              ))
+                                ActionChip(
+                                  visualDensity: VisualDensity.compact,
+                                  label: Text(
+                                    preset,
+                                    style: const TextStyle(fontSize: 12),
+                                  ),
+                                  onPressed: () => _applySettings(
+                                    _settings.copyWith(apiModel: preset),
+                                  ),
+                                ),
+                            ],
+                          ),
+                        ),
+                      ] else if (_settings.apiType == 'baidu') ...[
+                        _settingsApiField(
+                          'APP ID',
+                          _settings.apiAppId,
+                          '在 fanyi-api.baidu.com 免费申请',
+                          (value) => _applySettings(
+                            _settings.copyWith(apiAppId: value),
+                          ),
+                        ),
+                        _settingsApiField(
+                          '密钥',
+                          _settings.apiKey,
+                          '与 APP ID 配对',
+                          (value) =>
+                              _applySettings(_settings.copyWith(apiKey: value)),
+                          obscure: true,
+                        ),
+                      ] else if (_settings.apiType == 'deepl')
+                        _settingsApiField(
+                          '密钥',
+                          _settings.apiKey,
+                          '…:fx 结尾为免费版',
+                          (value) =>
+                              _applySettings(_settings.copyWith(apiKey: value)),
+                          obscure: true,
+                        )
+                      else ...[
+                        _settingsApiField(
+                          'API 地址',
+                          _settings.apiEndpoint,
+                          'https://libretranslate.example.com',
+                          (value) => _applySettings(
+                            _settings.copyWith(apiEndpoint: value),
+                          ),
+                        ),
+                        _settingsApiField(
+                          'API 密钥',
+                          _settings.apiKey,
+                          '可留空',
+                          (value) =>
+                              _applySettings(_settings.copyWith(apiKey: value)),
+                          obscure: true,
+                        ),
+                      ],
+                      Padding(
+                        padding: const EdgeInsets.only(top: 8),
+                        child: OutlinedButton(
+                          onPressed: _apiTesting ? null : _runApiTest,
+                          child: Text(_apiTesting ? '测试中…' : '测试连接'),
+                        ),
+                      ),
+                      if (_apiTestResult.isNotEmpty)
+                        Padding(
+                          padding: const EdgeInsets.only(top: 6),
+                          child: Text(
+                            _apiTestResult,
+                            style: const TextStyle(fontSize: 12),
+                            maxLines: 4,
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                        ),
+                    ],
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
     );
   }
 
@@ -2843,6 +3364,24 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
   Offset? _filePanelOffset;
   bool _filePanelVisible = false;
   Uint8List? _filePanelPendingBytes;
+
+  /// 本地翻译模型管理：贴着设置面板弹出的三级浮层。
+  bool _modelManagerOpen = false;
+  final GlobalKey _modelManagerPanelKey = GlobalKey();
+  Offset? _modelManagerPanelOffset;
+  bool _modelManagerPanelVisible = false;
+  Map<(String, String), bool> _modelInstalled = const {};
+  (String, String) _modelBusyPair = const ('', '');
+  String _modelBusyMessage = '';
+
+  /// 翻译配色里正在展开主题色网格的行（''=都收起，'mask'/'text'=对应行）。
+  String _settingsColorGridOpen = '';
+
+  /// 在线翻译 API 配置：与本地模型管理同款式，贴着设置面板弹出的三级浮层。
+  bool _apiConfigOpen = false;
+  final GlobalKey _apiConfigPanelKey = GlobalKey();
+  Offset? _apiConfigPanelOffset;
+  bool _apiConfigPanelVisible = false;
 
   /// 画布缩放（Alt+滚轮）：1.0 = 刚进编辑器的 contain 尺寸，只能放大；
   /// 普通滚轮在放大后平移画面。换图时复位。
@@ -3001,6 +3540,9 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
       _filePanelSave = false;
       _filePanelPendingBytes = null;
       _filePanelOpen = true;
+      _settingsOpen = false;
+      _modelManagerOpen = false;
+      _apiConfigOpen = false;
     });
   }
 
@@ -3012,6 +3554,9 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
       _filePanelSave = true;
       _filePanelPendingBytes = png;
       _filePanelOpen = true;
+      _settingsOpen = false;
+      _modelManagerOpen = false;
+      _apiConfigOpen = false;
     });
   }
 
@@ -3184,6 +3729,10 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
       _settingsTab = 'general';
       _paletteVisible = false;
       _fontFamilyVisible = false;
+      _filePanelOpen = false;
+      _modelManagerOpen = false;
+      _apiConfigOpen = false;
+      _settingsColorGridOpen = '';
     });
     unawaited(_refreshOcrInstalled());
     WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -3212,7 +3761,11 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
       if (capturing) {
         setState(() => _settingsCapturingAction = '');
       } else {
-        setState(() => _settingsOpen = false);
+        setState(() {
+          _settingsOpen = false;
+          _modelManagerOpen = false;
+          _apiConfigOpen = false;
+        });
       }
       return KeyEventResult.handled;
     }
@@ -3245,59 +3798,69 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
       'ocr' => _buildSettingsOcrTab(),
       _ => _buildSettingsGeneralTab(),
     };
-    // 面板底色与工具栏一致；套暗色 Theme 让开关/单选/输入框可读。
+    // 面板底色与工具栏一致；套暗色 Theme 让开关/单选/输入框可读。编辑器
+    // 外层是浅色 MaterialApp，光靠 Theme 改不掉 Text 的 DefaultTextStyle
+    // （分组标题、色板标签等无显式颜色的文字会继承浅色主题的深色，落在黑
+    // 底面板上几乎看不见），所以再显式压一层浅色 DefaultTextStyle。
     return Theme(
       data: ThemeData.dark(useMaterial3: true),
-      child: Focus(
-        focusNode: _settingsCaptureFocus,
-        onKeyEvent: _settingsKeyEvent,
-        child: Container(
-          key: _settingsPanelKey,
-          width: 380,
-          decoration: BoxDecoration(
-            color: Colors.black.withValues(alpha: 0.82),
-            borderRadius: BorderRadius.circular(12),
-            boxShadow: const [
-              BoxShadow(
-                color: Colors.black38,
-                blurRadius: 10,
-                offset: Offset(0, 2),
-              ),
-            ],
-          ),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Flexible(
-                child: SingleChildScrollView(
-                  padding: const EdgeInsets.fromLTRB(14, 10, 14, 4),
-                  child: content,
+      child: DefaultTextStyle.merge(
+        style: const TextStyle(color: Colors.white),
+        child: Focus(
+          focusNode: _settingsCaptureFocus,
+          onKeyEvent: _settingsKeyEvent,
+          child: Container(
+            key: _settingsPanelKey,
+            width: 380,
+            decoration: BoxDecoration(
+              color: Colors.black.withValues(alpha: 0.82),
+              borderRadius: BorderRadius.circular(12),
+              boxShadow: const [
+                BoxShadow(
+                  color: Colors.black38,
+                  blurRadius: 10,
+                  offset: Offset(0, 2),
                 ),
-              ),
-              const Divider(height: 10, color: Colors.white24),
-              Padding(
-                padding: const EdgeInsets.fromLTRB(10, 0, 10, 10),
-                child: Row(
-                  children: [
-                    for (final (key, label) in tabs)
-                      _settingsTabButton(key, label),
-                    const Spacer(),
-                    Tooltip(
-                      message: '关闭设置',
-                      child: GestureDetector(
-                        onTap: () => setState(() => _settingsOpen = false),
-                        child: const Icon(
-                          Icons.close,
-                          size: 18,
-                          color: Colors.white70,
+              ],
+            ),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Flexible(
+                  child: SingleChildScrollView(
+                    padding: const EdgeInsets.fromLTRB(14, 10, 14, 4),
+                    child: content,
+                  ),
+                ),
+                const Divider(height: 10, color: Colors.white24),
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(10, 0, 10, 10),
+                  child: Row(
+                    children: [
+                      for (final (key, label) in tabs)
+                        _settingsTabButton(key, label),
+                      const Spacer(),
+                      Tooltip(
+                        message: '关闭设置',
+                        child: GestureDetector(
+                          onTap: () => setState(() {
+                            _settingsOpen = false;
+                            _modelManagerOpen = false;
+                            _apiConfigOpen = false;
+                          }),
+                          child: const Icon(
+                            Icons.close,
+                            size: 18,
+                            color: Colors.white70,
+                          ),
                         ),
                       ),
-                    ),
-                  ],
+                    ],
+                  ),
                 ),
-              ),
-            ],
+              ],
+            ),
           ),
         ),
       ),
@@ -3307,7 +3870,13 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
   Widget _settingsTabButton(String key, String label) {
     final selected = _settingsTab == key;
     return GestureDetector(
-      onTap: () => setState(() => _settingsTab = key),
+      onTap: () => setState(() {
+        _settingsTab = key;
+        // 模型管理/API 配置/配色网格是翻译页的三级浮层，离开翻译页即收起。
+        _modelManagerOpen = false;
+        _apiConfigOpen = false;
+        _settingsColorGridOpen = '';
+      }),
       child: Container(
         height: 30,
         alignment: Alignment.center,
@@ -3375,138 +3944,22 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
           '翻译接口',
           _settings.translateBackend,
           const [('api', '在线翻译 API'), ('local', '本地模型')],
-          (value) =>
-              _applySettings(_settings.copyWith(translateBackend: value)),
+          (value) {
+            // 只展开当前方式对应的三级浮层，另一侧的一起收起。
+            if (value == 'local') _apiConfigOpen = false;
+            if (value == 'api') _modelManagerOpen = false;
+            return _applySettings(_settings.copyWith(translateBackend: value));
+          },
         ),
         if (_settings.translateBackend == 'api') ...[
-          _settingsGroup('翻译协议', _settings.apiType, const [
-            ('openai', 'OpenAI 兼容（DeepSeek / OpenAI / Ollama…）'),
-            ('baidu', '百度翻译'),
-            ('deepl', 'DeepL'),
-            ('libre', 'LibreTranslate'),
-          ], (value) => _applySettings(_settings.copyWith(apiType: value))),
-          if (_settings.apiType == 'openai') ...[
-            _settingsApiField(
-              'API 地址',
-              _settings.apiEndpoint,
-              'https://api.deepseek.com',
-              (value) => _applySettings(_settings.copyWith(apiEndpoint: value)),
-            ),
-            _settingsApiField(
-              'API 密钥',
-              _settings.apiKey,
-              'sk-…',
-              (value) => _applySettings(_settings.copyWith(apiKey: value)),
-              obscure: true,
-            ),
-            _settingsApiField(
-              '模型名',
-              _settings.apiModel,
-              'deepseek-chat',
-              (value) => _applySettings(_settings.copyWith(apiModel: value)),
-            ),
-            // 模型名写错是最常见的「调了没反应」，按厂商给几个可直接点的
-            // 预设，省得手抄。
-            Padding(
-              padding: const EdgeInsets.only(top: 6),
-              child: Wrap(
-                spacing: 6,
-                runSpacing: 4,
-                children: [
-                  for (final preset in _modelPresets(_settings.apiEndpoint))
-                    ActionChip(
-                      visualDensity: VisualDensity.compact,
-                      label: Text(preset, style: const TextStyle(fontSize: 12)),
-                      onPressed: () =>
-                          _applySettings(_settings.copyWith(apiModel: preset)),
-                    ),
-                ],
-              ),
-            ),
-          ] else if (_settings.apiType == 'baidu') ...[
-            _settingsApiField(
-              'APP ID',
-              _settings.apiAppId,
-              '在 fanyi-api.baidu.com 免费申请',
-              (value) => _applySettings(_settings.copyWith(apiAppId: value)),
-            ),
-            _settingsApiField(
-              '密钥',
-              _settings.apiKey,
-              '与 APP ID 配对',
-              (value) => _applySettings(_settings.copyWith(apiKey: value)),
-              obscure: true,
-            ),
-          ] else if (_settings.apiType == 'deepl')
-            _settingsApiField(
-              '密钥',
-              _settings.apiKey,
-              '…:fx 结尾为免费版',
-              (value) => _applySettings(_settings.copyWith(apiKey: value)),
-              obscure: true,
-            )
-          else ...[
-            _settingsApiField(
-              'API 地址',
-              _settings.apiEndpoint,
-              'https://libretranslate.example.com',
-              (value) => _applySettings(_settings.copyWith(apiEndpoint: value)),
-            ),
-            _settingsApiField(
-              'API 密钥',
-              _settings.apiKey,
-              '可留空',
-              (value) => _applySettings(_settings.copyWith(apiKey: value)),
-              obscure: true,
-            ),
-          ],
+          _apiConfigSummary(),
           Padding(
             padding: const EdgeInsets.only(top: 8),
             child: OutlinedButton(
-              onPressed: _apiTesting
-                  ? null
-                  : () async {
-                      setState(() {
-                        _apiTesting = true;
-                        _apiTestResult = '正在测试…';
-                      });
-                      final sw = Stopwatch()..start();
-                      try {
-                        final result = await _translateService.translateViaApi(
-                          texts: const ['Hello, world'],
-                          target: _resolveTranslateTarget(),
-                          apiType: _settings.apiType,
-                          endpoint: _settings.apiEndpoint,
-                          apiKey: _settings.apiKey,
-                          model: _settings.apiModel,
-                          apiAppId: _settings.apiAppId,
-                        );
-                        setState(() {
-                          _apiTesting = false;
-                          _apiTestResult =
-                              '可用（${sw.elapsedMilliseconds}ms）：'
-                              'Hello, world → ${result.first}';
-                        });
-                      } on Object catch (error) {
-                        setState(() {
-                          _apiTesting = false;
-                          _apiTestResult = _describeApiError(error);
-                        });
-                      }
-                    },
-              child: Text(_apiTesting ? '测试中…' : '测试连接'),
+              onPressed: () => setState(() => _apiConfigOpen = true),
+              child: const Text('配置在线翻译 API'),
             ),
           ),
-          if (_apiTestResult.isNotEmpty)
-            Padding(
-              padding: const EdgeInsets.only(top: 6),
-              child: Text(
-                _apiTestResult,
-                style: const TextStyle(fontSize: 12),
-                maxLines: 4,
-                overflow: TextOverflow.ellipsis,
-              ),
-            ),
         ],
         if (_settings.translateBackend == 'local')
           Padding(
@@ -3539,12 +3992,15 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
           (value) =>
               _applySettings(_settings.copyWith(translateMaskMode: value)),
         ),
-        colorRow(
-          '蒙版颜色',
-          _settings.translateMaskColor,
-          (value) =>
-              _applySettings(_settings.copyWith(translateMaskColor: value)),
-        ),
+        if (_settings.translateMaskMode == 'solid')
+          colorRow(
+            '蒙版颜色',
+            _settings.translateMaskColor,
+            (value) =>
+                _applySettings(_settings.copyWith(translateMaskColor: value)),
+            gridKey: 'mask',
+            indent: true,
+          ),
         _settingsGroup(
           '文字颜色模式',
           _settings.translateTextColorMode,
@@ -3558,6 +4014,8 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
             _settings.translateTextColor,
             (value) =>
                 _applySettings(_settings.copyWith(translateTextColor: value)),
+            gridKey: 'text',
+            indent: true,
           ),
       ],
     );
@@ -3759,8 +4217,21 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
     );
   }
 
-  /// 翻译配色的色板行：一圈圆形色块，点选即应用。
-  Widget colorRow(String label, String current, ValueChanged<String> onPick) {
+  /// 颜色值转 RRGGBB 十六进制（大写）。
+  static String _hexFromColor(Color color) => (color.toARGB32() & 0xFFFFFF)
+      .toRadixString(16)
+      .padLeft(6, '0')
+      .toUpperCase();
+
+  /// 翻译配色的色板行：常用色块 + 「更多颜色」按钮，点按钮在下方内联展开
+  /// 主题色网格（与工具栏调色板同一套色）。
+  Widget colorRow(
+    String label,
+    String current,
+    ValueChanged<String> onPick, {
+    required String gridKey,
+    bool indent = false,
+  }) {
     const options = [
       ('FFFFFF', '白'),
       ('000000', '黑'),
@@ -3769,37 +4240,160 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
       ('EF5350', '红'),
       ('66BB6A', '绿'),
     ];
+    final gridOpen = _settingsColorGridOpen == gridKey;
+    final customColor = ScreenshotSettings.colorValueFromHex(
+      current,
+      0xFF000000,
+    );
+    final isCustom = !options.any((option) => option.$1 == current);
     return Padding(
-      padding: const EdgeInsets.only(top: 6),
-      child: Row(
+      padding: EdgeInsets.only(top: 6, left: indent ? 16 : 0),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        mainAxisSize: MainAxisSize.min,
         children: [
-          Text(
-            label,
-            style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600),
-          ),
-          const SizedBox(width: 12),
-          for (final (hex, _) in options)
-            GestureDetector(
-              onTap: () => onPick(hex),
-              child: Container(
+          Row(
+            children: [
+              Text(
+                label,
+                style: const TextStyle(
+                  fontSize: 13,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+              const SizedBox(width: 12),
+              for (final (hex, _) in options)
+                GestureDetector(
+                  onTap: () => onPick(hex),
+                  child: Container(
+                    width: 24,
+                    height: 24,
+                    margin: const EdgeInsets.only(right: 6),
+                    decoration: BoxDecoration(
+                      color: ScreenshotSettings.colorValueFromHex(
+                        hex,
+                        0xFF000000,
+                      ),
+                      shape: BoxShape.circle,
+                      border: Border.all(
+                        color: current == hex
+                            ? Colors.blue
+                            : Colors.black.withValues(alpha: 0.25),
+                        width: current == hex ? 2.5 : 1,
+                      ),
+                    ),
+                  ),
+                ),
+              // 当前颜色（可能是主题网格里选的任意色）。
+              Container(
                 width: 24,
                 height: 24,
                 margin: const EdgeInsets.only(right: 6),
                 decoration: BoxDecoration(
-                  color: ScreenshotSettings.colorValueFromHex(hex, 0xFF000000),
+                  color: customColor,
                   shape: BoxShape.circle,
                   border: Border.all(
-                    color: current == hex
+                    color: isCustom
                         ? Colors.blue
                         : Colors.black.withValues(alpha: 0.25),
-                    width: current == hex ? 2.5 : 1,
+                    width: isCustom ? 2.5 : 1,
                   ),
                 ),
               ),
+              GestureDetector(
+                onTap: () => setState(
+                  () => _settingsColorGridOpen = gridOpen ? '' : gridKey,
+                ),
+                child: Container(
+                  width: 24,
+                  height: 24,
+                  margin: const EdgeInsets.only(right: 6),
+                  decoration: BoxDecoration(
+                    color: gridOpen
+                        ? Colors.blue.withValues(alpha: 0.6)
+                        : Colors.white.withValues(alpha: 0.06),
+                    shape: BoxShape.circle,
+                    border: Border.all(color: Colors.white38),
+                  ),
+                  child: Icon(
+                    gridOpen ? Icons.expand_less : Icons.palette,
+                    size: 15,
+                    color: Colors.white70,
+                  ),
+                ),
+              ),
+            ],
+          ),
+          if (gridOpen)
+            Padding(
+              padding: const EdgeInsets.only(top: 6, right: 6),
+              child: _settingsColorGrid(onPick),
             ),
         ],
       ),
     );
+  }
+
+  /// 设置面板里内联展开的主题色网格：最近使用 + 灰阶/色相阶梯。
+  Widget _settingsColorGrid(ValueChanged<String> onPick) {
+    Widget cell(Color color) => _SwatchCell(
+      color: color,
+      onTap: () => _pickSettingsColor(color, onPick),
+    );
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        if (_recentPaletteColors.isNotEmpty) ...[
+          const Padding(
+            padding: EdgeInsets.only(bottom: 3),
+            child: Text(
+              '最近使用',
+              style: TextStyle(fontSize: 11, color: Colors.white60),
+            ),
+          ),
+          Wrap(
+            children: [for (final color in _recentPaletteColors) cell(color)],
+          ),
+          const SizedBox(height: 4),
+        ],
+        const Padding(
+          padding: EdgeInsets.only(bottom: 3),
+          child: Text(
+            '主题颜色',
+            style: TextStyle(fontSize: 11, color: Colors.white60),
+          ),
+        ),
+        for (var i = 0; i < _paletteLightness.length; i++)
+          Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              cell(HSLColor.fromAHSL(1, 0, 0, _paletteLightness[i]).toColor()),
+              for (final hue in _paletteHues)
+                cell(
+                  HSLColor.fromAHSL(
+                    1,
+                    hue,
+                    0.72,
+                    _paletteLightness[i],
+                  ).toColor(),
+                ),
+            ],
+          ),
+      ],
+    );
+  }
+
+  /// 选中设置面板色网格里的颜色：记录最近使用并写回设置。
+  void _pickSettingsColor(Color color, ValueChanged<String> onPick) {
+    _recentPaletteColors
+      ..remove(color)
+      ..insert(0, color);
+    if (_recentPaletteColors.length > 8) {
+      _recentPaletteColors.removeRange(8, _recentPaletteColors.length);
+    }
+    onPick(_hexFromColor(color));
+    setState(() => _settingsColorGridOpen = '');
   }
 
   /// 关闭编辑器：结束本次会话（窗口退出）。
@@ -4560,37 +5154,41 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
                 setDialogState(() => installing = false);
               },
             );
-            return AlertDialog(
-              title: const Text('安装翻译组件'),
-              content: SizedBox(
-                width: 360,
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(message, style: const TextStyle(fontSize: 13)),
-                    const SizedBox(height: 12),
-                    LinearProgressIndicator(value: installing ? null : 1),
-                    const SizedBox(height: 8),
-                    Text(
-                      '首次安装需要联网下载 OCR 与翻译模型'
-                      '（约 150MB，走国内镜像），之后完全离线运行。',
-                      style: TextStyle(
-                        fontSize: 11,
-                        color: Theme.of(dialogContext).hintColor,
+            return editorDialogTheme(
+              child: AlertDialog(
+                backgroundColor: editorDialogBackground,
+                shape: editorDialogShape,
+                title: const Text('安装翻译组件'),
+                content: SizedBox(
+                  width: 360,
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(message, style: const TextStyle(fontSize: 13)),
+                      const SizedBox(height: 12),
+                      LinearProgressIndicator(value: installing ? null : 1),
+                      const SizedBox(height: 8),
+                      Text(
+                        '首次安装需要联网下载 OCR 与翻译模型'
+                        '（约 150MB，走国内镜像），之后完全离线运行。',
+                        style: const TextStyle(
+                          fontSize: 11,
+                          color: Colors.white60,
+                        ),
                       ),
-                    ),
-                  ],
+                    ],
+                  ),
                 ),
+                actions: [
+                  TextButton(
+                    onPressed: installing
+                        ? null
+                        : () => Navigator.of(dialogContext).pop(),
+                    child: Text(ready ? '开始翻译' : '关闭'),
+                  ),
+                ],
               ),
-              actions: [
-                TextButton(
-                  onPressed: installing
-                      ? null
-                      : () => Navigator.of(dialogContext).pop(),
-                  child: Text(ready ? '开始翻译' : '关闭'),
-                ),
-              ],
             );
           },
         );
@@ -5203,6 +5801,38 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
     return findManipulableCommandIndex(history, position);
   }
 
+  /// 按手柄把原对象改成新大小：直线/箭头换端点，盒子对象换包围框并同步
+  /// start/end；文字连文本框一起改（框内字号自适应缩小），自由文字拖完
+  /// 也升级成文本框，避免字号不变、视觉范围不跟着走。
+  DrawCommand _resizeCommand(
+    DrawCommand original,
+    ResizeHandle handle,
+    Offset position,
+  ) {
+    if (handle == ResizeHandle.lineStart || handle == ResizeHandle.lineEnd) {
+      final start = handle == ResizeHandle.lineStart
+          ? position
+          : original.start;
+      final end = handle == ResizeHandle.lineEnd ? position : original.end;
+      return original.resized(
+        start: start,
+        end: end,
+        rect: _normalizedRect(start, end),
+      );
+    }
+    final bounds = resizeBounds(
+      commandDisplayBounds(original),
+      handle,
+      position,
+    );
+    return original.resized(
+      rect: bounds,
+      start: bounds.topLeft,
+      end: bounds.bottomRight,
+      textBox: original.type == ScreenshotToolType.text ? bounds : null,
+    );
+  }
+
   /// 纯点击（按下后未滑过 pan 位移阈值就抬起）：橡皮点删对象/擦一个小点，
   /// 光标点选或取消选中，画笔点个圆点。拖动场景 pan 已接手，直接跳过。
   void _onCanvasTapUp(Offset position) {
@@ -5278,6 +5908,26 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
       return;
     }
     if (currentTool == ScreenshotToolType.select) {
+      // 若已选中对象且按在缩放手柄上，则进入改大小（不改变选中项）。
+      final selected = _selectedCommandIndex;
+      if (selected != null && selected < history.length) {
+        final handle = hitTestCommandHandle(
+          history[selected],
+          position,
+          _resizeHandleWorldSize,
+        );
+        if (handle != null) {
+          _editingCommandIndex = selected;
+          _movingOriginalCommand = history[selected];
+          _movingStartPosition = position;
+          _resizeHandle = handle;
+          _dragStart = null;
+          _dragEnd = null;
+          _dragPath = null;
+          setState(() {});
+          return;
+        }
+      }
       // 光标模式：点谁选中谁（内部空白也能抓住），按住拖动即移动；
       // 点空白取消选中。选中后可用 Delete 删除。
       final target = findManipulableCommandIndex(history, position);
@@ -5286,6 +5936,7 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
         _editingCommandIndex = target;
         _movingOriginalCommand = history[target];
         _movingStartPosition = position;
+        _resizeHandle = null;
         _dragStart = null;
         _dragEnd = null;
         _dragPath = null;
@@ -5303,6 +5954,7 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
     _editingCommandIndex = null;
     _movingOriginalCommand = null;
     _movingStartPosition = null;
+    _resizeHandle = null;
     // 橡皮的增量擦除从头一点开始累积（其它工具用不到，空转无害）。
     _pendingEraseSegment = Path()..moveTo(position.dx, position.dy);
     _eraseTail = position;
@@ -5314,10 +5966,20 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
     if (_editingCommandIndex != null &&
         _movingOriginalCommand != null &&
         _movingStartPosition != null) {
+      final index = _editingCommandIndex!;
+      final handle = _resizeHandle;
+      if (handle != null) {
+        history[index] = _resizeCommand(
+          _movingOriginalCommand!,
+          handle,
+          details.localPosition,
+        );
+        setState(() {});
+        _invalidateCommands();
+        return;
+      }
       final delta = details.localPosition - _movingStartPosition!;
-      history[_editingCommandIndex!] = _movingOriginalCommand!.translated(
-        delta,
-      );
+      history[index] = _movingOriginalCommand!.translated(delta);
       setState(() {});
       _invalidateCommands();
       return;
@@ -5373,6 +6035,7 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
       _editingCommandIndex = null;
       _movingOriginalCommand = null;
       _movingStartPosition = null;
+      _resizeHandle = null;
     });
   }
 
@@ -5386,6 +6049,7 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
         _editingCommandIndex = null;
         _movingOriginalCommand = null;
         _movingStartPosition = null;
+        _resizeHandle = null;
       });
       // 移动期间位图停更，松手后按最终位置重烘。
       _invalidateCommands();

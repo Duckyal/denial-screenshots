@@ -524,17 +524,22 @@ class _PinnedImageCard extends StatelessWidget {
     // 尺寸恒按图片比例锁定；首次渲染（高度未定）用 contain 由图片撑出
     // 自然高度，尺寸定下后用 cover 铺满，万一有亚像素误差也只会裁掉
     // 半个像素，绝不会露出底色条。
-    final content = ColoredBox(
-      color: _backdrop,
-      child: Image.memory(
-        image.bytes,
-        key: contentKey,
-        fit: height == null ? BoxFit.contain : BoxFit.cover,
-        filterQuality: FilterQuality.high,
-        errorBuilder: (context, error, stackTrace) => const SizedBox(
-          width: 160,
-          height: 120,
-          child: Icon(Icons.broken_image_outlined, color: Colors.white38),
+    // 圆角裁剪：浮动卡直接盖在桌面上，方角很突兀；这里把图片与深色底一起
+    // 裁圆角（贴纸卡本就圆角），四角透出下面的桌面。
+    final content = ClipRRect(
+      borderRadius: BorderRadius.circular(10),
+      child: ColoredBox(
+        color: _backdrop,
+        child: Image.memory(
+          image.bytes,
+          key: contentKey,
+          fit: height == null ? BoxFit.contain : BoxFit.cover,
+          filterQuality: FilterQuality.high,
+          errorBuilder: (context, error, stackTrace) => const SizedBox(
+            width: 160,
+            height: 120,
+            child: Icon(Icons.broken_image_outlined, color: Colors.white38),
+          ),
         ),
       ),
     );

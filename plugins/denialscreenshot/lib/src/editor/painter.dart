@@ -103,16 +103,12 @@ class StaticDrawPainter extends CustomPainter {
   const StaticDrawPainter({
     required this.commands,
     required this.version,
-    this.selectedIndex,
     this.backgroundImage,
     this.annotationImage,
   });
 
   final List<DrawCommand> commands;
   final int version;
-
-  /// 光标模式当前选中的图形对象，画一圈蓝色高亮框。
-  final int? selectedIndex;
 
   /// 底图（截图原图）。模糊蒙版用它把矩形区域重画成模糊效果；世界坐标
   /// 即图像像素坐标，整图直接映射到画布即可对齐。
@@ -141,17 +137,6 @@ class StaticDrawPainter extends CustomPainter {
       }
       if (needsLayer) canvas.restore();
     }
-    final index = selectedIndex;
-    if (index != null && index >= 0 && index < commands.length) {
-      final bounds = commandDisplayBounds(commands[index]).inflate(5);
-      canvas.drawRect(
-        bounds,
-        Paint()
-          ..color = Colors.blue.withValues(alpha: 0.9)
-          ..style = PaintingStyle.stroke
-          ..strokeWidth = 1.5,
-      );
-    }
   }
 
   bool get _hasEraser {
@@ -165,9 +150,52 @@ class StaticDrawPainter extends CustomPainter {
   bool shouldRepaint(StaticDrawPainter oldDelegate) =>
       oldDelegate.commands != commands ||
       oldDelegate.version != version ||
-      oldDelegate.selectedIndex != selectedIndex ||
       oldDelegate.backgroundImage != backgroundImage ||
       oldDelegate.annotationImage != annotationImage;
+}
+
+/// 光标模式选中对象的高亮框 + 缩放手柄。
+///
+/// 画在世界坐标里（跟随图像缩放），但整层放在 `_canvasKey` 重绘边界之外，
+/// 保存/置顶快照不会把选中框和手柄烙进图片。手柄尺寸按屏幕像素给定，
+/// 由调用方按当前显示比例换算成世界单位，缩放时观感大小恒定。
+class SelectionPainter extends CustomPainter {
+  const SelectionPainter({required this.command, required this.handleSize});
+
+  final DrawCommand? command;
+  final double handleSize;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final target = command;
+    if (target == null) return;
+    final bounds = commandDisplayBounds(target).inflate(5);
+    canvas.drawRect(
+      bounds,
+      Paint()
+        ..color = Colors.blue.withValues(alpha: 0.9)
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = 1.5,
+    );
+    final fill = Paint()..color = Colors.white;
+    final border = Paint()
+      ..color = Colors.blue
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 1.5;
+    for (final (_, point) in commandHandlePoints(target)) {
+      final rect = Rect.fromCenter(
+        center: point,
+        width: handleSize,
+        height: handleSize,
+      );
+      canvas.drawRect(rect, fill);
+      canvas.drawRect(rect, border);
+    }
+  }
+
+  @override
+  bool shouldRepaint(SelectionPainter oldDelegate) =>
+      oldDelegate.command != command || oldDelegate.handleSize != handleSize;
 }
 
 /// 正在绘制的那一笔（预览层）。

@@ -134,6 +134,7 @@ class ScreenshotSettings {
       translateMaskMode: translateMaskMode ?? this.translateMaskMode,
       translateTextColorMode:
           translateTextColorMode ?? this.translateTextColorMode,
+      ocrModel: ocrModel ?? this.ocrModel,
     );
   }
 

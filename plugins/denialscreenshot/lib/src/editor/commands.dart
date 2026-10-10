@@ -165,6 +165,7 @@ class DrawCommand {
     this.fontFamily = '',
   });
 
+  /// 光标模式拖动选中对象（整体平移）。
   DrawCommand translated(Offset delta) {
     return DrawCommand(
       type: type,
@@ -179,6 +180,26 @@ class DrawCommand {
       maskStyle: maskStyle,
       textMaxWidth: textMaxWidth,
       textBox: textBox?.shift(delta),
+      fontFamily: fontFamily,
+    );
+  }
+
+  /// 光标模式拖拽手柄改大小：盒子对象换包围框（文字同时改写文本框，框内
+  /// 字号自适应）；直线/箭头换端点。用新实例返回，供撤销快照与重绘识别。
+  DrawCommand resized({Rect? rect, Offset? start, Offset? end, Rect? textBox}) {
+    return DrawCommand(
+      type: type,
+      start: start ?? this.start,
+      end: end ?? this.end,
+      path: path,
+      text: text,
+      rect: rect ?? this.rect,
+      color: color,
+      strokeWidth: strokeWidth,
+      fillColor: fillColor,
+      maskStyle: maskStyle,
+      textMaxWidth: textMaxWidth,
+      textBox: textBox ?? this.textBox,
       fontFamily: fontFamily,
     );
   }
@@ -310,4 +331,100 @@ double _distanceToSegment(Offset point, Offset start, Offset end) {
       lengthSquared;
   t = t.clamp(0.0, 1.0);
   return (point - start - segment * t).distance;
+}
+
+/// 光标模式选中对象后，可拖拽改变大小的手柄位置。盒子类对象（矩形/椭圆/
+/// 文字/蒙版）用四角+四边共八个手柄；直线/箭头只有两端两个端点手柄。
+enum ResizeHandle {
+  topLeft,
+  top,
+  topRight,
+  right,
+  bottomRight,
+  bottom,
+  bottomLeft,
+  left,
+  lineStart,
+  lineEnd,
+}
+
+bool _isLineLike(DrawCommand command) =>
+    command.type == ScreenshotToolType.line ||
+    command.type == ScreenshotToolType.arrow;
+
+/// 选中对象的全部手柄坐标（world），供绘制与命中测试共用。
+List<(ResizeHandle, Offset)> commandHandlePoints(DrawCommand command) {
+  if (_isLineLike(command)) {
+    return [
+      (ResizeHandle.lineStart, command.start),
+      (ResizeHandle.lineEnd, command.end),
+    ];
+  }
+  final bounds = commandDisplayBounds(command);
+  return [
+    (ResizeHandle.topLeft, bounds.topLeft),
+    (ResizeHandle.top, bounds.topCenter),
+    (ResizeHandle.topRight, bounds.topRight),
+    (ResizeHandle.right, bounds.centerRight),
+    (ResizeHandle.bottomRight, bounds.bottomRight),
+    (ResizeHandle.bottom, bounds.bottomCenter),
+    (ResizeHandle.bottomLeft, bounds.bottomLeft),
+    (ResizeHandle.left, bounds.centerLeft),
+  ];
+}
+
+/// 命中哪个手柄（[radius] 是 world 单位的点击容差）。
+ResizeHandle? hitTestCommandHandle(
+  DrawCommand command,
+  Offset position,
+  double radius,
+) {
+  for (final (handle, point) in commandHandlePoints(command)) {
+    if ((point - position).distance <= radius) return handle;
+  }
+  return null;
+}
+
+/// 拖拽手柄后的新包围框：对角/对边固定，被拖的边跟随指针；拖过头不翻转，
+/// 最小保留 1px，避免退化成零尺寸后再也抓不住。
+Rect resizeBounds(Rect original, ResizeHandle handle, Offset position) {
+  var left = original.left;
+  var top = original.top;
+  var right = original.right;
+  var bottom = original.bottom;
+  final movesLeft =
+      handle == ResizeHandle.topLeft ||
+      handle == ResizeHandle.left ||
+      handle == ResizeHandle.bottomLeft;
+  final movesRight =
+      handle == ResizeHandle.topRight ||
+      handle == ResizeHandle.right ||
+      handle == ResizeHandle.bottomRight;
+  final movesTop =
+      handle == ResizeHandle.topLeft ||
+      handle == ResizeHandle.top ||
+      handle == ResizeHandle.topRight;
+  final movesBottom =
+      handle == ResizeHandle.bottomLeft ||
+      handle == ResizeHandle.bottom ||
+      handle == ResizeHandle.bottomRight;
+  if (movesLeft) left = position.dx;
+  if (movesRight) right = position.dx;
+  if (movesTop) top = position.dy;
+  if (movesBottom) bottom = position.dy;
+  if (right - left < 1) {
+    if (movesLeft) {
+      left = right - 1;
+    } else {
+      right = left + 1;
+    }
+  }
+  if (bottom - top < 1) {
+    if (movesTop) {
+      top = bottom - 1;
+    } else {
+      bottom = top + 1;
+    }
+  }
+  return Rect.fromLTRB(left, top, right, bottom);
 }

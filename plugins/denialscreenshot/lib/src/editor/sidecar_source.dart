@@ -166,30 +166,56 @@ def sample_colors(image, box):
     return bg, [int(c) for c in fg]
 
 
+# 常驻进程按模型 key 缓存 OCR 实例：onnx 加载是识别最耗时的一步，避免
+# 每次请求重复载入。回退内置模型的请求不缓存，避免下载完成后仍用旧模型。
+_OCR_CACHE = {}
+
+
 def load_ocr(model_key):
     """按设置选择 OCR 模型；高精度模型没下载完就回退内置并提示。
 
     模型文件由编辑器下载到 MODELS_DIR/ocr/<key>/ 下（det + rec 两个 onnx），
     cls 沿用组件自带的方向分类模型。
     """
+    if model_key in _OCR_CACHE:
+        return _OCR_CACHE[model_key], ""
     from rapidocr_onnxruntime import RapidOCR
 
     if model_key not in ("v4mobile", "v4server"):
-        return RapidOCR(), ""
+        ocr = RapidOCR()
+        _OCR_CACHE[model_key] = ocr
+        return ocr, ""
     suffix = "server" if model_key == "v4server" else "mobile"
     base = os.path.join(MODELS_DIR, "ocr", model_key)
     det = os.path.join(base, f"ch_PP-OCRv4_det_{suffix}.onnx")
     rec = os.path.join(base, f"ch_PP-OCRv4_rec_{suffix}.onnx")
     if not (os.path.exists(det) and os.path.exists(rec)):
         return RapidOCR(), "所选 OCR 模型还没下载完，这次先用内置模型"
-    return RapidOCR(det_model_path=det, rec_model_path=rec), ""
+    ocr = RapidOCR(det_model_path=det, rec_model_path=rec)
+    _OCR_CACHE[model_key] = ocr
+    return ocr, ""
 
 
 def main():
-    request_line = sys.stdin.readline()
-    if not request_line.strip():
-        return 1
-    request = json.loads(request_line)
+    # 常驻进程：一条 stdin 一行请求，处理完继续读下一条；父进程关闭
+    # stdin（或发 {"quit": true}）才退出。模型实例在进程内复用。
+    for request_line in sys.stdin:
+        line = request_line.strip()
+        if not line:
+            continue
+        try:
+            request = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if request.get("quit"):
+            return 0
+        try:
+            handle(request)
+        except Exception as error:  # noqa: BLE001
+            emit({"event": "error", "message": f"处理失败：{error}"})
+
+
+def handle(request):
     target = request.get("target", "zh")
     min_height = int(request.get("min_height", 8))
     # mode=ocr：只识别不翻译；mode=texts：只翻译给定文本（OCR 结果由
@@ -285,12 +311,13 @@ def main():
                 emit({"event": "status", "message": "加载翻译模型…"})
                 direct, via_en = pick_pack(packs, source_lang, target)
                 if direct is None and via_en is None:
+                    available = ", ".join(f"{k[0]}→{k[1]}" for k in packs)
                     emit({
                         "event": "error",
                         "message": f"没有 {source_lang}→{target} 的语言包"
-                                   f"（已装：{', '.join(direct_pairs)}）",
+                                   f"（已装：{available}）",
                     })
-                    return 2
+                    return
             first, second = direct, via_en
             translated = text if first is None else first.translate(text)
             if second is not None and translated:

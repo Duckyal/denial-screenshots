@@ -3,6 +3,8 @@ import 'dart:io';
 
 import 'package:flutter/material.dart';
 
+import 'dialog_style.dart';
+
 /// 插件内置的文件选择对话框。
 ///
 /// 编辑器运行在合成器的 aboveWindows 层，外部程序（zenity）的窗口会被这层
@@ -148,29 +150,32 @@ class _PathChooserState extends State<_PathChooser> {
 
   @override
   Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    return AlertDialog(
-      title: Text(widget.title),
-      content: _PathChooserContent(
-        directory: _directory,
-        entries: _entries,
-        nameController: _nameController,
-        error: _error,
-        save: widget.save,
-        onEnter: _enter,
-        onOpen: _open,
-        onConfirm: _confirm,
+    return editorDialogTheme(
+      child: AlertDialog(
+        backgroundColor: editorDialogBackground,
+        shape: editorDialogShape,
+        title: Text(widget.title),
+        content: _PathChooserContent(
+          directory: _directory,
+          entries: _entries,
+          nameController: _nameController,
+          error: _error,
+          save: widget.save,
+          onEnter: _enter,
+          onOpen: _open,
+          onConfirm: _confirm,
+        ),
+        actions: <Widget>[
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(),
+            child: const Text('取消'),
+          ),
+          FilledButton(
+            onPressed: _confirm,
+            child: Text(widget.save ? '保存' : '打开'),
+          ),
+        ],
       ),
-      actions: <Widget>[
-        TextButton(
-          onPressed: () => Navigator.of(context).pop(),
-          child: const Text('取消'),
-        ),
-        FilledButton(
-          onPressed: _confirm,
-          child: Text(widget.save ? '保存' : '打开'),
-        ),
-      ],
     );
   }
 }
@@ -250,9 +255,7 @@ class _PathChooserContent extends StatelessWidget {
                           child: ListTile(
                             dense: true,
                             leading: Icon(
-                              isDirectory
-                                  ? Icons.folder
-                                  : Icons.image_outlined,
+                              isDirectory ? Icons.folder : Icons.image_outlined,
                             ),
                             title: Text(name),
                             onTap: () => onOpen(entity),
