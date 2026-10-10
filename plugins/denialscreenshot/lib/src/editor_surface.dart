@@ -163,6 +163,7 @@ class _EditorSurfaceHostState extends ConsumerState<EditorSurfaceHost> {
     _directoryEvents = directory.watch(events: FileSystemEvent.create).listen((
       FileSystemEvent event,
     ) {
+      if (DenialScreenshotEditorBus.instance.suppressAutoOpen.value) return;
       if (!event.path.endsWith('.png')) return;
       final name = event.path.split(Platform.pathSeparator).last;
       if (!name.startsWith('Screenshot-')) return;

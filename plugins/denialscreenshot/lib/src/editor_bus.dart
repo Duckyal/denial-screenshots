@@ -42,6 +42,10 @@ final class DenialScreenshotEditorBus {
   static final DenialScreenshotEditorBus instance =
       DenialScreenshotEditorBus._();
 
+  /// 框选流程进行时挂起的标识。打开时截图目录里落地的新图（grim 存的区
+  /// 域图）不应触发编辑器自动打开，由框选 surface 收发。
+  final ValueNotifier<bool> suppressAutoOpen = ValueNotifier(false);
+
   final StreamController<EditorRequest> _controller =
       StreamController<EditorRequest>.broadcast();
 
@@ -93,8 +97,7 @@ final class EditorScrollCaptureNotifier {
   static final EditorScrollCaptureNotifier instance =
       EditorScrollCaptureNotifier._();
 
-  final StreamController<void> _controller =
-      StreamController<void>.broadcast();
+  final StreamController<void> _controller = StreamController<void>.broadcast();
 
   Stream<void> get notifications => _controller.stream;
 
