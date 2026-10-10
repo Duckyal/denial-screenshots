@@ -16,6 +16,9 @@ enum EditorRequestKind {
   /// Ask the compositor to start its own capture/selection flow.
   capture,
 
+  /// Start scroll capture mode in the editor.
+  scrollCapture,
+
   /// Dismiss the editor.
   close,
 }
@@ -53,16 +56,16 @@ final class DenialScreenshotEditorBus {
   void capture() =>
       _controller.add(const EditorRequest(EditorRequestKind.capture));
 
+  void scrollCapture() =>
+      _controller.add(const EditorRequest(EditorRequestKind.scrollCapture));
+
   void close() => _controller.add(const EditorRequest(EditorRequestKind.close));
 }
 
 /// 从钉住卡片返回编辑器时的一次恢复请求。
 @immutable
 final class EditorResumeRequest {
-  const EditorResumeRequest({
-    required this.imageBytes,
-    required this.commands,
-  });
+  const EditorResumeRequest({required this.imageBytes, required this.commands});
 
   final Uint8List imageBytes;
   final List<DrawCommand> commands;
@@ -80,4 +83,20 @@ final class EditorReentryBus {
   Stream<EditorResumeRequest> get resumes => _controller.stream;
 
   void resume(EditorResumeRequest request) => _controller.add(request);
+}
+
+/// System action → editor scroll capture trigger.
+/// The editor listens to this and starts scroll capture when notified.
+final class EditorScrollCaptureNotifier {
+  EditorScrollCaptureNotifier._();
+
+  static final EditorScrollCaptureNotifier instance =
+      EditorScrollCaptureNotifier._();
+
+  final StreamController<void> _controller =
+      StreamController<void>.broadcast();
+
+  Stream<void> get notifications => _controller.stream;
+
+  void notify() => _controller.add(null);
 }

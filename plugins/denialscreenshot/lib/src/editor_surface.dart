@@ -34,6 +34,12 @@ final class EditorSession {
 /// asks the compositor to start its own capture when requested. The editor
 /// itself is the original QQ-style tool; it only talks to this surface
 /// through [EditorHostBridge].
+///
+/// The surface is transparent, so the widget paints the frozen frame
+/// full-bleed itself: the editor's canvas extends the just-captured image to
+/// the whole output (blurred and dimmed) with the sharp, annotatable image
+/// centered on top. Opening the editor therefore reads as staying on the
+/// captured frame rather than switching to a separate window.
 class EditorSurfaceHost extends ConsumerStatefulWidget {
   const EditorSurfaceHost({super.key});
 
@@ -120,6 +126,8 @@ class _EditorSurfaceHostState extends ConsumerState<EditorSurfaceHost> {
         unawaited(_openNewest());
       case EditorRequestKind.capture:
         _startCapture();
+      case EditorRequestKind.scrollCapture:
+        _triggerScrollCapture();
       case EditorRequestKind.close:
         _close();
     }
@@ -138,6 +146,14 @@ class _EditorSurfaceHostState extends ConsumerState<EditorSurfaceHost> {
 
   void _startCapture() {
     ref.read(denialBridgeProvider).takeScreenshot();
+  }
+
+  void _triggerScrollCapture() {
+    // Scroll capture only works when the editor is open and visible.
+    if (!_visible || _session == null) return;
+    // Notify the active editor session to start scroll capture.
+    // The actual scroll capture logic is in ScreenshotTool.
+    EditorScrollCaptureNotifier.instance.notify();
   }
 
   void _watchCaptureDirectory() {
@@ -187,8 +203,8 @@ class _EditorSurfaceHostState extends ConsumerState<EditorSurfaceHost> {
     final bridge = EditorHostBridge.instance;
     final source =
         bridge.sourceBytes?.call() ?? _session?.bytes ?? Uint8List(0);
-    PinCardBus.instance.show(
-      PinnedShot(
+    PinCardBus.instance.add(
+      PinImage(
         bytes: bytes,
         commands: bridge.exportCommands?.call() ?? const <DrawCommand>[],
         sourceBytes: source,

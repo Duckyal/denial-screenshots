@@ -76,21 +76,21 @@ packages:
   denial_flutter_sdk:
     dependency: "direct main"
     description:
-      path: "/home/wu/.local/state/denial/plugins/build-kits/3cee60e0f668bf882317bb71499dc211a2293bf1e90e495c7e9f96721df54422/runtime/packages/denial_flutter_sdk"
+      path: "/home/wu/.local/state/denial/plugins/build-kits/8b3b2d88fe42c7239c877261a62620f3011d1bb0f24074642c630106663c2f3c/runtime/packages/denial_flutter_sdk"
       relative: false
     source: path
     version: "0.0.0"
   denial_sdk:
     dependency: "direct main"
     description:
-      path: "/home/wu/.local/state/denial/plugins/build-kits/3cee60e0f668bf882317bb71499dc211a2293bf1e90e495c7e9f96721df54422/runtime/packages/denial_sdk"
+      path: "/home/wu/.local/state/denial/plugins/build-kits/8b3b2d88fe42c7239c877261a62620f3011d1bb0f24074642c630106663c2f3c/runtime/packages/denial_sdk"
       relative: false
     source: path
     version: "0.0.0"
   denial_wire_protocol:
     dependency: transitive
     description:
-      path: "../../../../.local/state/denial/plugins/build-kits/3cee60e0f668bf882317bb71499dc211a2293bf1e90e495c7e9f96721df54422/runtime/protocol/generated/dart"
+      path: "../../../../.local/state/denial/plugins/build-kits/8b3b2d88fe42c7239c877261a62620f3011d1bb0f24074642c630106663c2f3c/runtime/protocol/generated/dart"
       relative: true
     source: path
     version: "0.1.0"

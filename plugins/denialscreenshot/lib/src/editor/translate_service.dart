@@ -48,6 +48,65 @@ class TranslateService {
   /// 语言包：Argos 官方站被墙，走 HF 镜像仓库 shethjenil/argostranslate。
   static const _hfMirror = 'https://hf-mirror.com';
   static const _packRepo = '$_hfMirror/shethjenil/argostranslate/resolve/main';
+
+  /// OCR 模型下载源：RapidAI 官方 ModelScope 仓库（国内直连）。
+  static const _ocrModelRepo =
+      'https://www.modelscope.cn/models/RapidAI/RapidOCR/resolve/master';
+
+  /// 可选 OCR 模型：(key, 标签, 说明)。builtin 无需下载。
+  static const ocrModelCatalog = <(String, String, String)>[
+    ('builtin', '内置标准（PP-OCRv3）', '随识别组件自带，无需下载'),
+    ('v4mobile', '高精度（PP-OCRv4 移动版）', '约 16MB，精度更高、速度接近'),
+    ('v4server', '超高精度（PP-OCRv4 服务器版）', '约 204MB，CPU 识别明显变慢'),
+  ];
+
+  static String _ocrModelDir(String key) => '$dataDir/models/ocr/$key';
+
+  static String? _ocrModelFile(String key, String part) {
+    final suffix = switch (key) {
+      'v4server' => 'server',
+      'v4mobile' => 'mobile',
+      _ => null,
+    };
+    if (suffix == null) return null;
+    return 'ch_PP-OCRv4_${part}_$suffix.onnx';
+  }
+
+  /// 高精度 OCR 模型（det+rec 两个文件）是否已下载就绪。
+  Future<bool> isOcrModelInstalled(String key) async {
+    if (key == 'builtin') return true;
+    for (final part in ['det', 'rec']) {
+      final name = _ocrModelFile(key, part);
+      if (name == null) return true;
+      if (!await File('${_ocrModelDir(key)}/$name').exists()) return false;
+    }
+    return true;
+  }
+
+  /// 下载所选 OCR 模型（[onStatus] 汇报进度）。
+  Future<void> installOcrModel(
+    String key, {
+    void Function(String)? onStatus,
+  }) async {
+    for (final part in ['det', 'rec']) {
+      final name = _ocrModelFile(key, part);
+      if (name == null) return;
+      final dest = File('${_ocrModelDir(key)}/$name');
+      if (await dest.exists()) continue;
+      onStatus?.call('下载 $name…');
+      await Directory(_ocrModelDir(key)).create(recursive: true);
+      await _download('$_ocrModelRepo/onnx/PP-OCRv4/$part/$name', dest);
+    }
+  }
+
+  /// 删除已下载的 OCR 模型（回到内置模型）。
+  Future<void> deleteOcrModel(String key) async {
+    final dir = Directory(_ocrModelDir(key));
+    if (await dir.exists()) {
+      await dir.delete(recursive: true);
+    }
+  }
+
   static const _languagePacks = ['translate-en_zh', 'translate-zh_en'];
 
   static String get home => Platform.environment['HOME'] ?? '/';
@@ -181,6 +240,57 @@ class TranslateService {
     }
   }
 
+  /// 本地语言包只翻译文本：OCR 结果由编辑器后台缓存复用，不再识别。
+  /// 返回与 [texts] 对齐的 (译文, 是否跳过) 列表——原文已是目标语言时
+  /// 跳过（不盖"自己盖自己"的无意义蒙版）。
+  Future<List<(String, bool)>> translateTextsLocal(
+    List<String> texts,
+    String target, {
+    void Function(String message)? onStatus,
+  }) async {
+    if (!await isReady()) {
+      throw Exception('翻译组件未安装，请先在设置中安装');
+    }
+    final process = await Process.start(venvPython, [sidecarScript]);
+    process.stdin.writeln(
+      jsonEncode({'target': target, 'mode': 'texts', 'texts': texts}),
+    );
+    await process.stdin.close();
+
+    List<(String, bool)>? translations;
+    String? errorMessage;
+    final lines = process.stdout
+        .transform(utf8.decoder)
+        .transform(const LineSplitter());
+    await for (final line in lines) {
+      if (line.trim().isEmpty) continue;
+      Map<String, dynamic> event;
+      try {
+        event = jsonDecode(line) as Map<String, dynamic>;
+      } on FormatException {
+        continue;
+      }
+      switch (event['event']) {
+        case 'done':
+          translations = [
+            for (final raw in event['translations'] as List? ?? [])
+              (
+                (raw as Map)['translated'] as String? ?? '',
+                raw['skip'] as bool? ?? false,
+              ),
+          ];
+        case 'error':
+          errorMessage = event['message'] as String? ?? '翻译失败';
+        case 'status':
+          onStatus?.call(event['message'] as String? ?? '');
+      }
+    }
+    await process.exitCode;
+    if (errorMessage != null) throw Exception(errorMessage);
+    if (translations == null) throw Exception('翻译组件没有返回结果');
+    return translations;
+  }
+
   /// 运行一次翻译。[imagePath] 传裁剪后的快照，[target] 是目标语言码。
   /// [mode] = 'translate'（本地 OCR+翻译）或 'ocr'（只识别，翻译走 API）。
   /// 事件流：status 进度 / region 单块结果 / done 汇总 / error 失败。
@@ -188,6 +298,7 @@ class TranslateService {
     required String imagePath,
     required String target,
     String mode = 'translate',
+    String ocrModel = 'builtin',
   }) async* {
     final ready = await isReady();
     if (!ready) {
@@ -200,7 +311,12 @@ class TranslateService {
 
     final process = await Process.start(venvPython, [sidecarScript]);
     process.stdin.writeln(
-      jsonEncode({'image': tempInput.path, 'target': target, 'mode': mode}),
+      jsonEncode({
+        'image': tempInput.path,
+        'target': target,
+        'mode': mode,
+        'ocr_model': ocrModel,
+      }),
     );
     await process.stdin.close();
 
@@ -743,8 +859,11 @@ class TranslateService {
     'es': 'ES',
   };
 
+  /// 缺失时返回空列表：调用方据 background.isEmpty 走各自的回退配色，
+  /// 不能在这里偷偷替成白色，否则"自动取背景色"永远拿不到缺失信号。
   static List<int> _color(dynamic raw) {
-    final list = (raw as List?)?.cast<num>() ?? const [255, 255, 255];
+    final list = (raw as List?)?.cast<num>();
+    if (list == null || list.isEmpty) return const [];
     return [for (final channel in list.take(3)) channel.round().clamp(0, 255)];
   }
 }

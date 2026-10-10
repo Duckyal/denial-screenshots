@@ -126,3 +126,53 @@ final class DenialScreenshotEditLatestAction implements ShellAction {
     DenialScreenshotEditorBus.instance.openLatest();
   }
 }
+
+/// Pins the newest clipboard image (or text) as a floating card, Snipaste
+/// style. Bind it to a key (e.g. Super+C) in the shortcut settings; pressing
+/// it again pins additional cards.
+@Provides(ShellAction)
+final class DenialScreenshotPinClipboardAction implements ShellAction {
+  const DenialScreenshotPinClipboardAction();
+
+  @override
+  String get id => 'denialscreenshot.pinFromClipboard';
+
+  @override
+  String get provider => 'Screenshot Tool';
+
+  @override
+  String label(BuildContext context) => '钉住剪贴板内容';
+
+  @override
+  String description(BuildContext context) =>
+      '把剪贴板里最近一张截图或文字钉成桌面置顶悬浮窗（Snipaste 风格，可叠加多张）';
+
+  @override
+  Future<void> invoke(ShellActionContext context) async {
+    await PinCardBus.instance.pinFromClipboard();
+  }
+}
+
+/// Starts scroll capture mode in the editor. Requires an editor to be open.
+@Provides(ShellAction)
+final class DenialScreenshotScrollCaptureAction implements ShellAction {
+  const DenialScreenshotScrollCaptureAction();
+
+  @override
+  String get id => 'denialscreenshot.scrollCapture';
+
+  @override
+  String get provider => 'Screenshot Tool';
+
+  @override
+  String label(BuildContext context) => '长截图';
+
+  @override
+  String description(BuildContext context) =>
+      '在编辑器中启动长截图模式（需要先打开编辑器）';
+
+  @override
+  Future<void> invoke(ShellActionContext context) async {
+    DenialScreenshotEditorBus.instance.scrollCapture();
+  }
+}

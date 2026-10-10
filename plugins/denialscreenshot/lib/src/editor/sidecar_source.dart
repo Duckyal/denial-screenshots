@@ -166,21 +166,82 @@ def sample_colors(image, box):
     return bg, [int(c) for c in fg]
 
 
+def load_ocr(model_key):
+    """按设置选择 OCR 模型；高精度模型没下载完就回退内置并提示。
+
+    模型文件由编辑器下载到 MODELS_DIR/ocr/<key>/ 下（det + rec 两个 onnx），
+    cls 沿用组件自带的方向分类模型。
+    """
+    from rapidocr_onnxruntime import RapidOCR
+
+    if model_key not in ("v4mobile", "v4server"):
+        return RapidOCR(), ""
+    suffix = "server" if model_key == "v4server" else "mobile"
+    base = os.path.join(MODELS_DIR, "ocr", model_key)
+    det = os.path.join(base, f"ch_PP-OCRv4_det_{suffix}.onnx")
+    rec = os.path.join(base, f"ch_PP-OCRv4_rec_{suffix}.onnx")
+    if not (os.path.exists(det) and os.path.exists(rec)):
+        return RapidOCR(), "所选 OCR 模型还没下载完，这次先用内置模型"
+    return RapidOCR(det_model_path=det, rec_model_path=rec), ""
+
+
 def main():
     request_line = sys.stdin.readline()
     if not request_line.strip():
         return 1
     request = json.loads(request_line)
-    image_path = request["image"]
     target = request.get("target", "zh")
     min_height = int(request.get("min_height", 8))
-    # mode=ocr：只识别不翻译（翻译由编辑器调 API 完成）。
+    # mode=ocr：只识别不翻译；mode=texts：只翻译给定文本（OCR 结果由
+    # 编辑器后台缓存复用，不重复识别）；默认 translate：OCR+翻译。
     mode = request.get("mode", "translate")
 
-    emit({"event": "status", "message": "加载 OCR 模型…"})
-    from rapidocr_onnxruntime import RapidOCR
+    if mode == "texts":
+        texts = request.get("texts", [])
+        packs = load_packs()
+        if not packs:
+            emit({
+                "event": "error",
+                "message": "未找到翻译语言包，请在设置中管理本地模型",
+            })
+            return 2
+        translations = []
+        pack_cache = {}
+        for text in texts:
+            source_lang = detect_language(text)
+            if source_lang == target:
+                # 原文就是目标语言：标记跳过，编辑器不盖无意义蒙版。
+                translations.append({"translated": text, "skip": True})
+                continue
+            if source_lang is None:
+                translations.append({"translated": text, "skip": False})
+                continue
+            if source_lang not in pack_cache:
+                emit({"event": "status", "message": "加载翻译模型…"})
+                pack_cache[source_lang] = pick_pack(packs, source_lang, target)
+            first, second = pack_cache[source_lang]
+            if first is None and second is None:
+                emit({
+                    "event": "error",
+                    "message": f"没有 {source_lang}→{target} 的语言包",
+                })
+                return 2
+            translated = text if first is None else first.translate(text)
+            if second is not None and translated:
+                translated = second.translate(translated)
+            translations.append({
+                "translated": translated or text,
+                "skip": False,
+            })
+        emit({"event": "done", "translations": translations})
+        return 0
 
-    ocr = RapidOCR()
+    image_path = request["image"]
+
+    emit({"event": "status", "message": "加载 OCR 模型…"})
+    ocr, ocr_note = load_ocr(request.get("ocr_model", ""))
+    if ocr_note:
+        emit({"event": "status", "message": ocr_note})
 
     emit({"event": "status", "message": "识别文字…"})
     result, _ = ocr(image_path)

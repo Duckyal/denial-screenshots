@@ -17,15 +17,25 @@ class ScreenshotSettings {
     this.apiAppId = '',
     this.translateMaskColor = 'FFFFFF',
     this.translateTextColor = '000000',
-    this.closeAfterCopy = true,
+    this.translateMaskMode = 'blur',
+    this.translateTextColorMode = 'auto',
+    this.ocrModel = 'builtin',
   });
 
   /// 工具栏停靠位置：'auto' | 'left' | 'right' | 'top' | 'bottom'。
   /// auto 时按图像大小自动选方向，放不下就隐藏，用快捷键唤出。
   final String dockPosition;
 
-  /// 复制成功后自动关闭编辑器：进剪贴板就意味着这次标注结束了，省掉手动关。
-  final bool closeAfterCopy;
+  /// 翻译蒙版模式：'blur'（模糊背景）| 'solid'（固定颜色）。
+  /// 历史值 'auto'（取文字背景色）已随该功能删除，读入时归一成 'blur'。
+  final String translateMaskMode;
+
+  /// 翻译文字颜色模式：'auto'（提取图片里文字的原色）| 'fixed'（固定颜色）。
+  final String translateTextColorMode;
+
+  /// 识字用的 OCR 模型：'builtin'（组件自带的 PP-OCRv3）|
+  /// 'v4mobile'（PP-OCRv4 移动版，需下载）| 'v4server'（服务器版，需下载）。
+  final String ocrModel;
 
   /// 动作 → 快捷键绑定（规范串：ctrl/shift/alt 前缀 + 小写键名）。
   /// 缺失的动作回落到 [defaultShortcuts]。
@@ -46,6 +56,7 @@ class ScreenshotSettings {
     'tool.text': 't',
     'tool.mask': 'm',
     'tool.eraser': 'e',
+    'scrollCapture': 'super+r',
   };
 
   String bindingFor(String action) =>
@@ -104,7 +115,9 @@ class ScreenshotSettings {
     String? apiAppId,
     String? translateMaskColor,
     String? translateTextColor,
-    bool? closeAfterCopy,
+    String? translateMaskMode,
+    String? translateTextColorMode,
+    String? ocrModel,
   }) {
     return ScreenshotSettings(
       dockPosition: dockPosition ?? this.dockPosition,
@@ -118,34 +131,39 @@ class ScreenshotSettings {
       apiAppId: apiAppId ?? this.apiAppId,
       translateMaskColor: translateMaskColor ?? this.translateMaskColor,
       translateTextColor: translateTextColor ?? this.translateTextColor,
-      closeAfterCopy: closeAfterCopy ?? this.closeAfterCopy,
+      translateMaskMode: translateMaskMode ?? this.translateMaskMode,
+      translateTextColorMode:
+          translateTextColorMode ?? this.translateTextColorMode,
     );
   }
 
   Map<String, dynamic> toJson() => {
-        'dockPosition': dockPosition,
-        'shortcuts': shortcuts,
-        'translateBackend': translateBackend,
-        'translateTarget': translateTarget,
-        'apiType': apiType,
-        'apiEndpoint': apiEndpoint,
-        'apiKey': apiKey,
-        'apiModel': apiModel,
-        'apiAppId': apiAppId,
-        'translateMaskColor': translateMaskColor,
-        'translateTextColor': translateTextColor,
-        'closeAfterCopy': closeAfterCopy,
-      };
+    'dockPosition': dockPosition,
+    'shortcuts': shortcuts,
+    'translateBackend': translateBackend,
+    'translateTarget': translateTarget,
+    'apiType': apiType,
+    'apiEndpoint': apiEndpoint,
+    'apiKey': apiKey,
+    'apiModel': apiModel,
+    'apiAppId': apiAppId,
+    'translateMaskColor': translateMaskColor,
+    'translateTextColor': translateTextColor,
+    'translateMaskMode': translateMaskMode,
+    'translateTextColorMode': translateTextColorMode,
+    'ocrModel': ocrModel,
+  };
 
   factory ScreenshotSettings.fromJson(Map<String, dynamic> json) {
     return ScreenshotSettings(
-      dockPosition: (json['dockPosition'] as String?) ??
+      dockPosition:
+          (json['dockPosition'] as String?) ??
           // 旧版两个字段的迁移。
           (json['horizontalDock'] == 'top'
               ? 'top'
               : json['verticalDock'] == 'left'
-                  ? 'left'
-                  : 'auto'),
+              ? 'left'
+              : 'auto'),
       shortcuts: {
         ...defaultShortcuts,
         ...((json['shortcuts'] as Map?)?.cast<String, String>() ?? const {}),
@@ -159,7 +177,13 @@ class ScreenshotSettings {
       apiAppId: json['apiAppId'] as String? ?? '',
       translateMaskColor: json['translateMaskColor'] as String? ?? 'FFFFFF',
       translateTextColor: json['translateTextColor'] as String? ?? '000000',
-      closeAfterCopy: json['closeAfterCopy'] as bool? ?? true,
+      // 'auto' 蒙版取色已删除：老配置里的存值归一成 blur。
+      translateMaskMode: (json['translateMaskMode'] as String?) == 'solid'
+          ? 'solid'
+          : 'blur',
+      translateTextColorMode:
+          json['translateTextColorMode'] as String? ?? 'auto',
+      ocrModel: json['ocrModel'] as String? ?? 'builtin',
     );
   }
 

@@ -51,7 +51,7 @@ Settings → Shortcuts → Denial actions，给 `Screenshot Tool` 下的动作�
 
 ## 编辑器功能
 
-- 7 种工具：画笔、箭头、矩形、圆形、文字、马赛克、橡皮
+- 7 种工具：画笔、箭头、矩形、圆形、文字、蒙版、橡皮
 - 10 种颜色、1–20 px 粗细、20 步撤销/重做
 - 保存（另存为 `Screenshot-{秒}-{毫秒}-edited.png`）、复制、取消
 - 快捷键：`Enter` 保存、`Esc` 取消、`Ctrl+C` 复制、`Ctrl+Z` 撤销、`Ctrl+Shift+Z` 重做、

@@ -1,6 +1,9 @@
 import 'dart:math' as math;
+
 import 'package:flutter/painting.dart' show TextPainter, TextSpan, TextStyle;
+
 import 'dart:ui';
+
 import 'tools.dart';
 
 /// 图形对象当前实际占据的包围框。
@@ -9,6 +12,10 @@ import 'tools.dart';
 /// 字号重新排版测量；其他图形用创建时记录的 rect。
 Rect commandDisplayBounds(DrawCommand command) {
   if (command.type == ScreenshotToolType.text) {
+    // 拖框创建的文字：整个文本框就是它的占据范围（点框内任意位置都能
+    // 选中/命中，与 PPT 文本框一致）。
+    final box = command.textBox;
+    if (box != null) return box;
     final painter = command.textLayout();
     return Rect.fromLTWH(
       command.start.dx,
@@ -26,7 +33,10 @@ Rect commandDisplayBounds(DrawCommand command) {
 /// 周围是透明留白；置顶快照必须裁到这个矩形，否则留白和选区边框会烙进
 /// 悬浮卡里。
 Rect displayedImageRect(
-    Size canvasSize, double imageWidth, double imageHeight) {
+  Size canvasSize,
+  double imageWidth,
+  double imageHeight,
+) {
   if (imageWidth <= 0 || imageHeight <= 0 || canvasSize.isEmpty) {
     return Offset.zero & canvasSize;
   }
@@ -59,17 +69,27 @@ class DrawCommand {
   final Color color;
   final double strokeWidth;
   final Color fillColor;
+  final MaskStyle maskStyle;
 
   /// 文字排版的换行宽度（翻译落回画布时按蒙版宽度收紧，避免译文超出蒙版）。
   /// 默认不限宽，即手绘文字仍是一行。
   final double textMaxWidth;
 
+  /// 拖框创建的文本框（PPT 式）：内容按框宽换行、字号随框自适应缩小，
+  /// 并在框内水平、垂直居中；null = 点击创建的自由文字。
+  final Rect? textBox;
+
+  /// 文字字体族名称，空字符串表示使用默认字体。
+  final String fontFamily;
+
   /// 文字命令的排版缓存。绘制与命中测试都用它，避免每帧重新 layout；
-  /// 字号（strokeWidth * 4）或颜色变化时自动失效。
+  /// 字号（strokeWidth * 4）、颜色或文本框变化时自动失效。
   TextPainter? _textLayout;
   double? _textLayoutFontSize;
   Color? _textLayoutColor;
   double? _textLayoutMaxWidth;
+  Rect? _textLayoutBox;
+  String? _textLayoutFontFamily;
 
   TextPainter textLayout() {
     final fontSize = strokeWidth * 4;
@@ -77,24 +97,55 @@ class DrawCommand {
     if (cached != null &&
         _textLayoutFontSize == fontSize &&
         _textLayoutColor == color &&
-        _textLayoutMaxWidth == textMaxWidth) {
+        _textLayoutMaxWidth == textMaxWidth &&
+        _textLayoutBox == textBox &&
+        _textLayoutFontFamily == fontFamily) {
       return cached;
     }
-    final painter = TextPainter(
+    final painter = _layoutText(fontSize);
+    _textLayout = painter;
+    _textLayoutFontSize = fontSize;
+    _textLayoutColor = color;
+    _textLayoutMaxWidth = textMaxWidth;
+    _textLayoutBox = textBox;
+    _textLayoutFontFamily = fontFamily;
+    return painter;
+  }
+
+  TextPainter _layoutText(double baseFontSize) {
+    final box = textBox;
+    // 文本框留一圈内边距，文字不贴框边（PPT 默认内边距观感）。
+    final inner = box?.deflate(4);
+    TextPainter build(double fontSize) => TextPainter(
       text: TextSpan(
         text: text,
         style: TextStyle(
           color: color,
           fontSize: fontSize,
+          fontFamily: fontFamily.isEmpty ? null : fontFamily,
           fontWeight: FontWeight.bold,
         ),
       ),
       textDirection: TextDirection.ltr,
-    )..layout(maxWidth: textMaxWidth);
-    _textLayout = painter;
-    _textLayoutFontSize = fontSize;
-    _textLayoutColor = color;
-    _textLayoutMaxWidth = textMaxWidth;
+    )..layout(maxWidth: inner?.width ?? textMaxWidth);
+    if (inner == null) return build(baseFontSize);
+    // 字号随框自适应：装不下就按比例逐级缩小（不放大，框大不多占）。
+    var fontSize = baseFontSize;
+    var painter = build(fontSize);
+    var attempts = 0;
+    while ((painter.width > inner.width || painter.height > inner.height) &&
+        fontSize > 7 &&
+        attempts < 24) {
+      final scale =
+          math.min(
+            inner.width / math.max(painter.width, 1),
+            inner.height / math.max(painter.height, 1),
+          ) *
+          0.92;
+      fontSize = (fontSize * scale).clamp(7.0, baseFontSize);
+      painter = build(fontSize);
+      attempts++;
+    }
     return painter;
   }
 
@@ -108,7 +159,10 @@ class DrawCommand {
     this.color = const Color(0xffff0000),
     this.strokeWidth = 3,
     this.fillColor = const Color(0xffffffff),
+    this.maskStyle = MaskStyle.solid,
     this.textMaxWidth = double.infinity,
+    this.textBox,
+    this.fontFamily = '',
   });
 
   DrawCommand translated(Offset delta) {
@@ -122,7 +176,10 @@ class DrawCommand {
       color: color,
       strokeWidth: strokeWidth,
       fillColor: fillColor,
+      maskStyle: maskStyle,
       textMaxWidth: textMaxWidth,
+      textBox: textBox?.shift(delta),
+      fontFamily: fontFamily,
     );
   }
 
@@ -133,6 +190,8 @@ class DrawCommand {
     Color? fillColor,
     Rect? rect,
     String? text,
+    MaskStyle? maskStyle,
+    String? fontFamily,
   }) {
     return DrawCommand(
       type: type,
@@ -144,8 +203,11 @@ class DrawCommand {
       color: color ?? this.color,
       strokeWidth: strokeWidth ?? this.strokeWidth,
       fillColor: fillColor ?? this.fillColor,
+      maskStyle: maskStyle ?? this.maskStyle,
       // 不带上换行宽度，译文就会在改色/移动后散成一行。
       textMaxWidth: textMaxWidth,
+      textBox: textBox,
+      fontFamily: fontFamily ?? this.fontFamily,
     );
   }
 }
@@ -158,10 +220,11 @@ bool isEditableEffect(DrawCommand command) {
 }
 
 /// 从最上层往下找到第一个可整体操作（光标模式拖动/编辑）的图形对象。
+/// 蒙版不可拖动（蒙版是区域效果，移动会破坏语义）。
 int? findManipulableCommandIndex(List<DrawCommand> commands, Offset position) {
   for (var i = commands.length - 1; i >= 0; i--) {
     final command = commands[i];
-    if (isEditableEffect(command)) {
+    if (command.type == ScreenshotToolType.mask) {
       continue;
     }
     if (commandDisplayBounds(command).inflate(12).contains(position)) {
@@ -242,7 +305,8 @@ double _distanceToSegment(Offset point, Offset start, Offset end) {
   if (lengthSquared == 0) {
     return (point - start).distance;
   }
-  var t = ((point - start).dx * segment.dx + (point - start).dy * segment.dy) /
+  var t =
+      ((point - start).dx * segment.dx + (point - start).dy * segment.dy) /
       lengthSquared;
   t = t.clamp(0.0, 1.0);
   return (point - start - segment * t).distance;

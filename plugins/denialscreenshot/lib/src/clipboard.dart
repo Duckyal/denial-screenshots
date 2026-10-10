@@ -23,7 +23,7 @@ void recordClipboardNote(String message) => _log(message);
 /// 插件进程里常常拿不到 WAYLAND_DISPLAY / DISPLAY（Flutter shell 启动时没
 /// 把它们传进来），子进程因此连不上 Wayland（wl-copy 会退回 wayland-0）。
 /// 这里按 XDG_RUNTIME_DIR 里的 socket 把它们补上。
-Map<String, String> _childEnvironment() {
+Map<String, String> childProcessEnvironment() {
   final env = <String, String>{...Platform.environment};
   final runtimeDir = env['XDG_RUNTIME_DIR'] ?? '';
 
@@ -93,7 +93,7 @@ Future<bool> copyTextToClipboard(String text) async {
     return false;
   }
   _log('copy text ${text.length} chars');
-  final environment = _childEnvironment();
+  final environment = childProcessEnvironment();
   final bytes = utf8.encode(text);
   for (final command in <List<String>>[
     <String>['wl-copy', '--type', 'text/plain'],
@@ -145,7 +145,7 @@ Future<bool> copyPngToClipboard(Uint8List png) async {
     'DISPLAY=${Platform.environment['DISPLAY']}',
   );
 
-  final environment = _childEnvironment();
+  final environment = childProcessEnvironment();
   _log(
     'resolved WAYLAND_DISPLAY=${environment['WAYLAND_DISPLAY']} '
     'DISPLAY=${environment['DISPLAY']}',
