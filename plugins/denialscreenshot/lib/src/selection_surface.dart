@@ -459,25 +459,40 @@ class _CaptureFlowHostState extends ConsumerState<CaptureFlowHost> {
     return right >= left ? 'right' : 'left';
   }
 
-  /// 工具栏位置。默认贴选区下方；若结果窗也在下方，则让到结果窗下面；结果窗在
-  /// 上方时对称地让到结果窗上面。同侧放不下就换另一侧，上下都放不下时取上方并
-  /// 夹取到屏幕内。
+  /// 工具栏位置。结果窗已占一侧时，工具栏优先移到选区的**另一侧**，避免与
+  /// 结果窗同侧堆叠被挤出屏幕；异侧放不下才退回同侧堆叠。结果窗在左/右侧或
+  /// 未展开时，工具栏贴选区下方，下方放不下再贴上方，最后夹取到屏幕内。
   ({double left, double top}) _toolbarPlacement(Size size, Rect region) {
     final resultHeight = _resultWindowHeight ?? 0;
     final resultSide = _resultOpen ? _resultSide(size, region) : null;
-    final canBelow = region.bottom + 12 + _toolbarBarHeight <= size.height;
-    final canAbove = region.top - 12 - _toolbarBarHeight >= 0;
-    final belowPlain = region.bottom + 12;
-    final abovePlain = region.top - 12 - _toolbarBarHeight;
+    const gap = 12.0;
+    final canBelow = region.bottom + gap + _toolbarBarHeight <= size.height;
+    final canAbove = region.top - gap - _toolbarBarHeight >= 0;
+    final belowPlain = region.bottom + gap;
+    final abovePlain = region.top - gap - _toolbarBarHeight;
     final belowStacked = region.bottom + 10 + resultHeight + 10;
     final aboveStacked =
         region.top - 10 - resultHeight - 10 - _toolbarBarHeight;
+    final belowStackedFits = belowStacked + _toolbarBarHeight <= size.height;
+    final aboveStackedFits = aboveStacked >= 0;
 
     double top;
-    if (resultSide == 'below' && canBelow) {
-      top = belowStacked;
-    } else if (resultSide == 'above' && canAbove) {
-      top = aboveStacked;
+    if (resultSide == 'below') {
+      if (canAbove) {
+        top = abovePlain;
+      } else if (belowStackedFits) {
+        top = belowStacked;
+      } else {
+        top = abovePlain;
+      }
+    } else if (resultSide == 'above') {
+      if (canBelow) {
+        top = belowPlain;
+      } else if (aboveStackedFits) {
+        top = aboveStacked;
+      } else {
+        top = belowPlain;
+      }
     } else if (canBelow) {
       top = belowPlain;
     } else {
