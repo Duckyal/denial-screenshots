@@ -12,13 +12,12 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import 'capture_flow_bus.dart';
 import 'clipboard.dart';
-import 'editor/file_picker.dart';
 import 'editor/settings.dart';
 import 'editor/translate_service.dart';
 import 'editor_bus.dart';
 import 'pin_surface.dart';
 import 'scroll_capture.dart';
-import 'screenshot_store.dart';
+import 'selection_save_panel.dart';
 import 'selection_settings_panel.dart';
 
 /// 「框选 → 工具栏」截图的 surface 宿主。
@@ -35,7 +34,6 @@ final class CaptureFlowHost extends ConsumerStatefulWidget {
 }
 
 class _CaptureFlowHostState extends ConsumerState<CaptureFlowHost> {
-  final ScreenshotStore _store = const ScreenshotStore();
   final TranslateService _translateService = TranslateService();
 
   static const Duration _hideDelay = Duration(milliseconds: 180);
@@ -77,6 +75,9 @@ class _CaptureFlowHostState extends ConsumerState<CaptureFlowHost> {
 
   /// 设置面板（框选流程专用精简面板）。
   bool _settingsOpen = false;
+  bool _savePanelOpen = false;
+  String _saveDirectory = '';
+  String _saveFileName = 'Screenshot.png';
 
   /// 结果窗实际渲染高度（首帧后量到）：工具栏要贴在它下面，得知道它多高。
   final GlobalKey _resultCardKey = GlobalKey();
@@ -98,7 +99,18 @@ class _CaptureFlowHostState extends ConsumerState<CaptureFlowHost> {
         .cursorPositions
         .listen((position) => _cursorPosition.value = position);
     ScreenshotSettings.load().then((settings) {
-      if (mounted) setState(() => _settings = settings);
+      if (mounted) {
+        final homeDir = Platform.environment['HOME'] ?? '/';
+        setState(() {
+          _settings = settings;
+          _saveDirectory = '$homeDir/Pictures/Screenshots';
+          try {
+            Directory(_saveDirectory).createSync(recursive: true);
+          } catch (_) {}
+          _saveFileName =
+              'Screenshot-${DateTime.now().millisecondsSinceEpoch}.png';
+        });
+      }
     });
   }
 
@@ -127,6 +139,10 @@ class _CaptureFlowHostState extends ConsumerState<CaptureFlowHost> {
             if (!_visible || _capturing) return KeyEventResult.handled;
             if (_settingsOpen) {
               setState(() => _settingsOpen = false);
+              return KeyEventResult.handled;
+            }
+            if (_savePanelOpen) {
+              setState(() => _savePanelOpen = false);
               return KeyEventResult.handled;
             }
             if (_resultOpen) {
@@ -180,6 +196,8 @@ class _CaptureFlowHostState extends ConsumerState<CaptureFlowHost> {
             _buildResultWindow(size, _region!),
           if (!_capturing && _settingsOpen && _region != null)
             _buildSettingsOverlay(size, _region!),
+          if (!_capturing && _savePanelOpen && _region != null)
+            _buildSaveOverlay(size, _region!),
         ],
       ),
     );
@@ -264,6 +282,59 @@ class _CaptureFlowHostState extends ConsumerState<CaptureFlowHost> {
     // 面板底下那层 Stack）点不到。误触“重新框选/改选区”由外层 Listener 的
     // _settingsOpen 守卫拦住（[CaptureFlowHostState._handleDown] 等），
     // 所以这里只放面板本体，面板区域之外的事件照常穿透给工具栏。
+    return Stack(children: [positioned]);
+  }
+
+  /// 保存面板：沿用设置面板的贴边规则，把内嵌的文件选择浮层放到选区旁。
+  Widget _buildSaveOverlay(Size size, Rect region) {
+    const gap = 10.0;
+    const panelWidth = 380.0;
+    final maxHeight = math.min(520.0, size.height - 16);
+
+    final rightRoom = size.width - region.right - gap;
+    final leftRoom = region.left - gap;
+    final belowRoom = size.height - region.bottom - gap;
+    final aboveRoom = region.top - gap;
+
+    final panel = ConstrainedBox(
+      constraints: BoxConstraints(maxHeight: maxHeight),
+      child: SelectionSavePanel(
+        initialDirectory: _saveDirectory,
+        initialFileName: _saveFileName,
+        onConfirm: _confirmSave,
+        onClose: () => setState(() => _savePanelOpen = false),
+      ),
+    );
+
+    final resultSide = _resultOpen ? _resultSide(size, region) : null;
+
+    Widget positioned;
+    if (rightRoom >= panelWidth || leftRoom >= panelWidth) {
+      final canRight = rightRoom >= panelWidth && resultSide != 'right';
+      final left = canRight
+          ? region.right + gap
+          : region.left - gap - panelWidth;
+      final top = region.top
+          .clamp(8.0, math.max(size.height - maxHeight - 8, 8.0))
+          .toDouble();
+      positioned = Positioned(left: left, top: top, child: panel);
+    } else {
+      final left = region.left
+          .clamp(8.0, math.max(size.width - panelWidth - 8, 8.0))
+          .toDouble();
+      final down = belowRoom >= aboveRoom;
+      if (down) {
+        final top = region.bottom + gap;
+        positioned = Positioned(left: left, top: top, child: panel);
+      } else {
+        positioned = Positioned(
+          left: left,
+          bottom: size.height - (region.top - gap),
+          child: panel,
+        );
+      }
+    }
+
     return Stack(children: [positioned]);
   }
 
@@ -590,7 +661,12 @@ class _CaptureFlowHostState extends ConsumerState<CaptureFlowHost> {
   // ---- 手势：框选 / 微调 ----
 
   void _handleDown(Offset position, Size size) {
-    if (!_visible || _capturing || _resultOpen || _settingsOpen || _toolbarHit)
+    if (!_visible ||
+        _capturing ||
+        _resultOpen ||
+        _settingsOpen ||
+        _savePanelOpen ||
+        _toolbarHit)
       return;
     final region = _region;
     if (region != null) {
@@ -617,7 +693,12 @@ class _CaptureFlowHostState extends ConsumerState<CaptureFlowHost> {
   }
 
   void _handleMove(Offset position, Size size) {
-    if (!_dragging || _capturing || _resultOpen || _settingsOpen || _toolbarHit)
+    if (!_dragging ||
+        _capturing ||
+        _resultOpen ||
+        _settingsOpen ||
+        _savePanelOpen ||
+        _toolbarHit)
       return;
     final start = _pressStart;
     if (start == null) return;
@@ -639,7 +720,12 @@ class _CaptureFlowHostState extends ConsumerState<CaptureFlowHost> {
   }
 
   void _handleUp() {
-    if (!_dragging || _capturing || _resultOpen || _settingsOpen || _toolbarHit)
+    if (!_dragging ||
+        _capturing ||
+        _resultOpen ||
+        _settingsOpen ||
+        _savePanelOpen ||
+        _toolbarHit)
       return;
     setState(() {
       _dragging = false;
@@ -730,6 +816,7 @@ class _CaptureFlowHostState extends ConsumerState<CaptureFlowHost> {
       _resultBusy = false;
       _resultRegions = const [];
       _settingsOpen = false;
+      _savePanelOpen = false;
       _resultWindowHeight = null;
     });
   }
@@ -748,6 +835,7 @@ class _CaptureFlowHostState extends ConsumerState<CaptureFlowHost> {
       _resultBusy = false;
       _resultRegions = const [];
       _settingsOpen = false;
+      _savePanelOpen = false;
       _resultWindowHeight = null;
     });
   }
@@ -766,12 +854,13 @@ class _CaptureFlowHostState extends ConsumerState<CaptureFlowHost> {
       return (file: _capturedFile!, bytes: _capturedBytes!);
     }
     setState(() => _capturing = true);
+    // 临时隐藏选区，减少“切出去转圈”的视觉感
+    final wasVisible = _visible;
+    if (mounted && wasVisible) {
+      setState(() => _visible = false);
+    }
     // 遮罩藏掉一拍再截，grim 抓的是合成帧，会连压暗层一起抓到。
     await Future<void>.delayed(_hideDelay);
-    final directory = Directory('$_dataDir/selection-captures');
-    directory.createSync(recursive: true);
-    final stamp = DateTime.now().millisecondsSinceEpoch;
-    final path = '${directory.path}/capture-$stamp.png';
     var captureRect = region;
     if (region.width > _edgeInset * 2 + _minSelection &&
         region.height > _edgeInset * 2 + _minSelection) {
@@ -780,15 +869,19 @@ class _CaptureFlowHostState extends ConsumerState<CaptureFlowHost> {
     final geometry =
         '${captureRect.left.round()},${captureRect.top.round()} '
         '${captureRect.width.round()}x${captureRect.height.round()}';
-    var ok = false;
+    Uint8List? bytes;
     try {
       final process = await Process.start('grim', [
         '-g',
         geometry,
         '-t',
         'png',
-        path,
+        '-',
       ], environment: childProcessEnvironment());
+      final stdout = <int>[];
+      final stderr = <int>[];
+      process.stdout.listen((chunk) => stdout.addAll(chunk));
+      process.stderr.listen((chunk) => stderr.addAll(chunk));
       final code = await process.exitCode.timeout(
         const Duration(seconds: 4),
         onTimeout: () {
@@ -796,20 +889,34 @@ class _CaptureFlowHostState extends ConsumerState<CaptureFlowHost> {
           return -1;
         },
       );
-      ok = code == 0;
+      if (code == 0 && stdout.isNotEmpty) {
+        bytes = Uint8List.fromList(stdout);
+      } else {
+        bytes = null;
+      }
     } on Object {
-      ok = false;
+      bytes = null;
     }
-    final bytes = ok ? await _store.readStable(File(path)) : null;
-    if (mounted) setState(() => _capturing = false);
-    if (!ok || bytes == null || bytes.isEmpty) {
+    if (mounted) {
+      setState(() {
+        _capturing = false;
+        _visible = wasVisible;
+      });
+    }
+    if (bytes == null || bytes.isEmpty) {
       PinCardBus.instance.showToast('截取失败，请重试');
       return null;
     }
-    _capturedFile = File(path);
+    final directory = Directory('$_dataDir/selection-captures');
+    directory.createSync(recursive: true);
+    final stamp = DateTime.now().millisecondsSinceEpoch;
+    final path = '${directory.path}/capture-$stamp.png';
+    final file = File(path);
+    await file.writeAsBytes(bytes, flush: true);
+    _capturedFile = file;
     _capturedBytes = bytes;
     _capturedRect = region;
-    return (file: _capturedFile!, bytes: bytes);
+    return (file: file, bytes: bytes);
   }
 
   String _targetLanguage() {
@@ -901,23 +1008,23 @@ class _CaptureFlowHostState extends ConsumerState<CaptureFlowHost> {
     }
   }
 
-  /// 保存：复刻编辑器那套——拉起插件内置的路径选择对话框，由用户挑目录和
-  /// 文件名（初始定位在 ~/Pictures/Screenshots），而不是直接写死固定位置。
+  /// 保存：先在选区浮层里展开内嵌的保存面板（参照设置面板样式），由用户
+  /// 挑目录、填文件名，确认后再写盘——不再拉起外部路径对话框。
   Future<void> _saveImage() async {
     final captured = await _captureNow();
     if (captured == null) return;
-    final path = await choosePathWithDialog(
-      context: context,
-      arguments: [
-        '--file-selection',
-        '--save',
-        '--confirm-overwrite',
-        '--title=保存截图',
-        '--filename=Screenshot.png',
-        '--file-filter=PNG 图片 | *.png',
-      ],
-    );
-    if (path == null || path.isEmpty) return;
+    if (!mounted) return;
+    setState(() {
+      _settingsOpen = false;
+      _resultOpen = false;
+      _savePanelOpen = true;
+    });
+  }
+
+  /// 保存面板确认路径：抓取当前选区并写到该路径。
+  Future<void> _confirmSave(String path) async {
+    final captured = await _captureNow();
+    if (captured == null) return;
     try {
       await File(path).writeAsBytes(captured.bytes, flush: true);
     } on Object {
@@ -925,6 +1032,15 @@ class _CaptureFlowHostState extends ConsumerState<CaptureFlowHost> {
       return;
     }
     if (!mounted) return;
+    final slash = path.lastIndexOf('/');
+    setState(() {
+      _savePanelOpen = false;
+      if (slash > 0) {
+        _saveDirectory = path.substring(0, slash);
+        final name = path.substring(slash + 1);
+        if (name.isNotEmpty) _saveFileName = name;
+      }
+    });
     PinCardBus.instance.showToast('已保存：$path');
   }
 
