@@ -5,7 +5,8 @@ import 'dart:typed_data';
 import 'dart:ui' as ui;
 
 import 'package:denial_flutter_sdk/input.dart';
-import 'package:denial_flutter_sdk/state.dart' show denialBridgeProvider;
+import 'package:denial_flutter_sdk/state.dart'
+    show denialBridgeProvider, screenshotSelectionProvider;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart' show KeyDownEvent, LogicalKeyboardKey;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -875,12 +876,25 @@ class _CaptureFlowHostState extends ConsumerState<CaptureFlowHost> {
   /// 鼠标被合成进 grim 的整屏帧里的包围盒大小（输出逻辑像素）。
   static const double _keyCursorBoxLogical = 36.0;
 
-  /// 用 grim 抓整屏作为关键帧并解码。发生在浮层显示之前，所以画面干净；
-  /// 抓完顺手把合成进画面里的鼠标指针抹掉，否则背景和裁出来的图都会带个
-  /// 鼠标剪影。指针位置在 grim 一启动就读，抓帧有延迟，等解码后再读会滞后。
+  /// 借用 shell 藏好光标后、grim 之前留给合成的一拍时长。太小 grim 可能仍
+  /// 抓到含光标的旧帧（尤其静态画面这一拍没重绘），太大拖慢启动；当前取
+  /// ~1 帧，按实测再调。
+  static const Duration _cursorHideSettle = Duration(milliseconds: 17);
+
+  /// 用 grim 抓整屏作为关键帧并解码。为了让抓到的画面天生不含软件光标，
+  /// 先借用 shell 自己的隐藏光标信号（把 `screenshotSelectionProvider` 置为
+  /// `preparing` 相 → shell 这一拍不画光标），等一拍合成出无光标画面后再 grim，
+  /// 抓完立刻恢复光标。若借不到（已有原生截图在跑，`prepare` 返回 false）就
+  /// 退回老办法：抓到后在像素层把光标抹掉。指针位置在 grim 一启动就读，抓帧
+  /// 有延迟，等解码后再读会滞后。
   Future<void> _loadKeyFrame() async {
     Uint8List? bytes;
     Offset? cursorAtCapture;
+    final hideId = _beginCursorHide();
+    if (hideId != null) {
+      // 给 shell 一拍时间真正合成出无光标的帧，否则 grim 仍可能抓到旧帧。
+      await Future<void>.delayed(_cursorHideSettle);
+    }
     try {
       final process = await Process.start('grim', [
         '-t',
@@ -888,10 +902,10 @@ class _CaptureFlowHostState extends ConsumerState<CaptureFlowHost> {
         '-',
       ], environment: childProcessEnvironment());
       cursorAtCapture = _cursorPosition.value;
-      final stdout = <int>[];
-      final stderr = <int>[];
-      process.stdout.listen((chunk) => stdout.addAll(chunk));
-      process.stderr.listen((chunk) => stderr.addAll(chunk));
+      final stdout = BytesBuilder(copy: false);
+      final stderr = BytesBuilder(copy: false);
+      process.stdout.listen(stdout.add);
+      process.stderr.listen(stderr.add);
       final code = await process.exitCode.timeout(
         const Duration(seconds: 4),
         onTimeout: () {
@@ -899,23 +913,31 @@ class _CaptureFlowHostState extends ConsumerState<CaptureFlowHost> {
           return -1;
         },
       );
-      if (code == 0 && stdout.isNotEmpty) {
-        bytes = Uint8List.fromList(stdout);
+      if (code == 0 && stdout.length > 0) {
+        bytes = stdout.takeBytes();
       }
     } on Object {
       bytes = null;
+    } finally {
+      _endCursorHide(hideId);
     }
     if (bytes == null || bytes.isEmpty) {
       _disposeKeyFrame();
       return;
     }
-    final rgba = await _decodeRgbaBytes(bytes);
-    if (rgba == null) {
-      _disposeKeyFrame();
-      return;
+    ui.Image? image;
+    if (hideId != null) {
+      // 主路径：画面本就无光标、不抹除，直接把 PNG 解成 ui.Image 即可，
+      // 省掉读回 rawRgba 再重编码这两趟全屏。
+      image = await _decodePngToImage(bytes);
+    } else {
+      // 回退：grim 抓到了光标，需在像素层抹掉，只能走 rawRgba 往返。
+      final rgba = await _decodeRgbaBytes(bytes);
+      if (rgba != null) {
+        _eraseKeyCursor(rgba.$1, rgba.$2, rgba.$3, cursorAtCapture);
+        image = await _rgbaToImage(rgba.$1, rgba.$2, rgba.$3);
+      }
     }
-    _eraseKeyCursor(rgba.$1, rgba.$2, rgba.$3, cursorAtCapture);
-    final image = await _rgbaToImage(rgba.$1, rgba.$2, rgba.$3);
     if (image == null) {
       _disposeKeyFrame();
       return;
@@ -923,6 +945,44 @@ class _CaptureFlowHostState extends ConsumerState<CaptureFlowHost> {
     final previous = _keyFrame;
     _keyFrame = image;
     previous?.dispose();
+  }
+
+  /// PNG 一次性解码成 ui.Image，供「已藏光标、无需抹除」的关键帧路径使用。
+  static Future<ui.Image?> _decodePngToImage(Uint8List bytes) async {
+    try {
+      final codec = await ui.instantiateImageCodec(bytes);
+      final frame = await codec.getNextFrame();
+      codec.dispose();
+      return frame.image;
+    } on Object {
+      return null;
+    }
+  }
+
+  static int _cursorHideSeq = 0;
+
+  /// 请求 shell 进入「截图准备」相以隐藏软件光标；成功返回 requestId，
+  /// 借不到（已有原生会话）返回 null。
+  int? _beginCursorHide() {
+    try {
+      final id = ++_cursorHideSeq;
+      final prepared = ref
+          .read(screenshotSelectionProvider.notifier)
+          .prepare(id);
+      return prepared ? id : null;
+    } on Object {
+      return null;
+    }
+  }
+
+  /// 结束隐藏会话、恢复光标。幂等：[id] 为 null 时什么都不做。
+  void _endCursorHide(int? id) {
+    if (id == null) return;
+    try {
+      ref.read(screenshotSelectionProvider.notifier).done(id);
+    } on Object {
+      // 恢复失败不致命：下一次抓取/交互会重绘光标。
+    }
   }
 
   /// 整屏关键帧里抹掉鼠标：关键帧覆盖整个输出，指针逻辑坐标即像素坐标，
