@@ -12,7 +12,14 @@ final class CaptureFlowBus {
 
   final StreamController<void> _controller = StreamController<void>.broadcast();
 
+  /// 下一次进入框选流程时，选区确定后直接开始长截图拼接（不弹工具栏）。
+  /// 由「长截图」动作置位，选区宿主用掉后马上复位。
+  bool scrollMode = false;
+
   Stream<void> get requests => _controller.stream;
 
-  void begin() => _controller.add(null);
+  void begin({bool scrollMode = false}) {
+    this.scrollMode = scrollMode;
+    _controller.add(null);
+  }
 }

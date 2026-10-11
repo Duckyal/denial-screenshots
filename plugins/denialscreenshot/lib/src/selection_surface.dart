@@ -17,6 +17,7 @@ import 'editor/translate_service.dart';
 import 'editor_bus.dart';
 import 'pin_surface.dart';
 import 'scroll_capture.dart';
+import 'scroll_stitch.dart' show eraseRegionInPlace;
 import 'selection_save_panel.dart';
 import 'selection_settings_panel.dart';
 
@@ -55,6 +56,18 @@ class _CaptureFlowHostState extends ConsumerState<CaptureFlowHost> {
   /// 看到浮层消失又出现（退出再进）的闪烁；复制/置顶/编辑这类结束动作干脆
   /// 保持隐藏直到 [_close]，保存/识字则在抓完后直接展开对应面板。
   bool _captureHidden = false;
+
+  /// 正在进行的抓帧：选区一确定就立刻在后台抓好缓存，这样点复制/保存时
+  /// 直接命中缓存、不用再藏浮层重截（也就是不会“重载选区截图”）。
+  Future<({File file, Uint8List bytes})?>? _inflightCapture;
+
+  /// 触发截图那一刻（浮层还没盖上去）抓好的整屏关键帧。后续复制/保存/
+  /// 识字/置顶都直接从这个关键帧裁出选区，全程不用藏浮层、也不会闪一下。
+  ui.Image? _keyFrame;
+  bool _beginBusy = false;
+
+  /// 本会话是否是「长截图」：选区确定后直接开始滚动拼接，而不是弹工具栏。
+  bool _scrollMode = false;
 
   /// 当前选区（surface 逻辑坐标 == 输出坐标）。
   Rect? _region;
@@ -126,6 +139,7 @@ class _CaptureFlowHostState extends ConsumerState<CaptureFlowHost> {
     _cursorSub?.cancel();
     _cursorPosition.dispose();
     _translateService.dispose();
+    _disposeKeyFrame();
     super.dispose();
   }
 
@@ -197,6 +211,10 @@ class _CaptureFlowHostState extends ConsumerState<CaptureFlowHost> {
       child: Stack(
         fit: StackFit.expand,
         children: [
+          // 用触发时抓的关键帧当背景：所见即所得——被压暗的就是将来截下来的
+          // 那一帧，不会出现“看着画面在变、截下来的却是旧帧”的错位。
+          if (_keyFrame case final keyFrame?)
+            CustomPaint(painter: _KeyFramePainter(image: keyFrame)),
           CustomPaint(painter: _DimPainter(region: _region)),
           if (_region != null) _buildRegionOverlay(size, _region!),
           if (_resultOpen && _region != null)
@@ -731,6 +749,21 @@ class _CaptureFlowHostState extends ConsumerState<CaptureFlowHost> {
       _freshSelection = false;
       _pressBox = null;
     });
+    final region = _region;
+    if (region == null ||
+        region.width < _minSelection ||
+        region.height < _minSelection) {
+      return;
+    }
+    if (_scrollMode) {
+      // 长截图：选区确定后直接开拼，不弹工具栏。
+      _scrollMode = false;
+      unawaited(_startScrollCapture());
+      return;
+    }
+    // 普通模式：选区一确定就在后台预定抓帧，这样点复制/保存/置顶时直接命中
+    // 缓存，不用再藏一次浮层重截。
+    unawaited(_captureNow());
   }
 
   int _hitTestEdge(Rect region, Offset position) {
@@ -792,9 +825,20 @@ class _CaptureFlowHostState extends ConsumerState<CaptureFlowHost> {
 
   // ---- 动作 ----
 
-  void _begin() {
-    if (!mounted || _visible) return;
+  Future<void> _begin() async {
+    if (!mounted || _visible || _beginBusy) return;
+    _beginBusy = true;
     DenialScreenshotEditorBus.instance.suppressAutoOpen.value = true;
+    // 长截图模式：选区确定后直接滚动拼接。
+    _scrollMode = CaptureFlowBus.instance.scrollMode;
+    CaptureFlowBus.instance.scrollMode = false;
+    try {
+      // 先抓关键帧（这拍浮层还没出现，画面是干净的），再显示压暗/选区浮层。
+      await _loadKeyFrame();
+    } on Object {
+      // 关键帧抓不到就空着，之后走藏浮层重抓的兜底。
+    }
+    if (!mounted) return;
     setState(() {
       _visible = true;
       _capturing = false;
@@ -810,10 +854,130 @@ class _CaptureFlowHostState extends ConsumerState<CaptureFlowHost> {
       _savePanelOpen = false;
       _resultWindowHeight = null;
     });
+    _beginBusy = false;
+  }
+
+  /// 鼠标被合成进 grim 的整屏帧里的包围盒大小（输出逻辑像素）。
+  static const double _keyCursorBoxLogical = 36.0;
+
+  /// 用 grim 抓整屏作为关键帧并解码。发生在浮层显示之前，所以画面干净；
+  /// 抓完顺手把合成进画面里的鼠标指针抹掉，否则背景和裁出来的图都会带个
+  /// 鼠标剪影。指针位置在 grim 一启动就读，抓帧有延迟，等解码后再读会滞后。
+  Future<void> _loadKeyFrame() async {
+    Uint8List? bytes;
+    Offset? cursorAtCapture;
+    try {
+      final process = await Process.start('grim', [
+        '-t',
+        'png',
+        '-',
+      ], environment: childProcessEnvironment());
+      cursorAtCapture = _cursorPosition.value;
+      final stdout = <int>[];
+      final stderr = <int>[];
+      process.stdout.listen((chunk) => stdout.addAll(chunk));
+      process.stderr.listen((chunk) => stderr.addAll(chunk));
+      final code = await process.exitCode.timeout(
+        const Duration(seconds: 4),
+        onTimeout: () {
+          process.kill();
+          return -1;
+        },
+      );
+      if (code == 0 && stdout.isNotEmpty) {
+        bytes = Uint8List.fromList(stdout);
+      }
+    } on Object {
+      bytes = null;
+    }
+    if (bytes == null || bytes.isEmpty) {
+      _disposeKeyFrame();
+      return;
+    }
+    final rgba = await _decodeRgbaBytes(bytes);
+    if (rgba == null) {
+      _disposeKeyFrame();
+      return;
+    }
+    _eraseKeyCursor(rgba.$1, rgba.$2, rgba.$3, cursorAtCapture);
+    final image = await _rgbaToImage(rgba.$1, rgba.$2, rgba.$3);
+    if (image == null) {
+      _disposeKeyFrame();
+      return;
+    }
+    final previous = _keyFrame;
+    _keyFrame = image;
+    previous?.dispose();
+  }
+
+  /// 整屏关键帧里抹掉鼠标：关键帧覆盖整个输出，指针逻辑坐标即像素坐标，
+  /// 块大小不再缩放（scale=1）。
+  void _eraseKeyCursor(Uint8List rgba, int width, int height, Offset? cursor) {
+    if (cursor == null) return;
+    final box = _keyCursorBoxLogical.ceil();
+    if (cursor.dx + box < 0 ||
+        cursor.dx > width ||
+        cursor.dy + box < 0 ||
+        cursor.dy > height) {
+      return;
+    }
+    const pad = 4;
+    final px = (cursor.dx - pad)
+        .floor()
+        .clamp(0, math.max(0, width - 1))
+        .toInt();
+    final py = (cursor.dy - pad)
+        .floor()
+        .clamp(0, math.max(0, height - 1))
+        .toInt();
+    eraseRegionInPlace(rgba, width, height, px, py, box + pad, box + pad);
+  }
+
+  static Future<(Uint8List, int, int)?> _decodeRgbaBytes(
+    Uint8List bytes,
+  ) async {
+    try {
+      final codec = await ui.instantiateImageCodec(bytes);
+      final frame = await codec.getNextFrame();
+      codec.dispose();
+      final data = await frame.image.toByteData(
+        format: ui.ImageByteFormat.rawRgba,
+      );
+      final width = frame.image.width;
+      final height = frame.image.height;
+      frame.image.dispose();
+      if (data == null) return null;
+      return (data.buffer.asUint8List(), width, height);
+    } on Object {
+      return null;
+    }
+  }
+
+  static Future<ui.Image?> _rgbaToImage(
+    Uint8List rgba,
+    int width,
+    int height,
+  ) async {
+    try {
+      final descriptor = await ui.ImageDescriptor.raw(
+        await ui.ImmutableBuffer.fromUint8List(rgba),
+        width: width,
+        height: height,
+        pixelFormat: ui.PixelFormat.rgba8888,
+      );
+      final codec = await descriptor.instantiateCodec();
+      final frame = await codec.getNextFrame();
+      codec.dispose();
+      descriptor.dispose();
+      return frame.image;
+    } on Object {
+      return null;
+    }
   }
 
   void _close() {
     DenialScreenshotEditorBus.instance.suppressAutoOpen.value = false;
+    _disposeKeyFrame();
     if (!mounted) return;
     setState(() {
       _visible = false;
@@ -832,23 +996,126 @@ class _CaptureFlowHostState extends ConsumerState<CaptureFlowHost> {
     });
   }
 
+  void _disposeKeyFrame() {
+    final frame = _keyFrame;
+    _keyFrame = null;
+    frame?.dispose();
+  }
+
   /// 抓取当前选区。[restore] 为 false 时抓完仍保持隐藏，交由调用方直接
   /// [_close] 或展开面板，避免浮层先弹回来再消失的闪烁。
-  Future<({File file, Uint8List bytes})?> _captureNow({
-    bool restore = true,
-  }) async {
-    if (_capturing) return null;
+  Future<({File file, Uint8List bytes})?> _captureNow({bool restore = true}) {
+    final inflight = _inflightCapture;
+    if (inflight != null) return inflight;
+    if (_capturing) return Future.value(null);
     final region = _region;
     if (region == null ||
         region.width < _minSelection ||
         region.height < _minSelection) {
-      return null;
+      return Future.value(null);
     }
     if (_capturedBytes != null &&
         _capturedFile != null &&
         _capturedRect == region) {
-      return (file: _capturedFile!, bytes: _capturedBytes!);
+      return Future.value((file: _capturedFile!, bytes: _capturedBytes!));
     }
+    final future = _captureFromKey(region: region, restore: restore);
+    _inflightCapture = future;
+    future.whenComplete(() {
+      if (identical(_inflightCapture, future)) _inflightCapture = null;
+    });
+    return future;
+  }
+
+  /// 首选路径：直接从触发时抓好的关键帧裁出选区，不藏浮层、不经 grim。
+  Future<({File file, Uint8List bytes})?> _captureFromKey({
+    required Rect region,
+    required bool restore,
+  }) async {
+    if (_keyFrame == null) {
+      // 关键帧没抓到（grim 失败或还没就绪）才退回藏浮层实时抓。
+      return _doCapture(region: region, restore: restore);
+    }
+    Uint8List? bytes;
+    try {
+      bytes = await _cropKeyFrame(region);
+    } on Object {
+      bytes = null;
+    }
+    if (bytes == null || bytes.isEmpty) {
+      PinCardBus.instance.showToast('截取失败，请重试');
+      if (mounted) setState(() => _captureHidden = false);
+      return null;
+    }
+    final file = await _writeCapture(region, bytes);
+    if (file == null) {
+      PinCardBus.instance.showToast('截取失败，请重试');
+      return null;
+    }
+    return (file: file, bytes: bytes);
+  }
+
+  /// 从关键帧裁出选区矩形并编码成 PNG。
+  Future<Uint8List?> _cropKeyFrame(Rect region) async {
+    final full = _keyFrame;
+    if (full == null) return null;
+    var src = Rect.fromLTRB(
+      region.left,
+      region.top,
+      region.right,
+      region.bottom,
+    );
+    if (region.width > _edgeInset * 2 + _minSelection &&
+        region.height > _edgeInset * 2 + _minSelection) {
+      src = src.deflate(_edgeInset);
+    }
+    final left = src.left.clamp(0.0, full.width.toDouble()).toDouble();
+    final top = src.top.clamp(0.0, full.height.toDouble()).toDouble();
+    final right = src.right.clamp(0.0, full.width.toDouble()).toDouble();
+    final bottom = src.bottom.clamp(0.0, full.height.toDouble()).toDouble();
+    final width = math.max(1, (right - left).round());
+    final height = math.max(1, (bottom - top).round());
+    final recorder = ui.PictureRecorder();
+    final canvas = Canvas(recorder);
+    canvas.drawImageRect(
+      full,
+      Rect.fromLTRB(left, top, right, bottom),
+      Offset.zero & Size(width.toDouble(), height.toDouble()),
+      Paint()..filterQuality = FilterQuality.none,
+    );
+    final cropped = await recorder.endRecording().toImage(width, height);
+    try {
+      final data = await cropped.toByteData(format: ui.ImageByteFormat.png);
+      return data?.buffer.asUint8List();
+    } finally {
+      cropped.dispose();
+    }
+  }
+
+  static int _captureSeq = 0;
+
+  /// 把选区 PNG 写到临时目录，并更新 [_capturedFile]/[_capturedBytes] 缓存。
+  Future<File?> _writeCapture(Rect region, Uint8List bytes) async {
+    try {
+      final directory = Directory('$_dataDir/selection-captures');
+      directory.createSync(recursive: true);
+      final stamp = DateTime.now().millisecondsSinceEpoch;
+      final path = '${directory.path}/capture-$stamp-${_captureSeq++}.png';
+      final file = File(path);
+      await file.writeAsBytes(bytes, flush: true);
+      _capturedFile = file;
+      _capturedBytes = bytes;
+      _capturedRect = region;
+      return file;
+    } on Object {
+      return null;
+    }
+  }
+
+  Future<({File file, Uint8List bytes})?> _doCapture({
+    required Rect region,
+    required bool restore,
+  }) async {
     setState(() {
       _capturing = true;
       _captureHidden = true;
@@ -894,8 +1161,9 @@ class _CaptureFlowHostState extends ConsumerState<CaptureFlowHost> {
     if (mounted) {
       setState(() {
         _capturing = false;
-        // 失败时无论如何要恢复浮层，成功且 restore=false 则保持隐藏。
-        if (!restore || bytes == null || bytes.isEmpty) {
+        // 成功且 restore=false 时保持隐藏（交由调用方关闭或展开面板）；
+        // 其余情况（失败，或 restore=true）都要把浮层恢复出来。
+        if (restore || bytes == null || bytes.isEmpty) {
           _captureHidden = false;
         }
       });
@@ -904,15 +1172,11 @@ class _CaptureFlowHostState extends ConsumerState<CaptureFlowHost> {
       PinCardBus.instance.showToast('截取失败，请重试');
       return null;
     }
-    final directory = Directory('$_dataDir/selection-captures');
-    directory.createSync(recursive: true);
-    final stamp = DateTime.now().millisecondsSinceEpoch;
-    final path = '${directory.path}/capture-$stamp.png';
-    final file = File(path);
-    await file.writeAsBytes(bytes, flush: true);
-    _capturedFile = file;
-    _capturedBytes = bytes;
-    _capturedRect = region;
+    final file = await _writeCapture(region, bytes);
+    if (file == null) {
+      PinCardBus.instance.showToast('截取失败，请重试');
+      return null;
+    }
     return (file: file, bytes: bytes);
   }
 
@@ -1210,6 +1474,27 @@ class _ToolbarHost extends StatelessWidget {
 
 /// 压暗层：全屏半透明黑，选区矩形挖洞（[ui.BlendMode.clear]），再画白色描边
 /// 与四角拖拽柄。
+/// 把触发时抓的整屏关键帧铺满选区浮层作为背景。
+class _KeyFramePainter extends CustomPainter {
+  _KeyFramePainter({required this.image});
+
+  final ui.Image image;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    canvas.drawImageRect(
+      image,
+      Rect.fromLTWH(0, 0, image.width.toDouble(), image.height.toDouble()),
+      Offset.zero & size,
+      Paint()..filterQuality = FilterQuality.none,
+    );
+  }
+
+  @override
+  bool shouldRepaint(covariant _KeyFramePainter oldDelegate) =>
+      oldDelegate.image != image;
+}
+
 class _DimPainter extends CustomPainter {
   _DimPainter({required this.region});
 
