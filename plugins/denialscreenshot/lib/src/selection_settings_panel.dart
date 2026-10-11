@@ -1,7 +1,9 @@
 import 'dart:async';
+import 'dart:io';
 
 import 'package:flutter/material.dart';
 
+import 'clipboard.dart';
 import 'editor/settings.dart';
 import 'editor/translate_service.dart';
 
@@ -42,6 +44,11 @@ class _SelectionSettingsPanelState extends State<SelectionSettingsPanel> {
   String _ocrBusyKey = '';
   String _ocrMessage = '';
 
+  /// 外部滚动注入工具（wtype / ydotool）的安装状态。
+  Map<String, bool> _toolInstalled = const {};
+  String _toolBusy = '';
+  String _toolMessage = '';
+
   bool _apiTesting = false;
   String _apiTestResult = '';
 
@@ -50,6 +57,7 @@ class _SelectionSettingsPanelState extends State<SelectionSettingsPanel> {
     super.initState();
     unawaited(_refreshPacks());
     unawaited(_refreshOcr());
+    unawaited(_refreshTools());
   }
 
   void _apply(ScreenshotSettings next) {
@@ -126,6 +134,78 @@ class _SelectionSettingsPanelState extends State<SelectionSettingsPanel> {
       setState(() => _ocrMessage = '$error');
     }
     if (mounted) setState(() => _ocrBusyKey = '');
+  }
+
+  Future<void> _refreshTools() async {
+    final installed = <String, bool>{
+      'wtype': await _commandExists('wtype'),
+      'ydotool': await _commandExists('ydotool'),
+    };
+    if (mounted) setState(() => _toolInstalled = installed);
+  }
+
+  Future<bool> _commandExists(String name) async {
+    try {
+      final result = await Process.run('which', [name]);
+      return result.exitCode == 0;
+    } on Object {
+      return false;
+    }
+  }
+
+  /// 走系统包管理器安装外部注入工具。优先用 pkexec 提权；拿不到 pkexec 就
+  /// 退化为提示手动安装命令。
+  Future<void> _installTool(String tool) async {
+    setState(() {
+      _toolBusy = tool;
+      _toolMessage = '正在安装 $tool…';
+    });
+    try {
+      const managers = <String, List<String>>{
+        'pacman': ['-S', '--noconfirm'],
+        'apt-get': ['install', '-y'],
+        'apt': ['install', '-y'],
+        'dnf': ['install', '-y'],
+        'zypper': ['install', '-y'],
+        'apk': ['add'],
+        'xbps-install': ['-y'],
+      };
+      String? manager;
+      for (final name in managers.keys) {
+        if (await _commandExists(name)) {
+          manager = name;
+          break;
+        }
+      }
+      if (manager == null) {
+        if (mounted) {
+          setState(() => _toolMessage = '未找到包管理器，请手动安装 $tool');
+        }
+        return;
+      }
+      final args = <String>[...managers[manager]!, tool];
+      if (await _commandExists('pkexec')) {
+        final result = await Process.run('pkexec', [
+          manager,
+          ...args,
+        ], environment: childProcessEnvironment());
+        if (!mounted) return;
+        setState(() {
+          _toolMessage = result.exitCode == 0
+              ? '$tool 安装完成'
+              : '安装失败：${result.stderr.toString().trim()}';
+        });
+      } else {
+        setState(() => _toolMessage = '请手动执行：sudo $manager ${args.join(' ')}');
+      }
+    } on Object catch (error) {
+      if (mounted) setState(() => _toolMessage = '$error');
+    } finally {
+      if (mounted) {
+        setState(() => _toolBusy = '');
+        await _refreshTools();
+      }
+    }
   }
 
   String _target() {
@@ -257,7 +337,107 @@ class _SelectionSettingsPanelState extends State<SelectionSettingsPanel> {
         ('es', 'Español'),
       ], (value) => _apply(_settings.copyWith(translateTarget: value))),
       ..._ocrSection(),
+      ..._scrollCaptureSection(),
     ];
+  }
+
+  List<Widget> _scrollCaptureSection() {
+    return [
+      const Padding(
+        padding: EdgeInsets.only(top: 10, bottom: 2),
+        child: Text(
+          '长截图',
+          style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600),
+        ),
+      ),
+      _group('滚动方式（是否自动滚动）', _settings.autoScroll ? 'auto' : 'manual', const [
+        ('auto', '自动滚动（默认）'),
+        ('manual', '手动滚动'),
+      ], (value) => _apply(_settings.copyWith(autoScroll: value == 'auto'))),
+      if (_settings.autoScroll) ...[
+        _group(
+          '注入方式',
+          _settings.scrollInjector,
+          const [
+            ('denial', 'denial 虚拟键盘（默认）'),
+            ('wtype', 'wtype'),
+            ('ydotool', 'ydotool'),
+          ],
+          (value) {
+            _apply(_settings.copyWith(scrollInjector: value));
+            unawaited(_refreshTools());
+          },
+        ),
+        if (_settings.scrollInjector != 'denial') _toolInstallRow(),
+        _group('滚动按键', _settings.autoScrollKey, const [
+          ('Down', '逐行 ↓'),
+          ('space', '翻页 空格'),
+        ], (value) => _apply(_settings.copyWith(autoScrollKey: value))),
+        const Padding(
+          padding: EdgeInsets.only(top: 4),
+          child: Text(
+            '自动滚动靠向目标窗口注入按键实现，仅对浏览器、阅读器等'
+            '“方向键/空格可滚动”的应用有效；文本编辑器里按键可能改变光标。'
+            'wtype 直接连 Wayland 会话，ydotool 需要 ydotoold 守护进程。',
+            style: TextStyle(fontSize: 11, color: Colors.white60),
+          ),
+        ),
+      ],
+    ];
+  }
+
+  /// 外部注入工具（wtype / ydotool）的安装状态行：已安装打勾，未安装给
+  /// 「安装」按钮（走系统包管理器）。
+  Widget _toolInstallRow() {
+    final tool = _settings.scrollInjector;
+    final installed = _toolInstalled[tool] ?? false;
+    final busy = _toolBusy == tool;
+    return Padding(
+      padding: const EdgeInsets.only(top: 6),
+      child: Row(
+        children: [
+          Icon(
+            installed ? Icons.check_circle_outline : Icons.error_outline,
+            size: 15,
+            color: installed ? Colors.lightGreenAccent : Colors.orangeAccent,
+          ),
+          const SizedBox(width: 6),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  installed ? '$tool 已安装' : '$tool 未安装',
+                  style: const TextStyle(fontSize: 12, color: Colors.white),
+                ),
+                if (_toolMessage.isNotEmpty && !busy)
+                  Text(
+                    _toolMessage,
+                    style: const TextStyle(fontSize: 11, color: Colors.white60),
+                    maxLines: 3,
+                    overflow: TextOverflow.ellipsis,
+                  ),
+              ],
+            ),
+          ),
+          if (!installed)
+            busy
+                ? const SizedBox(
+                    width: 15,
+                    height: 15,
+                    child: CircularProgressIndicator(strokeWidth: 2),
+                  )
+                : TextButton(
+                    onPressed: () => _installTool(tool),
+                    style: TextButton.styleFrom(
+                      visualDensity: VisualDensity.compact,
+                      padding: const EdgeInsets.symmetric(horizontal: 10),
+                    ),
+                    child: const Text('安装', style: TextStyle(fontSize: 12)),
+                  ),
+        ],
+      ),
+    );
   }
 
   List<Widget> _apiSection() {

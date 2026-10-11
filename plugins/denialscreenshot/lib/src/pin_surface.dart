@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:math' as math;
 import 'dart:typed_data';
 
 import 'package:denial_flutter_sdk/input.dart';
@@ -168,7 +169,8 @@ class _PinnedShotHostState extends ConsumerState<PinnedShotHost> {
         return Stack(
           children: <Widget>[
             for (final card in cards) _buildCard(card),
-            _buildScrollCaptureHud(),
+            const _ScrollPreviewWindow(),
+            const _ScrollRegionIndicator(),
             _buildToast(),
           ],
         );
@@ -209,50 +211,6 @@ class _PinnedShotHostState extends ConsumerState<PinnedShotHost> {
           },
         ),
       ),
-    );
-  }
-
-  /// 长截图会话 HUD：吸顶胶囊，点击结束会话（编辑器已关，桌面可正常
-  /// 滚动操作；输入只占胶囊范围）。
-  Widget _buildScrollCaptureHud() {
-    return ValueListenableBuilder<bool>(
-      valueListenable: ScrollCaptureManager.instance.active,
-      builder: (BuildContext context, bool active, Widget? child) {
-        if (!active) return const SizedBox.shrink();
-        return Positioned(
-          left: 0,
-          right: 0,
-          top: 20,
-          child: Center(
-            child: ShellInputRegion(
-              debugLabel: 'Denial scroll capture hud',
-              pointerPolicy: ShellPointerPolicy.childBounds,
-              keyboardPolicy: ShellKeyboardPolicy.none,
-              compositorPolicy: ShellCompositorPolicy.normal,
-              child: GestureDetector(
-                onTap: () => ScrollCaptureManager.instance.stop(),
-                child: Container(
-                  padding: const EdgeInsets.symmetric(
-                    horizontal: 16,
-                    vertical: 9,
-                  ),
-                  decoration: BoxDecoration(
-                    color: Colors.black.withValues(alpha: 0.82),
-                    borderRadius: BorderRadius.circular(20),
-                    border: Border.all(
-                      color: Colors.blue.withValues(alpha: 0.7),
-                    ),
-                  ),
-                  child: const Text(
-                    '长截图进行中：滚动页面，点此或再按 Super+R 结束',
-                    style: TextStyle(color: Colors.white, fontSize: 13),
-                  ),
-                ),
-              ),
-            ),
-          ),
-        );
-      },
     );
   }
 
@@ -411,6 +369,369 @@ class _PinnedShotHostState extends ConsumerState<PinnedShotHost> {
       EditorResumeRequest(
         imageBytes: hasAnnotations ? source : image.bytes,
         commands: hasAnnotations ? image.commands : const <DrawCommand>[],
+      ),
+    );
+  }
+}
+
+/// 长截图实时预览：把正在增长的长图缩略图钉成右上角浮动小窗，可拖动、可结束。
+///
+/// 内容来自 [ScrollCaptureManager.preview]（每拼接一帧更新一次的缩略图），
+/// 只在长截图会话进行中显示。输入只占窗口范围，其余交还桌面。
+class _ScrollPreviewWindow extends StatefulWidget {
+  const _ScrollPreviewWindow();
+
+  @override
+  State<_ScrollPreviewWindow> createState() => _ScrollPreviewWindowState();
+}
+
+class _ScrollPreviewWindowState extends State<_ScrollPreviewWindow> {
+  static const double _margin = 16;
+  static const double _headerHeight = 30;
+  static const double _border = 1;
+  static const double _minWindowWidth = 150;
+
+  /// null 表示尚未拖动过，按区域自动摆放（贴边框一侧或右上角）。
+  Offset? _offset;
+
+  @override
+  void initState() {
+    super.initState();
+    ScrollCaptureManager.instance.active.addListener(_onSessionEnd);
+  }
+
+  @override
+  void dispose() {
+    ScrollCaptureManager.instance.active.removeListener(_onSessionEnd);
+    super.dispose();
+  }
+
+  /// 新会话开始时清掉上次拖动的位置，重新贴边框自动摆放。
+  void _onSessionEnd() {
+    if (!ScrollCaptureManager.instance.active.value && _offset != null) {
+      setState(() => _offset = null);
+    }
+  }
+
+  void _drag(Offset delta, Size viewport) {
+    final current = _offset;
+    if (current == null) return;
+    final next = current + delta;
+    final maxX = (viewport.width - 40).clamp(0.0, viewport.width);
+    final maxY = (viewport.height - _headerHeight).clamp(0.0, viewport.height);
+    setState(() {
+      _offset = Offset(
+        next.dx.clamp(0.0, maxX).toDouble(),
+        next.dy.clamp(0.0, maxY).toDouble(),
+      );
+    });
+  }
+
+  /// 默认摆放：优先贴在截图边框右侧；右侧放不下就贴左侧；都没有空间再退回
+  /// 右上角。拖动过一次之后 [offset] 生效，不再自动贴。
+  Offset _defaultOffset(Size viewport, Rect? region, double winWidth) {
+    final top = region == null
+        ? _margin
+        : region.top.clamp(_margin, viewport.height);
+    if (region != null && !region.isEmpty && region.isFinite) {
+      if (region.right + _margin + winWidth <= viewport.width) {
+        return Offset(region.right + _margin, top);
+      }
+      final left = region.left - _margin - winWidth;
+      if (left >= 0) {
+        return Offset(left, top);
+      }
+      final clampedLeft = region.left.clamp(0.0, viewport.width - winWidth);
+      return Offset(clampedLeft, top);
+    }
+    return Offset(viewport.width - winWidth - _margin, _margin);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final manager = ScrollCaptureManager.instance;
+    return ValueListenableBuilder<bool>(
+      valueListenable: manager.active,
+      builder: (BuildContext context, bool active, Widget? child) {
+        if (!active) return const SizedBox.shrink();
+        return ValueListenableBuilder<ScrollPreview?>(
+          valueListenable: manager.preview,
+          builder: (BuildContext context, ScrollPreview? preview, Widget? _) {
+            if (preview == null) return const SizedBox.shrink();
+            return _buildWindow(context, preview);
+          },
+        );
+      },
+    );
+  }
+
+  Widget _buildWindow(BuildContext context, ScrollPreview preview) {
+    final viewport = MediaQuery.sizeOf(context);
+    final manager = ScrollCaptureManager.instance;
+    final image = preview.image;
+    final bodyWidth = image.width.toDouble();
+    final bodyHeight = image.height.toDouble();
+    final width = math.max(_minWindowWidth, bodyWidth + _border * 2);
+    final offset =
+        _offset ?? _defaultOffset(viewport, manager.region.value, width);
+    return Positioned(
+      left: offset.dx,
+      top: offset.dy,
+      child: ShellInputRegion(
+        debugLabel: 'Denial scroll preview',
+        pointerPolicy: ShellPointerPolicy.childBounds,
+        keyboardPolicy: ShellKeyboardPolicy.none,
+        compositorPolicy: ShellCompositorPolicy.normal,
+        child: Container(
+          width: width,
+          decoration: BoxDecoration(
+            color: const Color(0xE60F1419),
+            borderRadius: BorderRadius.circular(10),
+            border: Border.all(color: Colors.blue.withValues(alpha: 0.5)),
+            boxShadow: const [
+              BoxShadow(
+                color: Colors.black54,
+                blurRadius: 16,
+                offset: Offset(0, 6),
+              ),
+            ],
+          ),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              _buildHeader(preview, viewport),
+              ClipRRect(
+                borderRadius: const BorderRadius.vertical(
+                  bottom: Radius.circular(9),
+                ),
+                child: ColoredBox(
+                  color: const Color(0xFF0F1419),
+                  child: RawImage(
+                    image: image,
+                    width: bodyWidth,
+                    height: bodyHeight,
+                    fit: BoxFit.contain,
+                    filterQuality: FilterQuality.medium,
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildHeader(ScrollPreview preview, Size viewport) {
+    return GestureDetector(
+      behavior: HitTestBehavior.opaque,
+      onPanStart: (_) {
+        _offset ??= _defaultOffset(
+          viewport,
+          ScrollCaptureManager.instance.region.value,
+          math.max(_minWindowWidth, preview.image.width + _border * 2),
+        );
+      },
+      onPanUpdate: (details) => _drag(details.delta, viewport),
+      child: MouseRegion(
+        cursor: SystemMouseCursors.move,
+        child: SizedBox(
+          height: _headerHeight,
+          child: Padding(
+            padding: const EdgeInsets.only(left: 10, right: 2),
+            child: Row(
+              children: [
+                const Text(
+                  '长图预览',
+                  style: TextStyle(
+                    color: Colors.white,
+                    fontSize: 12,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: Text(
+                    '${preview.width}×${preview.height}',
+                    textAlign: TextAlign.right,
+                    style: const TextStyle(color: Colors.white54, fontSize: 11),
+                  ),
+                ),
+                GestureDetector(
+                  behavior: HitTestBehavior.opaque,
+                  onTap: () => ScrollCaptureManager.instance.stop(),
+                  child: Container(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 10,
+                      vertical: 5,
+                    ),
+                    decoration: BoxDecoration(
+                      color: const Color(0xFF1976D2),
+                      borderRadius: BorderRadius.circular(6),
+                    ),
+                    child: const Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Icon(
+                          Icons.stop_circle_outlined,
+                          size: 14,
+                          color: Colors.white,
+                        ),
+                        SizedBox(width: 4),
+                        Text(
+                          '结束截屏',
+                          style: TextStyle(
+                            color: Colors.white,
+                            fontSize: 12,
+                            fontWeight: FontWeight.w500,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// 长截图进行中：在屏幕框定正在截取的区域——蓝色描边 + 尺寸/进度浮层，
+/// 让用户知道长截图到底框的是哪一块。纯提示，不注册任何输入（其余交还桌面）。
+///
+/// 边框和浮层都画在采样矩形**外侧**（grim 按 region 几何裁图，只取矩形内部
+/// 像素），这样提示不会跟着页面一起被拼进长截图。
+class _ScrollRegionIndicator extends StatelessWidget {
+  const _ScrollRegionIndicator();
+
+  @override
+  Widget build(BuildContext context) {
+    final manager = ScrollCaptureManager.instance;
+    return ValueListenableBuilder<bool>(
+      valueListenable: manager.active,
+      builder: (BuildContext context, bool active, Widget? child) {
+        if (!active) return const SizedBox.shrink();
+        return ValueListenableBuilder<Rect?>(
+          valueListenable: manager.region,
+          builder: (BuildContext context, Rect? region, Widget? child) {
+            if (region == null) return const SizedBox.shrink();
+            return _ScrollRegionMark(region: region);
+          },
+        );
+      },
+    );
+  }
+}
+
+class _ScrollRegionMark extends StatelessWidget {
+  const _ScrollRegionMark({required this.region});
+
+  final Rect region;
+
+  @override
+  Widget build(BuildContext context) {
+    final manager = ScrollCaptureManager.instance;
+    return ValueListenableBuilder<int>(
+      valueListenable: manager.captured,
+      builder: (BuildContext context, int captured, Widget? child) {
+        final preview = manager.preview.value;
+        final stitched = preview?.height ?? 0;
+        final label =
+            '${region.width.round()}×${region.height.round()}\n已拼 $stitched px · $captured 帧';
+        return ValueListenableBuilder<ScrollPreview?>(
+          valueListenable: manager.preview,
+          builder: (BuildContext context, ScrollPreview? _, Widget? __) =>
+              _buildMark(context, label),
+        );
+      },
+    );
+  }
+
+  Widget _buildMark(BuildContext context, String label) {
+    final size = MediaQuery.sizeOf(context);
+
+    // 描边环放在采样矩形外面：边框全部落在 region 之外的像素上，不进帧。
+    const ring = 5.0;
+    final outer = region.inflate(ring);
+
+    // 尺寸/进度浮层同样放选区外：优先选区正上方，放不下贴正下方；都没空间
+    // 就藏起来（宁可看不见也别污染截图）。
+    const labelBox = Size(150.0, 42.0);
+    Widget? labelWidget;
+    final above = region.top - 6 - labelBox.height;
+    final left = region.left.clamp(2.0, size.width - labelBox.width);
+    if (above >= 2) {
+      labelWidget = Positioned(
+        left: left,
+        top: above,
+        child: _ScrollRegionLabel(text: label),
+      );
+    } else {
+      final below = region.bottom + 8;
+      if (below + labelBox.height <= size.height - 2) {
+        labelWidget = Positioned(
+          left: left,
+          top: below,
+          child: _ScrollRegionLabel(text: label),
+        );
+      }
+    }
+
+    return Positioned(
+      left: 0,
+      top: 0,
+      child: IgnorePointer(
+        child: SizedBox(
+          width: size.width,
+          height: size.height,
+          child: Stack(
+            clipBehavior: Clip.none,
+            children: [
+              Positioned(
+                left: outer.left,
+                top: outer.top,
+                width: outer.width,
+                height: outer.height,
+                child: DecoratedBox(
+                  decoration: BoxDecoration(
+                    border: Border.all(
+                      color: Colors.blue.withValues(alpha: 0.9),
+                      width: 2,
+                    ),
+                    borderRadius: BorderRadius.circular(3),
+                  ),
+                ),
+              ),
+              if (labelWidget != null) labelWidget,
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _ScrollRegionLabel extends StatelessWidget {
+  const _ScrollRegionLabel({required this.text});
+
+  final String text;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      constraints: const BoxConstraints(maxWidth: 220),
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+      decoration: BoxDecoration(
+        color: Colors.black.withValues(alpha: 0.72),
+        borderRadius: BorderRadius.circular(6),
+        border: Border.all(color: Colors.blue.withValues(alpha: 0.7)),
+      ),
+      child: Text(
+        text,
+        style: const TextStyle(color: Colors.white, fontSize: 11, height: 1.4),
       ),
     );
   }

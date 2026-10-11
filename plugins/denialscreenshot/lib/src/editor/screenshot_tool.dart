@@ -3,12 +3,14 @@ import 'dart:io';
 import 'dart:math' as math;
 import 'dart:ui' as ui;
 
+import 'package:denial_flutter_sdk/state.dart' show denialBridgeProvider;
 import 'package:flutter/gestures.dart'
     show PointerSignalEvent, PointerScrollEvent;
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
 import 'package:flutter/scheduler.dart';
 import 'package:flutter/services.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart' show ProviderScope;
 
 import '../clipboard.dart';
 import '../editor_bus.dart';
@@ -576,7 +578,8 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
   }
 
   /// Alt+滚轮：以指针为锚点缩放画布（1.0 = 刚进编辑器的 contain 尺寸，
-  /// 只能放大）；放大后普通滚轮上下平移、Shift+滚轮左右平移。
+  /// 只能放大）；放大后普通滚轮上下平移、Shift（或 Ctrl）+滚轮左右平移，
+  /// 方向键也能平移（Shift 加速）。
   void _onCanvasScroll(PointerSignalEvent event, Size viewport) {
     if (event is! PointerScrollEvent) return;
     final world = _worldSize;
@@ -584,13 +587,34 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
     if (HardwareKeyboard.instance.isAltPressed) {
       _zoomCanvasAt(event.localPosition, viewport, event.scrollDelta.dy);
     } else if (_canvasZoom > 1) {
-      final shift = HardwareKeyboard.instance.isShiftPressed;
+      final keyboard = HardwareKeyboard.instance;
+      final horizontal = keyboard.isShiftPressed || keyboard.isControlPressed;
       final delta = Offset(
-        shift ? -event.scrollDelta.dy : 0,
-        shift ? 0 : -event.scrollDelta.dy,
+        horizontal ? -event.scrollDelta.dy : 0,
+        horizontal ? 0 : -event.scrollDelta.dy,
       );
       _panCanvas(_canvasPan + delta, viewport);
     }
+  }
+
+  /// 方向键平移视角：只能平移方向键、且放大后才吃键（未放大时画面本就
+  /// 完整可见，不消费按键以免影响其它用途）。Shift 按住时步幅更大。
+  bool _panWithArrowKey(LogicalKeyboardKey key) {
+    final viewport = _lastCanvasViewport;
+    if (viewport == null || viewport.isEmpty || _canvasZoom <= 1) {
+      return false;
+    }
+    final step = HardwareKeyboard.instance.isShiftPressed ? 180.0 : 60.0;
+    final delta = switch (key) {
+      LogicalKeyboardKey.arrowLeft => Offset(-step, 0),
+      LogicalKeyboardKey.arrowRight => Offset(step, 0),
+      LogicalKeyboardKey.arrowUp => Offset(0, -step),
+      LogicalKeyboardKey.arrowDown => Offset(0, step),
+      _ => Offset.zero,
+    };
+    if (delta == Offset.zero) return false;
+    _panCanvas(_canvasPan + delta, viewport);
+    return true;
   }
 
   /// 缩放后画布在视口里的绘制矩形（未加平移）：FittedBox 的 contain 缩放
@@ -725,6 +749,13 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
         return true;
       }
       return false;
+    }
+
+    // 放大后方向键平移视角（无浮层时）；未放大返回 false 不吃键。
+    if (!_paletteVisible &&
+        !_fontFamilyVisible &&
+        _panWithArrowKey(event.logicalKey)) {
+      return true;
     }
 
     // 数据驱动的可自定义快捷键：面板/撤销/重做/关闭/提示/工具切换。
@@ -869,6 +900,7 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
                           child: LayoutBuilder(
                             builder: (context, constraints) {
                               final viewport = constraints.biggest;
+                              _lastCanvasViewport = viewport;
                               // world → 屏幕的显示比例（FittedBox contain ×
                               // 用户缩放）：缩放手柄要按屏幕像素保持恒定
                               // 大小，绘制/命中前用它把像素换算成 world 单位。
@@ -2458,7 +2490,7 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
           _buildShortcutRow('复制', 'Ctrl+C'),
           _buildShortcutRow('撤销', _prettyBinding('undo')),
           _buildShortcutRow('重做', _prettyBinding('redo')),
-          _buildShortcutRow('关闭', _prettyBinding('close')),
+          _buildShortcutRow('取消编辑（不复制）', _prettyBinding('close')),
           _buildShortcutRow('工具栏', _prettyBinding('dock')),
           _buildShortcutRow('光标', _prettyBinding('tool.select')),
           _buildShortcutRow('画笔', _prettyBinding('tool.brush')),
@@ -2473,6 +2505,8 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
           _buildShortcutRow('粗细减小', '['),
           _buildShortcutRow('粗细增大', ']'),
           const Divider(height: 12, color: Colors.white24),
+          _buildShortcutRow('缩放画布', 'Alt+滚轮'),
+          _buildShortcutRow('平移视角', '方向键 / Shift·Ctrl+滚轮'),
           _buildShortcutRow('钉住剪贴板（全局）', 'Super+S'),
         ],
       ),
@@ -3388,6 +3422,9 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
   double _canvasZoom = 1.0;
   Offset _canvasPan = Offset.zero;
 
+  /// 最近一次画布视口尺寸；方向键平移（无指针坐标）时用它做夹取。
+  Size? _lastCanvasViewport;
+
   /// 调色板三级面板：锚在选项行的调色板按钮上，不再用弹窗。
   bool _paletteVisible = false;
   final GlobalKey _paletteButtonKey = GlobalKey();
@@ -3926,8 +3963,16 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
         const Padding(
           padding: EdgeInsets.only(top: 4),
           child: Text(
-            '固定键：Enter 保存 · Ctrl+C 仅复制 · Esc 复制并关闭 · '
+            '固定键：Enter 保存 · Ctrl+C 仅复制 · Esc 取消编辑（不复制）· '
             'Super+S 钉住剪贴板（系统快捷键里改）',
+            style: TextStyle(fontSize: 12, color: Colors.white60),
+          ),
+        ),
+        const Padding(
+          padding: EdgeInsets.only(top: 4),
+          child: Text(
+            '视角：Alt+滚轮缩放 · 滚轮上下平移 · Shift/Ctrl+滚轮左右平移 · '
+            '方向键平移（Shift 加速）',
             style: TextStyle(fontSize: 12, color: Colors.white60),
           ),
         ),
@@ -5347,7 +5392,21 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
     if (imageRect.width < 8 || imageRect.height < 8) return;
     final region = imageRect.shift(box.localToGlobal(Offset.zero));
     _closeEditor();
-    await ScrollCaptureManager.instance.start(region);
+    await ScrollCaptureManager.instance.start(
+      region,
+      injector: _autoScrollInjector(),
+    );
+  }
+
+  /// 自动滚动模式的键盘注入器（向聚焦客户端发滚动键）；未开启返回 null。
+  ScrollInjector? _autoScrollInjector() {
+    if (!_settings.autoScroll) return null;
+    final bridge = ProviderScope.containerOf(
+      context,
+      listen: false,
+    ).read(denialBridgeProvider);
+    final key = _settings.autoScrollKey == 'space' ? 'space' : 'Down';
+    return () => bridge.sendKeyboardKey(key);
   }
 
   Future<void> _save() async {
@@ -5404,8 +5463,8 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
     });
   }
 
-  /// Ctrl+C：只复制不关窗（关窗交给「复制并关闭」按钮或 Esc）。
-  /// 不触发按钮动画，仅显示消息提示。
+  /// Ctrl+C：只复制不关窗（关窗走「复制并关闭」按钮；Esc 是放弃编辑、
+  /// 不复制）。不触发按钮动画，仅显示消息提示。
   Future<void> _copy() =>
       _copyImage(closeAfterCopy: false, updateButtonState: false);
 

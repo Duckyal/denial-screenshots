@@ -20,6 +20,9 @@ class ScreenshotSettings {
     this.translateMaskMode = 'blur',
     this.translateTextColorMode = 'auto',
     this.ocrModel = 'builtin',
+    this.autoScroll = true,
+    this.autoScrollKey = 'Down',
+    this.scrollInjector = 'denial',
   });
 
   /// 工具栏停靠位置：'auto' | 'left' | 'right' | 'top' | 'bottom'。
@@ -36,6 +39,19 @@ class ScreenshotSettings {
   /// 识字用的 OCR 模型：'builtin'（组件自带的 PP-OCRv3）|
   /// 'v4mobile'（PP-OCRv4 移动版，需下载）| 'v4server'（服务器版，需下载）。
   final String ocrModel;
+
+  /// 长截图是否自动滚动。开启后按 [autoScrollKey] 向聚焦的客户端注入
+  /// 键盘按键来翻页，无需手动滚动（依赖目标应用认可该按键为滚动）。
+  final bool autoScroll;
+
+  /// 自动滚动注入的按键：'Down'（逐行，重叠更稳）| 'space'（翻页，步幅大）。
+  /// 仅识别 denial 软件键盘支持的键名。
+  final String autoScrollKey;
+
+  /// 自动滚动的注入通道：'denial'（走 denial 桥接的虚拟键盘，默认）|
+  /// 'wtype'（外部 wtype 注入键）| 'ydotool'（外部 ydotool 注入键）。
+  /// wtype / ydotool 需要系统安装，插件只做检测与调用，不内嵌二进制。
+  final String scrollInjector;
 
   /// 动作 → 快捷键绑定（规范串：ctrl/shift/alt 前缀 + 小写键名）。
   /// 缺失的动作回落到 [defaultShortcuts]。
@@ -118,6 +134,9 @@ class ScreenshotSettings {
     String? translateMaskMode,
     String? translateTextColorMode,
     String? ocrModel,
+    bool? autoScroll,
+    String? autoScrollKey,
+    String? scrollInjector,
   }) {
     return ScreenshotSettings(
       dockPosition: dockPosition ?? this.dockPosition,
@@ -135,6 +154,9 @@ class ScreenshotSettings {
       translateTextColorMode:
           translateTextColorMode ?? this.translateTextColorMode,
       ocrModel: ocrModel ?? this.ocrModel,
+      autoScroll: autoScroll ?? this.autoScroll,
+      autoScrollKey: autoScrollKey ?? this.autoScrollKey,
+      scrollInjector: scrollInjector ?? this.scrollInjector,
     );
   }
 
@@ -153,6 +175,9 @@ class ScreenshotSettings {
     'translateMaskMode': translateMaskMode,
     'translateTextColorMode': translateTextColorMode,
     'ocrModel': ocrModel,
+    'autoScroll': autoScroll,
+    'autoScrollKey': autoScrollKey,
+    'scrollInjector': scrollInjector,
   };
 
   factory ScreenshotSettings.fromJson(Map<String, dynamic> json) {
@@ -185,6 +210,13 @@ class ScreenshotSettings {
       translateTextColorMode:
           json['translateTextColorMode'] as String? ?? 'auto',
       ocrModel: json['ocrModel'] as String? ?? 'builtin',
+      autoScroll: json['autoScroll'] as bool? ?? true,
+      autoScrollKey: json['autoScrollKey'] as String? ?? 'Down',
+      scrollInjector: switch (json['scrollInjector'] as String?) {
+        'wtype' => 'wtype',
+        'ydotool' => 'ydotool',
+        _ => 'denial',
+      },
     );
   }
 

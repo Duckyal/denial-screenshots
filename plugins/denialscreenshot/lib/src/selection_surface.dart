@@ -5,8 +5,10 @@ import 'dart:typed_data';
 import 'dart:ui' as ui;
 
 import 'package:denial_flutter_sdk/input.dart';
+import 'package:denial_flutter_sdk/state.dart' show denialBridgeProvider;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart' show KeyDownEvent, LogicalKeyboardKey;
+import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import 'capture_flow_bus.dart';
 import 'clipboard.dart';
@@ -25,14 +27,14 @@ import 'selection_settings_panel.dart';
 /// 可整体移动，并就地显示工具栏（识字/翻译/长截屏/编辑/复制/保存/置顶/关闭）。
 /// 取图用 `grim`（wlr-screencopy）截活画面，不经过合成器的选区流程；截取前
 /// 先把本 surface 的遮罩藏掉一拍，避免把压暗层也截进图里。
-final class CaptureFlowHost extends StatefulWidget {
+final class CaptureFlowHost extends ConsumerStatefulWidget {
   const CaptureFlowHost({super.key});
 
   @override
-  State<CaptureFlowHost> createState() => _CaptureFlowHostState();
+  ConsumerState<CaptureFlowHost> createState() => _CaptureFlowHostState();
 }
 
-class _CaptureFlowHostState extends State<CaptureFlowHost> {
+class _CaptureFlowHostState extends ConsumerState<CaptureFlowHost> {
   final ScreenshotStore _store = const ScreenshotStore();
   final TranslateService _translateService = TranslateService();
 
@@ -41,7 +43,11 @@ class _CaptureFlowHostState extends State<CaptureFlowHost> {
   static const double _edgeInset = 2;
 
   StreamSubscription<void>? _requests;
+  StreamSubscription<Offset>? _cursorSub;
   ScreenshotSettings _settings = const ScreenshotSettings();
+
+  /// 实时系统指针位置（输出逻辑坐标），长截屏时用来抹掉画面里的鼠标。
+  final ValueNotifier<Offset?> _cursorPosition = ValueNotifier(null);
 
   bool _visible = false;
   bool _capturing = false;
@@ -87,6 +93,10 @@ class _CaptureFlowHostState extends State<CaptureFlowHost> {
   void initState() {
     super.initState();
     _requests = CaptureFlowBus.instance.requests.listen((_) => _begin());
+    _cursorSub = ref
+        .read(denialBridgeProvider)
+        .cursorPositions
+        .listen((position) => _cursorPosition.value = position);
     ScreenshotSettings.load().then((settings) {
       if (mounted) setState(() => _settings = settings);
     });
@@ -95,6 +105,8 @@ class _CaptureFlowHostState extends State<CaptureFlowHost> {
   @override
   void dispose() {
     _requests?.cancel();
+    _cursorSub?.cancel();
+    _cursorPosition.dispose();
     _translateService.dispose();
     super.dispose();
   }
@@ -248,13 +260,11 @@ class _CaptureFlowHostState extends State<CaptureFlowHost> {
       }
     }
 
-    return Positioned.fill(
-      child: GestureDetector(
-        behavior: HitTestBehavior.opaque,
-        onTap: () {},
-        child: Stack(children: [positioned]),
-      ),
-    );
+    // 不要像之前那样用全屏 opaque 的遮罩把指针全吃掉：那会让工具栏（在设置
+    // 面板底下那层 Stack）点不到。误触“重新框选/改选区”由外层 Listener 的
+    // _settingsOpen 守卫拦住（[CaptureFlowHostState._handleDown] 等），
+    // 所以这里只放面板本体，面板区域之外的事件照常穿透给工具栏。
+    return Stack(children: [positioned]);
   }
 
   Widget _buildCapturing() {
@@ -944,9 +954,50 @@ class _CaptureFlowHostState extends State<CaptureFlowHost> {
       return;
     }
     _close();
-    // 等遮罩藏好再开始连拍，免得第一帧带着压暗层。
+    // 等遮罩藏好再开始连拍，免得第一帧带着压暗层。同时等 shell 交还键盘
+    // 焦点给目标客户端，注入的滚动键才会落到被截的窗口上。
     await Future<void>.delayed(_hideDelay);
-    await ScrollCaptureManager.instance.start(region);
+    await ScrollCaptureManager.instance.start(
+      region,
+      injector: _autoScrollInjector(),
+      cursor: _cursorPosition,
+    );
+  }
+
+  /// 自动滚动模式的注入器：向聚焦客户端发一档滚动键；关闭时返回 null
+  /// 走手动模式。默认走 denial 桥接的虚拟键盘，也可切换成外部的 wtype /
+  /// ydotool（需系统已安装，未装时注入会静默失效并因停滞自动收尾）。
+  ScrollInjector? _autoScrollInjector() {
+    if (!_settings.autoScroll) return null;
+    final key = _settings.autoScrollKey;
+    switch (_settings.scrollInjector) {
+      case 'wtype':
+        final keysym = key == 'space' ? 'space' : 'Down';
+        return () => unawaited(_runInjectTool('wtype', ['-k', keysym]));
+      case 'ydotool':
+        // Linux 输入事件码：KEY_SPACE=57，KEY_DOWN=108。
+        final code = key == 'space' ? 57 : 108;
+        return () =>
+            unawaited(_runInjectTool('ydotool', ['key', '$code:1', '$code:0']));
+      default:
+        final bridge = ref.read(denialBridgeProvider);
+        final name = key == 'space' ? 'space' : 'Down';
+        return () => bridge.sendKeyboardKey(name);
+    }
+  }
+
+  /// 调外部注入工具发一次滚动键。失败（未安装 / 无权限 / 服务未起）时静默
+  /// 忽略，自动模式随后会因连续多档页面没动而正常收尾。
+  Future<void> _runInjectTool(String executable, List<String> arguments) async {
+    try {
+      await Process.run(
+        executable,
+        arguments,
+        environment: childProcessEnvironment(),
+      );
+    } on Object {
+      // 忽略：交由自动模式的停滞判定收尾。
+    }
   }
 }
 
