@@ -65,11 +65,15 @@ final class ScrollCaptureManager {
   /// 实时拼接预览（缩略图）；会话结束后置空。
   final ValueNotifier<ScrollPreview?> preview = ValueNotifier(null);
 
-  /// 手动模式连拍间隔。
-  static const _interval = Duration(milliseconds: 150);
+  /// 手动模式连拍间隔：静止时省资源；一旦发现页面还在滚动（有新内容追加，
+  /// 或有帧因重叠不足被丢弃），就切到更短的间隔，尽量让快滚时相邻帧仍重叠，
+  /// 避免丢帧后整段内容接不上。
+  static const _intervalIdle = Duration(milliseconds: 150);
+  static const _intervalMoving = Duration(milliseconds: 50);
 
   /// 自动模式：注入一档后等待惯性滚动停稳，再抓帧。
-  static const _autoSettle = Duration(milliseconds: 450);
+  static const _autoSettleDefault = Duration(milliseconds: 450);
+  Duration _autoSettle = _autoSettleDefault;
 
   /// 自动模式连续多少档页面都没动就认为到底（或按键没生效）。
   static const _autoStagnantLimit = 3;
@@ -81,6 +85,10 @@ final class ScrollCaptureManager {
   static const _previewMaxWidth = 240;
   static const _previewMaxHeight = 680;
 
+  /// 预览刷新最小间隔：连拍时每帧都重建缩略图（重采样整张长图 + 新建
+  /// `ui.Image`）没必要，按这个间隔节流即可，观感几乎无差。
+  static const _previewMinInterval = Duration(milliseconds: 250);
+
   /// 抹除鼠标指针用的保守包围盒边长（逻辑像素）。指针热点在左上，实际
   /// 尺寸随主题变化；取偏大的固定值以覆盖大多数主题，代价只是重复一小段
   /// 邻近内容。
@@ -89,7 +97,6 @@ final class ScrollCaptureManager {
   final ScreenshotStore _store = const ScreenshotStore();
 
   Rect _region = Rect.zero;
-  Directory? _framesDir;
   ScrollStitcher? _stitcher;
   Future<void>? _sessionTask;
   ValueListenable<Offset?>? _cursor;
@@ -101,14 +108,10 @@ final class ScrollCaptureManager {
   int _firstFrameHeight = 0;
   bool _previewBusy = false;
   bool _previewQueued = false;
+  Timer? _previewTimer;
+  DateTime _lastPreviewAt = DateTime.fromMillisecondsSinceEpoch(0);
 
   bool get isActive => active.value;
-
-  static String _dataDir() =>
-      Platform.environment['XDG_DATA_HOME'] ??
-      '${Platform.environment['HOME'] ?? '/home'}/.local/share/denial-screenshots';
-
-  String get _framesPath => '${_dataDir()}/scroll-frames';
 
   /// 开始会话：[region] 是编辑器/选区里框定图像在屏幕上的矩形（逻辑坐标）。
   /// [injector] 非空时进入自动滚动模式。[cursor] 是实时的系统指针位置
@@ -117,16 +120,11 @@ final class ScrollCaptureManager {
     Rect rect, {
     ScrollInjector? injector,
     ValueListenable<Offset?>? cursor,
+    Duration? autoDelay,
   }) async {
     if (isActive || rect.isEmpty || rect.width < 8 || rect.height < 8) {
       return;
     }
-    final dir = Directory(_framesPath);
-    if (dir.existsSync()) {
-      dir.deleteSync(recursive: true);
-    }
-    dir.createSync(recursive: true);
-    _framesDir = dir;
     _region = rect;
     _cursor = cursor;
     _stitcher = ScrollStitcher();
@@ -136,6 +134,7 @@ final class ScrollCaptureManager {
     _stopRequested = false;
     _finalizing = false;
     _autoMode = injector != null;
+    _autoSettle = (_autoMode && autoDelay != null) ? autoDelay : _autoSettleDefault;
     _disposePreview();
     active.value = true;
     autoScrolling.value = _autoMode;
@@ -161,10 +160,24 @@ final class ScrollCaptureManager {
   }
 
   Future<void> _runManual() async {
+    var interval = _intervalIdle;
     while (!_stopRequested && _captured < _maxFrames && _canvasRoom()) {
-      await Future<void>.delayed(_interval);
+      final started = DateTime.now();
+      final droppedBefore = _stitcher?.droppedFrames ?? 0;
+      final step = await _captureFrame();
       if (_stopRequested) break;
-      await _captureFrame();
+      // 有新内容追加（页面在滚）或这一拍丢了帧（滚太快、重叠不足）都说明页面
+      // 还在动，下一拍加快；只有真正静止时才放慢。
+      final droppedNow = _stitcher?.droppedFrames ?? droppedBefore;
+      final moving =
+          droppedNow > droppedBefore ||
+          step == ScrollStitchStep.firstFrame ||
+          step == ScrollStitchStep.appended;
+      interval = moving ? _intervalMoving : _intervalIdle;
+      final wait = interval - DateTime.now().difference(started);
+      if (wait > Duration.zero) {
+        await Future<void>.delayed(wait);
+      }
     }
     await _finish();
   }
@@ -209,7 +222,6 @@ final class ScrollCaptureManager {
     final stitcher = _stitcher;
     _stitcher = null;
     final frameCount = _captured;
-    await _cleanupFrames();
     if (stitcher == null || frameCount < 2) {
       PinCardBus.instance.showToast('长截图失败：当前界面不能滚动/翻页');
       return;
@@ -249,37 +261,30 @@ final class ScrollCaptureManager {
     );
   }
 
-  Future<void> _cleanupFrames() async {
-    final dir = _framesDir;
-    _framesDir = null;
-    if (dir != null && dir.existsSync()) {
-      try {
-        dir.deleteSync(recursive: true);
-      } on FileSystemException {
-        // 清理失败不影响结果，临时目录下次会话会先清空。
-      }
-    }
-  }
-
   /// 抓一帧，增量送进拼接器。返回该帧在管线里的归属（供自动模式判进度），
   /// 失败返回 null。
   Future<ScrollStitchStep?> _captureFrame() async {
     final stitcher = _stitcher;
-    final dir = _framesDir;
-    if (!isActive || stitcher == null || dir == null) return null;
+    if (!isActive || stitcher == null) return null;
     if (_captured >= _maxFrames) return null;
-    final path = '${dir.path}/frame.png';
     final geometry =
         '${_region.left.round()},${_region.top.round()} '
         '${_region.width.round()}x${_region.height.round()}';
+    Uint8List png;
+    Offset? cursorAtCapture;
     try {
+      // grim 直接输出到 stdout（`-`），免去每帧临时文件的写+读。
       final process = await Process.start('grim', [
         '-g',
         geometry,
         '-t',
         'png',
-        path,
+        '-',
       ], environment: childProcessEnvironment());
+      // 抓帧有几十毫秒延迟，指针位置要在 grim 一起跑（画面即将被采样）时就取，
+      // 不能等解码完再读——否则抹除框会滞后于画面里的指针，快速划动时尤其明显。
+      cursorAtCapture = _cursor?.value;
+      final outFuture = _drainBytes(process.stdout);
       final code = await process.exitCode.timeout(
         const Duration(seconds: 4),
         onTimeout: () {
@@ -287,14 +292,16 @@ final class ScrollCaptureManager {
           return -1;
         },
       );
-      if (code != 0 || !File(path).existsSync()) return null;
+      final bytes = await outFuture;
+      if (code != 0 || bytes.isEmpty) return null;
+      png = bytes;
     } on Object {
       // grim 缺失或连接失败：跳过这一帧，下一拍再试。
       return null;
     }
-    final frame = await _decodeRgba(path);
+    final frame = await _decodeRgbaBytes(png);
     if (frame == null) return null;
-    _eraseCursor(frame.$1, frame.$2, frame.$3);
+    _eraseCursor(frame.$1, frame.$2, frame.$3, cursorAtCapture);
     _captured++;
     captured.value = _captured;
     final step = stitcher.push(frame.$1, frame.$2, frame.$3);
@@ -303,15 +310,14 @@ final class ScrollCaptureManager {
     }
     if (step == ScrollStitchStep.firstFrame ||
         step == ScrollStitchStep.appended) {
-      unawaited(_refreshPreview());
+      _requestPreview();
     }
     return step;
   }
 
-  /// 把画面里的鼠标指针抹掉。指针位置来自系统事件流（输出逻辑坐标），
+  /// 把画面里的鼠标指针抹掉。[cursor] 是抓帧时刻的指针位置（输出逻辑坐标），
   /// 帧是物理像素，需按帧宽 / 区域逻辑宽换算出缩放与局部坐标。
-  void _eraseCursor(Uint8List rgba, int width, int height) {
-    final cursor = _cursor?.value;
+  void _eraseCursor(Uint8List rgba, int width, int height, Offset? cursor) {
     if (cursor == null || _region.isEmpty) return;
     final scale = width / _region.width;
     if (!scale.isFinite || scale <= 0) return;
@@ -338,6 +344,21 @@ final class ScrollCaptureManager {
     eraseRegionInPlace(rgba, width, height, px, py, box + pad, box + pad);
   }
 
+  /// 请求刷新预览：按 [_previewMinInterval] 节流；已有排队的定时器就等它。
+  void _requestPreview() {
+    if (!isActive || _previewTimer != null) return;
+    final remaining =
+        _previewMinInterval - DateTime.now().difference(_lastPreviewAt);
+    if (remaining <= Duration.zero) {
+      unawaited(_refreshPreview());
+      return;
+    }
+    _previewTimer = Timer(remaining, () {
+      _previewTimer = null;
+      unawaited(_refreshPreview());
+    });
+  }
+
   /// 重建缩略图预览。代价很低（只采样到 ≤240×680 的小缓冲），但仍用
   /// 忙/排队标志合并重叠请求，避免慢解码堆积。
   Future<void> _refreshPreview() async {
@@ -346,6 +367,7 @@ final class ScrollCaptureManager {
       return;
     }
     _previewBusy = true;
+    _lastPreviewAt = DateTime.now();
     try {
       final result = _stitcher?.result;
       if (result == null) return;
@@ -368,7 +390,7 @@ final class ScrollCaptureManager {
     }
     if (_previewQueued) {
       _previewQueued = false;
-      unawaited(_refreshPreview());
+      _requestPreview();
     }
   }
 
@@ -430,14 +452,18 @@ final class ScrollCaptureManager {
   }
 
   void _disposePreview() {
+    _previewTimer?.cancel();
+    _previewTimer = null;
+    _previewQueued = false;
     final current = preview.value;
     preview.value = null;
     _retire(current?.image);
   }
 
-  static Future<(Uint8List, int, int)?> _decodeRgba(String path) async {
+  static Future<(Uint8List, int, int)?> _decodeRgbaBytes(
+    Uint8List bytes,
+  ) async {
     try {
-      final bytes = await File(path).readAsBytes();
       final codec = await ui.instantiateImageCodec(bytes);
       final frame = await codec.getNextFrame();
       codec.dispose();
@@ -452,6 +478,15 @@ final class ScrollCaptureManager {
     } on Object {
       return null;
     }
+  }
+
+  /// 收干一个字节流（grim stdout），返回完整字节。
+  static Future<Uint8List> _drainBytes(Stream<List<int>> stream) async {
+    final builder = BytesBuilder(copy: false);
+    await for (final chunk in stream) {
+      builder.add(chunk);
+    }
+    return builder.takeBytes();
   }
 
   static Future<Uint8List?> _encodePng(

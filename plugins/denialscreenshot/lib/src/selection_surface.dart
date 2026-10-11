@@ -957,10 +957,17 @@ class _CaptureFlowHostState extends ConsumerState<CaptureFlowHost> {
     // 等遮罩藏好再开始连拍，免得第一帧带着压暗层。同时等 shell 交还键盘
     // 焦点给目标客户端，注入的滚动键才会落到被截的窗口上。
     await Future<void>.delayed(_hideDelay);
+    final speed = _settings.autoScrollSpeed;
+    final autoDelay = switch (speed) {
+      'fast' => const Duration(milliseconds: 150),
+      'slow' => const Duration(milliseconds: 400),
+      _ => const Duration(milliseconds: 250),
+    };
     await ScrollCaptureManager.instance.start(
       region,
       injector: _autoScrollInjector(),
       cursor: _cursorPosition,
+      autoDelay: autoDelay,
     );
   }
 

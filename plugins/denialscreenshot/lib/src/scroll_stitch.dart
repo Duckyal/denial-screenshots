@@ -61,6 +61,10 @@ final class ScrollStitchConfig {
     this.fixedRowMaxDiff = 6.0,
     this.blankSpan = 2.0,
     this.dropUnmatched = true,
+    this.resyncMinOverlap = 28,
+    this.resyncAcceptCost = 0.16,
+    this.resyncPeakMargin = 0.005,
+    this.resyncGap = true,
   });
 
   /// 重叠行数达到多少才信这次匹配。
@@ -112,6 +116,18 @@ final class ScrollStitchConfig {
   /// 相邻与整图都对齐不上时：true 丢弃该帧并置 `hadGap`；false 退回旧的
   /// "整帧当新内容贴到底部"（可能重复/断层）。
   final bool dropUnmatched;
+
+  /// 重同步：相邻与正常整图搜索都失配后的兜底。先用更小的重叠下限
+  /// ([resyncMinOverlap]) 和更松的阈值 ([resyncAcceptCost]/[resyncPeakMargin])
+  /// 在整图里再找一次——快滚常常只剩很小的重叠，找到即可无重复接上。
+  final int resyncMinOverlap;
+  final double resyncAcceptCost;
+  final double resyncPeakMargin;
+
+  /// 重同步仍失败（重叠低到几乎为 0，确实是缺口）时，是否把整帧接到长图
+  /// 底部并重新锚定（承认一段缺口），而不是丢弃。此时重叠本就极小，重复
+  /// 可忽略，代价是后续内容不再跟着一起丢。
+  final bool resyncGap;
 
   /// 每行描述子宽度（R/G/B 三通道 × 采样带数）。
   int get descriptorWidth => bandCount * 3;
@@ -204,24 +220,55 @@ final class ScrollStitcher {
           knownPeak >= config.peakMargin &&
           knownPos >= 0) {
         pos = knownPos;
-      } else if (config.dropUnmatched) {
-        // 全画布都对齐不上（多半是快滚跨帧，前帧已滚出窗外）：无法可信
-        // 定位就直接丢弃并标记缺口，宁可少一段也不错贴重影。
-        if (!_blankFrame(sigs)) _dropped++;
-        return ScrollStitchStep.noMatch;
       } else {
-        final capRoom = config.maxCanvasHeight - _canvasH;
-        if (capRoom < config.minAppend) return ScrollStitchStep.noMatch;
-        if (_blankFrame(sigs)) return ScrollStitchStep.noMatch;
-        final amount = math.min(height, capRoom);
-        return _appendBottom(
-          rgba,
+        // 先用更小的重叠下限 + 更松的阈值再找一次（快滚常常只剩很小重叠）。
+        final (rsPos, rsCost, rsPeak) = _findPlacement(
           sigs,
           height,
-          amount,
-          _canvasH,
-          _canvasH - _anchorPos,
+          pos,
+          minOverlap: config.resyncMinOverlap,
+          acceptCost: config.resyncAcceptCost,
         );
+        if (rsCost <= config.resyncAcceptCost &&
+            rsPeak >= config.resyncPeakMargin &&
+            rsPos >= 0) {
+          pos = rsPos;
+        } else if (config.dropUnmatched) {
+          if (_blankFrame(sigs)) return ScrollStitchStep.noMatch;
+          if (!config.resyncGap) {
+            _dropped++;
+            return ScrollStitchStep.noMatch;
+          }
+          // 兜底：把整帧接到长图底部（承认一段缺口），重新锚定，后续不再丢。
+          final capRoom = config.maxCanvasHeight - _canvasH;
+          if (capRoom < config.minAppend) {
+            _dropped++;
+            return ScrollStitchStep.noMatch;
+          }
+          final amount = math.min(height, capRoom);
+          _dropped++;
+          return _appendBottom(
+            rgba,
+            sigs,
+            height,
+            amount,
+            _canvasH,
+            _canvasH - _anchorPos,
+          );
+        } else {
+          final capRoom = config.maxCanvasHeight - _canvasH;
+          if (capRoom < config.minAppend) return ScrollStitchStep.noMatch;
+          if (_blankFrame(sigs)) return ScrollStitchStep.noMatch;
+          final amount = math.min(height, capRoom);
+          return _appendBottom(
+            rgba,
+            sigs,
+            height,
+            amount,
+            _canvasH,
+            _canvasH - _anchorPos,
+          );
+        }
       }
     }
     final move = pos - _anchorPos;
@@ -361,37 +408,29 @@ final class ScrollStitcher {
       }
     }
 
-    for (var delta = 0; delta <= maxOff; delta++) {
-      final plus = predicted + delta;
-      if (plus <= maxOff) {
-        final d = _overlapCost(
-          last,
-          lastH,
-          frame,
-          fh,
-          plus,
-          fixedTop,
-          fixedBottom,
-        );
-        consider(plus, d);
-        if (d < config.sharpCost) return (best, bestCost, second - bestCost);
+    const coarseStep = 4;
+    final coarseStart = -maxOff;
+    final coarseEnd = maxOff;
+    for (var o = coarseStart; o <= coarseEnd; o += coarseStep) {
+      if (o < -maxOff || o > maxOff) continue;
+      final d = _overlapCost(last, lastH, frame, fh, o, fixedTop, fixedBottom);
+      consider(o, d);
+      if (d < config.sharpCost) return (best, bestCost, second - bestCost);
+    }
+
+    final refineStart = math.max(-maxOff, best - coarseStep - 1);
+    final refineEnd = math.min(maxOff, best + coarseStep + 1);
+    for (var o = refineStart; o <= refineEnd; o++) {
+      if (o == best && coarseStep > 1) {
+        // already considered in coarse pass? we considered every step; best might be inside
+        // but to be safe, skip recomputing same offset? we computed best at coarse step
+        // check: best is at coarseStep alignment? maybe recompute cheap; easier to just recompute? no, we did
+        // actually we visited best in coarse loop
       }
-      if (delta != 0) {
-        final minus = predicted - delta;
-        if (minus >= -maxOff) {
-          final d = _overlapCost(
-            last,
-            lastH,
-            frame,
-            fh,
-            minus,
-            fixedTop,
-            fixedBottom,
-          );
-          consider(minus, d);
-          if (d < config.sharpCost) return (best, bestCost, second - bestCost);
-        }
-      }
+      // recompute? easier to just evaluate; cheap and simple
+      final d = _overlapCost(last, lastH, frame, fh, o, fixedTop, fixedBottom);
+      consider(o, d);
+      if (d < config.sharpCost) return (best, bestCost, second - bestCost);
     }
     return (best, bestCost, second - bestCost);
   }
@@ -401,16 +440,20 @@ final class ScrollStitcher {
   (int, double, double) _findPlacement(
     Float32List frame,
     int fh,
-    int predictedPos,
-  ) {
+    int predictedPos, {
+    int? minOverlap,
+    double? acceptCost,
+  }) {
     final canvasSigs = _sigs!;
     if (canvasSigs.length < _canvasH * config.descriptorWidth) {
       return (0, double.infinity, 0);
     }
+    final mo = minOverlap ?? config.minOverlap;
+    final ac = acceptCost ?? config.acceptCost;
     final fixedTop = _fixedTop.committed;
     final fixedBottom = _fixedBottom.committed;
-    final maxPos = math.max(0, _canvasH - config.minOverlap);
-    final minPos = config.minOverlap - fh;
+    final maxPos = math.max(0, _canvasH - mo);
+    final minPos = mo - fh;
     var bestPos = predictedPos.clamp(minPos, maxPos).toInt();
     var bestCost = double.infinity;
     var second = double.infinity;
@@ -427,6 +470,7 @@ final class ScrollStitcher {
         p,
         fixedTop,
         fixedBottom,
+        minOverlap: mo,
       );
       if (d < bestCost) {
         second = bestCost;
@@ -435,7 +479,7 @@ final class ScrollStitcher {
       } else if (d < second) {
         second = d;
       }
-      if (d <= config.acceptCost) {
+      if (d <= ac) {
         final dist = (p - predictedPos).abs();
         if (dist < bestGoodDist || (dist == bestGoodDist && d < bestGoodCost)) {
           bestGoodDist = dist;
@@ -458,7 +502,7 @@ final class ScrollStitcher {
     for (var p = refineFrom; p <= refineTo; p++) {
       visit(p);
     }
-    if (bestGoodCost <= config.acceptCost) {
+    if (bestGoodCost <= ac) {
       return (bestGoodPos, bestGoodCost, second - bestCost);
     }
     return (bestPos, bestCost, second - bestCost);
@@ -503,16 +547,16 @@ final class ScrollStitcher {
     int bRows,
     int offset,
     int fixedTop,
-    int fixedBottom,
-  ) {
+    int fixedBottom, {
+    int? minOverlap,
+  }) {
+    final mo = minOverlap ?? config.minOverlap;
     final len = offset >= 0
         ? math.min(aRows - offset, bRows)
         : math.min(aRows, bRows + offset);
-    if (len < config.minOverlap) return double.infinity;
+    if (len < mo) return double.infinity;
     final h = math.min(aRows, bRows);
-    final softCrop =
-        len >=
-        config.minOverlap + _contentTopIgnore(h) + _contentBottomIgnore(h);
+    final softCrop = len >= mo + _contentTopIgnore(h) + _contentBottomIgnore(h);
     final startA = offset >= 0 ? offset : 0;
     final startB = offset >= 0 ? 0 : -offset;
     final dw = config.descriptorWidth;
@@ -544,9 +588,7 @@ final class ScrollStitcher {
       }
       count += dw;
     }
-    final required = softCrop
-        ? math.max(24, config.minOverlap ~/ 2)
-        : config.minOverlap;
+    final required = softCrop ? math.max(24, mo ~/ 2) : mo;
     if (count == 0 || rows < required) return double.infinity;
     final n = count.toDouble();
     final cov = sumAB - sumA * sumB / n;

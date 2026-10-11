@@ -23,6 +23,7 @@ class ScreenshotSettings {
     this.autoScroll = true,
     this.autoScrollKey = 'Down',
     this.scrollInjector = 'denial',
+    this.autoScrollSpeed = 'normal',
   });
 
   /// 工具栏停靠位置：'auto' | 'left' | 'right' | 'top' | 'bottom'。
@@ -52,6 +53,9 @@ class ScreenshotSettings {
   /// 'wtype'（外部 wtype 注入键）| 'ydotool'（外部 ydotool 注入键）。
   /// wtype / ydotool 需要系统安装，插件只做检测与调用，不内嵌二进制。
   final String scrollInjector;
+
+  /// 自动滚动速度：'fast'（快，停顿短，可能重叠多）| 'normal' | 'slow'（慢，停顿长，重叠少但更稳）。
+  final String autoScrollSpeed;
 
   /// 动作 → 快捷键绑定（规范串：ctrl/shift/alt 前缀 + 小写键名）。
   /// 缺失的动作回落到 [defaultShortcuts]。
@@ -137,6 +141,7 @@ class ScreenshotSettings {
     bool? autoScroll,
     String? autoScrollKey,
     String? scrollInjector,
+    String? autoScrollSpeed,
   }) {
     return ScreenshotSettings(
       dockPosition: dockPosition ?? this.dockPosition,
@@ -157,6 +162,7 @@ class ScreenshotSettings {
       autoScroll: autoScroll ?? this.autoScroll,
       autoScrollKey: autoScrollKey ?? this.autoScrollKey,
       scrollInjector: scrollInjector ?? this.scrollInjector,
+      autoScrollSpeed: autoScrollSpeed ?? this.autoScrollSpeed,
     );
   }
 
@@ -178,6 +184,7 @@ class ScreenshotSettings {
     'autoScroll': autoScroll,
     'autoScrollKey': autoScrollKey,
     'scrollInjector': scrollInjector,
+    'autoScrollSpeed': autoScrollSpeed,
   };
 
   factory ScreenshotSettings.fromJson(Map<String, dynamic> json) {
@@ -216,6 +223,11 @@ class ScreenshotSettings {
         'wtype' => 'wtype',
         'ydotool' => 'ydotool',
         _ => 'denial',
+      },
+      autoScrollSpeed: switch (json['autoScrollSpeed'] as String?) {
+        'fast' => 'fast',
+        'slow' => 'slow',
+        _ => 'normal',
       },
     );
   }

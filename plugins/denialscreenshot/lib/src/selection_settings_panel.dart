@@ -369,6 +369,11 @@ class _SelectionSettingsPanelState extends State<SelectionSettingsPanel> {
           },
         ),
         if (_settings.scrollInjector != 'denial') _toolInstallRow(),
+        _group('滚动速度', _settings.autoScrollSpeed, const [
+          ('fast', '快'),
+          ('normal', '中'),
+          ('slow', '慢'),
+        ], (value) => _apply(_settings.copyWith(autoScrollSpeed: value))),
         _group('滚动按键', _settings.autoScrollKey, const [
           ('Down', '逐行 ↓'),
           ('space', '翻页 空格'),
