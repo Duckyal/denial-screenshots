@@ -357,7 +357,7 @@ class _PinnedShotHostState extends ConsumerState<PinnedShotHost> {
   }
 
   /// 双击图片卡回到编辑器：编辑器钉的卡带标注命令，恢复底图+命令继续画；
-  /// Super+S 钉的剪贴板图没有命令，就把钉住图本身当底图开进编辑器。
+  /// Alt+S 钉的剪贴板图没有命令，就把钉住图本身当底图开进编辑器。
   void _continueEditing(PinCard card) {
     final image = card.content;
     if (image is! PinImage) return;

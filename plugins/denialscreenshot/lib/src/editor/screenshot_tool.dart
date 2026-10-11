@@ -3965,7 +3965,7 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
           padding: EdgeInsets.only(top: 4),
           child: Text(
             '固定键：Enter 保存 · Ctrl+C 仅复制 · Esc 取消编辑（不复制）· '
-            'Super+S 钉住剪贴板（系统快捷键里改）',
+            'Alt+S 钉住剪贴板（系统快捷键里改）',
             style: TextStyle(fontSize: 12, color: Colors.white60),
           ),
         ),
