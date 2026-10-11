@@ -549,14 +549,7 @@ class _ScrollPreviewWindowState extends State<_ScrollPreviewWindow> {
                     fontWeight: FontWeight.w600,
                   ),
                 ),
-                const SizedBox(width: 8),
-                Expanded(
-                  child: Text(
-                    '${preview.width}×${preview.height}',
-                    textAlign: TextAlign.right,
-                    style: const TextStyle(color: Colors.white54, fontSize: 11),
-                  ),
-                ),
+                const Spacer(),
                 GestureDetector(
                   behavior: HitTestBehavior.opaque,
                   onTap: () => ScrollCaptureManager.instance.stop(),
