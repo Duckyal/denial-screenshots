@@ -646,13 +646,17 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
   }
 
   /// 平移夹取：图像盖满视口时允许在 [视口-图像] 范围内移动；没盖满时居中。
+  /// 注意 start/extent/view 都是屏幕像素，而 pan 是 FittedBox 子空间坐标
+  /// （screen = o + k*(pan + …)），所以夹取边界要除以 contain 系数 k 换算，
+  /// 否则 k<1 时可平移范围偏小，放大后无法把图像边缘拖到视口边缘。
   Offset _clampCanvasPan(Offset pan, double zoom, Size viewport, Size world) {
     final layout = _canvasLayout(zoom, viewport, world);
+    final k = layout.k;
     double clampAxis(double value, double start, double extent, double view) {
       if (extent >= view) {
-        return value.clamp(view - (start + extent), -start);
+        return value.clamp((view - (start + extent)) / k, -start / k);
       }
-      return (view - extent) / 2 - start;
+      return ((view - extent) / 2 - start) / k;
     }
 
     return Offset(
