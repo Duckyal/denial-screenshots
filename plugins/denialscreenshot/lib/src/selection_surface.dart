@@ -50,6 +50,12 @@ class _CaptureFlowHostState extends ConsumerState<CaptureFlowHost> {
   bool _visible = false;
   bool _capturing = false;
 
+  /// 抓帧期间把整个选区浮层藏起来：grim 抓的是合成帧，浮层（压暗层/边框/
+  /// 工具栏）会一起被拍进去。隐藏期间不显示任何“正在截取”提示，避免用户
+  /// 看到浮层消失又出现（退出再进）的闪烁；复制/置顶/编辑这类结束动作干脆
+  /// 保持隐藏直到 [_close]，保存/识字则在抓完后直接展开对应面板。
+  bool _captureHidden = false;
+
   /// 当前选区（surface 逻辑坐标 == 输出坐标）。
   Rect? _region;
 
@@ -180,6 +186,9 @@ class _CaptureFlowHostState extends ConsumerState<CaptureFlowHost> {
   }
 
   Widget _buildOverlay(Size size) {
+    // 抓帧时整层隐藏（不含任何提示），这样用户不会看到浮层被替换成转圈再
+    // 弹回来的“退出重进”过程。
+    if (_captureHidden) return const SizedBox.shrink();
     return Listener(
       behavior: HitTestBehavior.opaque,
       onPointerDown: (event) => _handleDown(event.localPosition, size),
@@ -188,15 +197,13 @@ class _CaptureFlowHostState extends ConsumerState<CaptureFlowHost> {
       child: Stack(
         fit: StackFit.expand,
         children: [
-          if (!_capturing) CustomPaint(painter: _DimPainter(region: _region)),
-          if (_capturing) _buildCapturing(),
-          if (!_capturing && _region != null)
-            _buildRegionOverlay(size, _region!),
-          if (!_capturing && _resultOpen && _region != null)
+          CustomPaint(painter: _DimPainter(region: _region)),
+          if (_region != null) _buildRegionOverlay(size, _region!),
+          if (_resultOpen && _region != null)
             _buildResultWindow(size, _region!),
-          if (!_capturing && _settingsOpen && _region != null)
+          if (_settingsOpen && _region != null)
             _buildSettingsOverlay(size, _region!),
-          if (!_capturing && _savePanelOpen && _region != null)
+          if (_savePanelOpen && _region != null)
             _buildSaveOverlay(size, _region!),
         ],
       ),
@@ -336,23 +343,6 @@ class _CaptureFlowHostState extends ConsumerState<CaptureFlowHost> {
     }
 
     return Stack(children: [positioned]);
-  }
-
-  Widget _buildCapturing() {
-    return const Center(
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          SizedBox(
-            width: 28,
-            height: 28,
-            child: CircularProgressIndicator(strokeWidth: 3),
-          ),
-          SizedBox(height: 12),
-          Text('正在截取…', style: TextStyle(fontSize: 13)),
-        ],
-      ),
-    );
   }
 
   Widget _buildRegionOverlay(Size size, Rect region) {
@@ -808,6 +798,7 @@ class _CaptureFlowHostState extends ConsumerState<CaptureFlowHost> {
     setState(() {
       _visible = true;
       _capturing = false;
+      _captureHidden = false;
       _region = null;
       _capturedFile = null;
       _capturedBytes = null;
@@ -827,6 +818,7 @@ class _CaptureFlowHostState extends ConsumerState<CaptureFlowHost> {
     setState(() {
       _visible = false;
       _capturing = false;
+      _captureHidden = false;
       _region = null;
       _capturedFile = null;
       _capturedBytes = null;
@@ -840,7 +832,11 @@ class _CaptureFlowHostState extends ConsumerState<CaptureFlowHost> {
     });
   }
 
-  Future<({File file, Uint8List bytes})?> _captureNow() async {
+  /// 抓取当前选区。[restore] 为 false 时抓完仍保持隐藏，交由调用方直接
+  /// [_close] 或展开面板，避免浮层先弹回来再消失的闪烁。
+  Future<({File file, Uint8List bytes})?> _captureNow({
+    bool restore = true,
+  }) async {
     if (_capturing) return null;
     final region = _region;
     if (region == null ||
@@ -853,13 +849,11 @@ class _CaptureFlowHostState extends ConsumerState<CaptureFlowHost> {
         _capturedRect == region) {
       return (file: _capturedFile!, bytes: _capturedBytes!);
     }
-    setState(() => _capturing = true);
-    // 临时隐藏选区，减少“切出去转圈”的视觉感
-    final wasVisible = _visible;
-    if (mounted && wasVisible) {
-      setState(() => _visible = false);
-    }
-    // 遮罩藏掉一拍再截，grim 抓的是合成帧，会连压暗层一起抓到。
+    setState(() {
+      _capturing = true;
+      _captureHidden = true;
+    });
+    // 遮罩/浮层藏掉一拍再截，grim 抓的是合成帧，会连压暗层一起抓到。
     await Future<void>.delayed(_hideDelay);
     var captureRect = region;
     if (region.width > _edgeInset * 2 + _minSelection &&
@@ -900,7 +894,10 @@ class _CaptureFlowHostState extends ConsumerState<CaptureFlowHost> {
     if (mounted) {
       setState(() {
         _capturing = false;
-        _visible = wasVisible;
+        // 失败时无论如何要恢复浮层，成功且 restore=false 则保持隐藏。
+        if (!restore || bytes == null || bytes.isEmpty) {
+          _captureHidden = false;
+        }
       });
     }
     if (bytes == null || bytes.isEmpty) {
@@ -926,13 +923,15 @@ class _CaptureFlowHostState extends ConsumerState<CaptureFlowHost> {
   }
 
   Future<void> _runText(String mode) async {
-    final captured = await _captureNow();
+    final captured = await _captureNow(restore: false);
     if (captured == null) return;
     if (!await _translateService.isReady()) {
+      if (mounted) setState(() => _captureHidden = false);
       PinCardBus.instance.showToast('翻译组件未安装，请先在编辑器设置中安装');
       return;
     }
     setState(() {
+      _captureHidden = false;
       _resultMode = mode;
       _resultRegions = const [];
       _resultStatus = mode == 'ocr' ? '正在识别文字…' : '正在翻译…';
@@ -989,14 +988,14 @@ class _CaptureFlowHostState extends ConsumerState<CaptureFlowHost> {
   }
 
   Future<void> _openEditor() async {
-    final captured = await _captureNow();
+    final captured = await _captureNow(restore: false);
     if (captured == null) return;
     DenialScreenshotEditorBus.instance.openPath(captured.file.path);
     _close();
   }
 
   Future<void> _copyImage() async {
-    final captured = await _captureNow();
+    final captured = await _captureNow(restore: false);
     if (captured == null) return;
     final ok = await copyPngToClipboard(captured.bytes);
     if (!mounted) return;
@@ -1004,6 +1003,7 @@ class _CaptureFlowHostState extends ConsumerState<CaptureFlowHost> {
       PinCardBus.instance.showToast('已复制图片到剪贴板');
       _close();
     } else {
+      setState(() => _captureHidden = false);
       PinCardBus.instance.showToast('复制失败（缺 wl-copy / xclip）');
     }
   }
@@ -1011,10 +1011,11 @@ class _CaptureFlowHostState extends ConsumerState<CaptureFlowHost> {
   /// 保存：先在选区浮层里展开内嵌的保存面板（参照设置面板样式），由用户
   /// 挑目录、填文件名，确认后再写盘——不再拉起外部路径对话框。
   Future<void> _saveImage() async {
-    final captured = await _captureNow();
+    final captured = await _captureNow(restore: false);
     if (captured == null) return;
     if (!mounted) return;
     setState(() {
+      _captureHidden = false;
       _settingsOpen = false;
       _resultOpen = false;
       _savePanelOpen = true;
@@ -1023,17 +1024,19 @@ class _CaptureFlowHostState extends ConsumerState<CaptureFlowHost> {
 
   /// 保存面板确认路径：抓取当前选区并写到该路径。
   Future<void> _confirmSave(String path) async {
-    final captured = await _captureNow();
+    final captured = await _captureNow(restore: false);
     if (captured == null) return;
     try {
       await File(path).writeAsBytes(captured.bytes, flush: true);
     } on Object {
+      if (mounted) setState(() => _captureHidden = false);
       PinCardBus.instance.showToast('保存失败');
       return;
     }
     if (!mounted) return;
     final slash = path.lastIndexOf('/');
     setState(() {
+      _captureHidden = false;
       _savePanelOpen = false;
       if (slash > 0) {
         _saveDirectory = path.substring(0, slash);
@@ -1045,7 +1048,7 @@ class _CaptureFlowHostState extends ConsumerState<CaptureFlowHost> {
   }
 
   Future<void> _pinImage() async {
-    final captured = await _captureNow();
+    final captured = await _captureNow(restore: false);
     if (captured == null) return;
     PinCardBus.instance.add(
       PinImage(bytes: captured.bytes, sourceBytes: captured.bytes),
