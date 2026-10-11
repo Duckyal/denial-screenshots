@@ -1645,11 +1645,10 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
     if (editingSelected) {
       children = [...colorCells(), divider(), _optionSizeSlider()];
     } else if (currentTool == ScreenshotToolType.mask) {
-      // 蒙版：填充方式（模糊/纯色）+ 标准色 + 调色板按钮（纯色模式取用，模糊模式
-      // 也可先选定颜色再切换）。
+      // 蒙版：模糊开关 + 标准色 + 调色板。选任意颜色即切到纯色填充，
+      // 无需单独的「纯色」按钮；点「模糊」回到模糊模式。
       children = [
         _maskModeButton(MaskStyle.blur, '模糊'),
-        _maskModeButton(MaskStyle.solid, '纯色'),
         divider(),
         ...standardColorCells(),
         _optionPaletteButton(),
@@ -2605,6 +2604,10 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
     setState(() {
       currentColor = color;
       maskColor = color;
+      // 蒙版工具下选色即切到纯色填充（不再需要单独的纯色按钮）。
+      if (currentTool == ScreenshotToolType.mask) {
+        currentMaskStyle = MaskStyle.solid;
+      }
       showColorPicker = false;
     });
     _ffi.switchColor(
