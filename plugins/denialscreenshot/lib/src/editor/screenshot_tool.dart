@@ -584,17 +584,18 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
     if (event is! PointerScrollEvent) return;
     final world = _worldSize;
     if (world.isEmpty || viewport.isEmpty) return;
-    if (HardwareKeyboard.instance.isAltPressed) {
+    final k = HardwareKeyboard.instance;
+    if (k.isAltPressed) {
       _zoomCanvasAt(event.localPosition, viewport, event.scrollDelta.dy);
-    } else if (_canvasZoom > 1) {
-      final keyboard = HardwareKeyboard.instance;
-      final horizontal = keyboard.isShiftPressed || keyboard.isControlPressed;
-      final delta = Offset(
-        horizontal ? -event.scrollDelta.dy : 0,
-        horizontal ? 0 : -event.scrollDelta.dy,
-      );
-      _panCanvas(_canvasPan + delta, viewport);
+      return;
     }
+    if (k.isControlPressed) {
+      _panCanvas(_canvasPan + Offset(-event.scrollDelta.dy, 0), viewport);
+      return;
+    }
+    // 滚轮直接上下移动视角（放大后也可用；未放大时图像可能已铺满，但也允许平移逻辑按夹取处理）
+    _panCanvas(_canvasPan + Offset(0, -event.scrollDelta.dy), viewport);
+    return;
   }
 
   /// 方向键平移视角：只能平移方向键、且放大后才吃键（未放大时画面本就
