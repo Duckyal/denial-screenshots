@@ -878,8 +878,8 @@ class _CaptureFlowHostState extends ConsumerState<CaptureFlowHost> {
 
   /// 借用 shell 藏好光标后、grim 之前留给合成的一拍时长。太小 grim 可能仍
   /// 抓到含光标的旧帧（尤其静态画面这一拍没重绘），太大拖慢启动；当前取
-  /// ~1 帧，按实测再调。
-  static const Duration _cursorHideSettle = Duration(milliseconds: 17);
+  /// ~1.5 帧，按实测再调。
+  static const Duration _cursorHideSettle = Duration(milliseconds: 24);
 
   /// 用 grim 抓整屏作为关键帧并解码。为了让抓到的画面天生不含软件光标，
   /// 先借用 shell 自己的隐藏光标信号（把 `screenshotSelectionProvider` 置为
