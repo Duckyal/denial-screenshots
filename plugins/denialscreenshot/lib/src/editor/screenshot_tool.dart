@@ -1631,14 +1631,13 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
       color: Colors.white24,
     );
 
-    List<Widget> colorCells() => [
-      for (final color in [Color(0xFF000000), ..._dockColors])
-        _optionSwatchDot(color),
-      _optionPaletteButton(),
-    ];
-
     List<Widget> standardColorCells() => [
       for (final color in _dockColors) _optionSwatchDot(color),
+    ];
+
+    List<Widget> colorCells() => [
+      ...standardColorCells(),
+      _optionPaletteButton(),
     ];
 
     List<Widget> children;
