@@ -122,6 +122,8 @@ class _EditorSurfaceHostState extends ConsumerState<EditorSurfaceHost> {
       case EditorRequestKind.openPath:
         final path = request.path;
         if (path != null) unawaited(_open(File(path)));
+      case EditorRequestKind.openBytes:
+        _openBytes(request.bytes, request.path);
       case EditorRequestKind.openLatest:
         unawaited(_openNewest());
       case EditorRequestKind.capture:
@@ -179,10 +181,27 @@ class _EditorSurfaceHostState extends ConsumerState<EditorSurfaceHost> {
 
   Future<void> _open(File file) async {
     if (!file.existsSync()) return;
+    // An in-memory open for this exact frame already won; don't let a late
+    // directory-watch event re-read the same file through readStable and
+    // clobber it.
+    if (_visible && _session?.path == file.path) return;
     final bytes = await _store.readStable(file);
     if (bytes == null || !mounted) return;
+    // Re-check after the await: an openBytes may have landed while polling.
+    if (_visible && _session?.path == file.path) return;
     setState(() {
       _session = EditorSession(bytes: bytes, path: file.path);
+      _visible = true;
+    });
+  }
+
+  /// Open a frame that is already in memory, bypassing the on-disk
+  /// [ScreenshotStore.readStable] poll. The optional [path] keeps save/pin
+  /// provenance but is not read from.
+  void _openBytes(Uint8List? bytes, String? path) {
+    if (bytes == null || bytes.isEmpty || !mounted) return;
+    setState(() {
+      _session = EditorSession(bytes: bytes, path: path ?? '');
       _visible = true;
     });
   }

@@ -1329,7 +1329,8 @@ class _CaptureFlowHostState extends ConsumerState<CaptureFlowHost> {
   Future<void> _openEditor() async {
     final captured = await _captureNow(restore: false);
     if (captured == null) return;
-    DenialScreenshotEditorBus.instance.openPath(captured.file.path);
+    DenialScreenshotEditorBus.instance
+        .openBytes(captured.bytes, path: captured.file.path);
     _close();
   }
 

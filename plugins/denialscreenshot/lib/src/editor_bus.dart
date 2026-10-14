@@ -10,6 +10,12 @@ enum EditorRequestKind {
   /// Open one file, usually a capture that just landed on disk.
   openPath,
 
+  /// Open an already-encoded frame held in memory, skipping the on-disk
+  /// re-read. This is the seam for feeds that already have the bytes in hand —
+  /// the plugin's own cropped key frame now, and the compositor's native
+  /// cursor-free capture once #218 exposes it.
+  openBytes,
+
   /// Open the newest capture in the compositor's screenshot directory.
   openLatest,
 
@@ -25,10 +31,11 @@ enum EditorRequestKind {
 
 @immutable
 final class EditorRequest {
-  const EditorRequest(this.kind, {this.path});
+  const EditorRequest(this.kind, {this.path, this.bytes});
 
   final EditorRequestKind kind;
   final String? path;
+  final Uint8List? bytes;
 }
 
 /// Process-wide link between the contributed actions and the editor surface.
@@ -53,6 +60,10 @@ final class DenialScreenshotEditorBus {
 
   void openPath(String path) =>
       _controller.add(EditorRequest(EditorRequestKind.openPath, path: path));
+
+  void openBytes(Uint8List bytes, {String? path}) => _controller.add(
+    EditorRequest(EditorRequestKind.openBytes, path: path, bytes: bytes),
+  );
 
   void openLatest() =>
       _controller.add(const EditorRequest(EditorRequestKind.openLatest));
