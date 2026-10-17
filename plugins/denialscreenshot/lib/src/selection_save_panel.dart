@@ -2,6 +2,7 @@ import 'dart:io';
 
 import 'package:flutter/material.dart';
 
+import 'l10n.dart';
 import 'panel_nav.dart';
 
 /// 框选工具栏里的「保存」面板。
@@ -106,7 +107,7 @@ class _SelectionSavePanelState extends State<SelectionSavePanel> {
   void _confirm() {
     var name = _nameController.text.trim();
     if (name.isEmpty) {
-      setState(() => _error = '请输入文件名');
+      setState(() => _error = L.s('请输入文件名', 'Enter a file name'));
       return;
     }
     if (!name.toLowerCase().endsWith('.png')) name = '$name.png';
@@ -144,9 +145,9 @@ class _SelectionSavePanelState extends State<SelectionSavePanel> {
                 padding: const EdgeInsets.fromLTRB(14, 12, 10, 6),
                 child: Row(
                   children: [
-                    const Text(
-                      '保存截图',
-                      style: TextStyle(
+                    Text(
+                      L.pick(context, '保存截图', 'Save screenshot'),
+                      style: const TextStyle(
                         fontSize: 14,
                         fontWeight: FontWeight.w600,
                       ),
@@ -172,7 +173,7 @@ class _SelectionSavePanelState extends State<SelectionSavePanel> {
                   controller: _nameController,
                   style: const TextStyle(fontSize: 13, color: Colors.white),
                   decoration: InputDecoration(
-                    labelText: '文件名',
+                    labelText: L.pick(context, '文件名', 'File name'),
                     labelStyle: const TextStyle(color: Colors.white70),
                     isDense: true,
                     contentPadding: const EdgeInsets.symmetric(
@@ -190,9 +191,17 @@ class _SelectionSavePanelState extends State<SelectionSavePanel> {
                 padding: const EdgeInsets.fromLTRB(14, 10, 14, 4),
                 child: Row(
                   children: [
-                    _iconButton(Icons.home, '主目录', _home),
+                    _iconButton(
+                      Icons.home,
+                      L.pick(context, '主目录', 'Home'),
+                      _home,
+                    ),
                     const SizedBox(width: 6),
-                    _iconButton(Icons.arrow_upward, '上级', _up),
+                    _iconButton(
+                      Icons.arrow_upward,
+                      L.pick(context, '上级', 'Up'),
+                      _up,
+                    ),
                     const SizedBox(width: 10),
                     Expanded(
                       child: Text(
@@ -219,7 +228,9 @@ class _SelectionSavePanelState extends State<SelectionSavePanel> {
                       ? Padding(
                           padding: const EdgeInsets.all(12),
                           child: Text(
-                            _error.isEmpty ? '（没有子目录）' : _error,
+                            _error.isEmpty
+                                ? L.pick(context, '（没有子目录）', '(no subfolders)')
+                                : _error,
                             style: const TextStyle(
                               fontSize: 12,
                               color: Colors.white54,
@@ -281,10 +292,13 @@ class _SelectionSavePanelState extends State<SelectionSavePanel> {
                   children: [
                     TextButton(
                       onPressed: widget.onClose,
-                      child: const Text('取消'),
+                      child: Text(L.pick(context, '取消', 'Cancel')),
                     ),
                     const SizedBox(width: 8),
-                    FilledButton(onPressed: _confirm, child: const Text('保存')),
+                    FilledButton(
+                      onPressed: _confirm,
+                      child: Text(L.pick(context, '保存', 'Save')),
+                    ),
                   ],
                 ),
               ),

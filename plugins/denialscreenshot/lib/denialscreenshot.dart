@@ -21,6 +21,7 @@ import 'package:flutter/widgets.dart';
 
 import 'src/capture_flow_bus.dart';
 import 'src/editor_surface.dart';
+import 'src/l10n.dart';
 import 'src/pin_surface.dart';
 import 'src/selection_surface.dart';
 
@@ -128,11 +129,16 @@ final class DenialScreenshotCaptureAction implements ShellAction {
   String get provider => 'Screenshot Tool';
 
   @override
-  String label(BuildContext context) => '截图选区-推荐入口';
+  String label(BuildContext context) =>
+      L.pick(context, '截图选区-推荐入口', 'Region capture (recommended)');
 
   @override
-  String description(BuildContext context) =>
-      '插件自由框选屏幕区域，框选后可微调并弹工具栏（识字/翻译/长截屏/编辑/复制/保存/置顶）';
+  String description(BuildContext context) => L.pick(
+    context,
+    '插件自由框选屏幕区域，框选后可微调并弹工具栏（识字/翻译/长截屏/编辑/复制/保存/置顶）',
+    'Freely select a screen region, fine-tune it, then get a toolbar '
+        '(OCR / translate / scrolling capture / edit / copy / save / pin).',
+  );
 
   @override
   Future<void> invoke(ShellActionContext context) async {
@@ -153,11 +159,15 @@ final class DenialScreenshotLongCaptureAction implements ShellAction {
   String get provider => 'Screenshot Tool';
 
   @override
-  String label(BuildContext context) => '长截图';
+  String label(BuildContext context) => L.pick(context, '长截图', 'Scrolling capture');
 
   @override
-  String description(BuildContext context) =>
-      '框选要截的区域后自动滚动连拍并拼成一张长图（自动/手动滚动方式可在设置里切换）';
+  String description(BuildContext context) => L.pick(
+    context,
+    '框选要截的区域后自动滚动连拍并拼成一张长图（自动/手动滚动方式可在设置里切换）',
+    'Select a region, auto-scroll and stitch it into one long image '
+        '(auto/manual scroll mode is switchable in Settings).',
+  );
 
   @override
   Future<void> invoke(ShellActionContext context) async {
@@ -179,11 +189,16 @@ final class DenialScreenshotPinClipboardAction implements ShellAction {
   String get provider => 'Screenshot Tool';
 
   @override
-  String label(BuildContext context) => '钉住剪贴板内容';
+  String label(BuildContext context) =>
+      L.pick(context, '钉住剪贴板内容', 'Pin clipboard content');
 
   @override
-  String description(BuildContext context) =>
-      '把剪贴板里最近一张截图或文字钉成桌面置顶悬浮窗（Snipaste 风格，可叠加多张）';
+  String description(BuildContext context) => L.pick(
+    context,
+    '把剪贴板里最近一张截图或文字钉成桌面置顶悬浮窗（Snipaste 风格，可叠加多张）',
+    'Pin the newest clipboard image or text as a floating always-on-top card '
+        '(Snipaste style; stack several).',
+  );
 
   @override
   Future<void> invoke(ShellActionContext context) async {

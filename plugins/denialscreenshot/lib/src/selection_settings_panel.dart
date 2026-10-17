@@ -7,6 +7,7 @@ import 'api_config_field.dart';
 import 'clipboard.dart';
 import 'editor/settings.dart';
 import 'editor/translate_service.dart';
+import 'l10n.dart';
 import 'panel_nav.dart';
 
 /// 框选截图工具栏里的「设置」面板。
@@ -280,7 +281,7 @@ class _SelectionSettingsPanelState extends State<SelectionSettingsPanel> {
     if (_apiTesting) return;
     setState(() {
       _apiTesting = true;
-      _apiTestResult = '正在测试…';
+      _apiTestResult = L.pick(context, '正在测试…', 'Testing…');
     });
     try {
       final result = await widget.translateService.translateViaApi(
@@ -306,7 +307,11 @@ class _SelectionSettingsPanelState extends State<SelectionSettingsPanel> {
       _resetApiDraft();
       setState(() {
         _apiTesting = false;
-        _apiTestResult = '可用：Hello, world → ${result.first}';
+        _apiTestResult = L.pick(
+          context,
+          '可用：Hello, world → ${result.first}',
+          'Working: Hello, world → ${result.first}',
+        );
       });
     } on Object catch (error) {
       if (!mounted) return;
@@ -345,9 +350,9 @@ class _SelectionSettingsPanelState extends State<SelectionSettingsPanel> {
                 padding: const EdgeInsets.fromLTRB(14, 12, 10, 6),
                 child: Row(
                   children: [
-                    const Text(
-                      '设置',
-                      style: TextStyle(
+                    Text(
+                      L.pick(context, '设置', 'Settings'),
+                      style: const TextStyle(
                         fontSize: 14,
                         fontWeight: FontWeight.w600,
                       ),
@@ -388,9 +393,12 @@ class _SelectionSettingsPanelState extends State<SelectionSettingsPanel> {
     return [
       ..._ocrSection(),
       _group(
-        '翻译接口',
+        L.pick(context, '翻译接口', 'Translation backend'),
         _settings.translateBackend,
-        const [('api', '在线翻译 API'), ('local', '本地模型')],
+        const [
+          ('api', '在线翻译 API', 'Online API'),
+          ('local', '本地模型', 'Local model'),
+        ],
         (value) {
           if (value == 'local') _apiOpen = false;
           if (value == 'api') _modelsOpen = false;
@@ -400,16 +408,16 @@ class _SelectionSettingsPanelState extends State<SelectionSettingsPanel> {
       if (_settings.translateBackend == 'api') ..._apiSection(),
       if (_settings.translateBackend == 'local') ..._engineSection(),
       if (_settings.translateBackend == 'local') ..._localModelsSection(),
-      _group('翻译为', _settings.translateTarget, const [
-        ('system', '跟随系统'),
-        ('zh', '中文'),
-        ('en', 'English'),
-        ('ja', '日本語'),
-        ('ko', '한국어'),
-        ('fr', 'Français'),
-        ('de', 'Deutsch'),
-        ('ru', 'Русский'),
-        ('es', 'Español'),
+      _group(L.pick(context, '翻译为', 'Translate to'), _settings.translateTarget, const [
+        ('system', '跟随系统', 'System'),
+        ('zh', '中文', '中文'),
+        ('en', 'English', 'English'),
+        ('ja', '日本語', '日本語'),
+        ('ko', '한국어', '한국어'),
+        ('fr', 'Français', 'Français'),
+        ('de', 'Deutsch', 'Deutsch'),
+        ('ru', 'Русский', 'Русский'),
+        ('es', 'Español', 'Español'),
       ], (value) => _apply(_settings.copyWith(translateTarget: value))),
       if (_settings.translateBackend == 'local') _localTargetHint(),
       ..._scrollCaptureSection(),
@@ -419,9 +427,9 @@ class _SelectionSettingsPanelState extends State<SelectionSettingsPanel> {
   /// 本地翻译引擎选择：Argos 逐语对（默认）/ M2M-100 单模型任意互译。
   List<Widget> _engineSection() {
     return [
-      _group('翻译引擎', _settings.translateEngine, const [
-        ('argos', 'Argos 语言包（默认）'),
-        ('m2m100', 'M2M-100 多语言单模型'),
+      _group(L.pick(context, '翻译引擎', 'Translation engine'), _settings.translateEngine, const [
+        ('argos', 'Argos 语言包（默认）', 'Argos dictionaries (default)'),
+        ('m2m100', 'M2M-100 多语言单模型', 'M2M-100 multilingual model'),
       ], (value) => _apply(_settings.copyWith(translateEngine: value))),
       if (_settings.translateEngine == 'm2m100')
         if (_m2mBusy)
@@ -449,7 +457,15 @@ class _SelectionSettingsPanelState extends State<SelectionSettingsPanel> {
             padding: const EdgeInsets.only(top: 6),
             child: OutlinedButton(
               onPressed: _toggleM2m,
-              child: Text(_m2mInstalled ? '删除 M2M 模型' : '下载 M2M 模型（约 490MB）'),
+              child: Text(
+                _m2mInstalled
+                    ? L.pick(context, '删除 M2M 模型', 'Delete M2M model')
+                    : L.pick(
+                        context,
+                        '下载 M2M 模型（约 490MB）',
+                        'Download M2M model (~490MB)',
+                      ),
+              ),
             ),
           ),
     ];
@@ -458,11 +474,24 @@ class _SelectionSettingsPanelState extends State<SelectionSettingsPanel> {
   /// 本地翻译的目标语言说明：讲清直连对 / 经英语中继 / M2M 的区别。
   Widget _localTargetHint() {
     final note = _settings.translateEngine == 'm2m100'
-        ? 'M2M 单模型覆盖中↔日/韩/法德西俄等 12 语种互译，无需逐语对下载；'
-              '源语言自动判定，混杂也能译。'
-        : 'Argos 逐语对：源语言自动判定，没有直连对时经英语中继'
-              '（如中→日需同时下载「中→英」和「英→日」两个包）。'
-              '想要中↔日直接互译，把上面的引擎换成 M2M-100。';
+        ? L.pick(
+            context,
+            'M2M 单模型覆盖中↔日/韩/法德西俄等 12 语种互译，无需逐语对下载；'
+                '源语言自动判定，混杂也能译。',
+            'A single M2M model covers 12 languages (Zh↔Ja/Ko/Fr/De/Es/Ru…)'
+                ' with no per-pair downloads; the source language is detected'
+                ' automatically and mixed text still translates.',
+          )
+        : L.pick(
+            context,
+            'Argos 逐语对：源语言自动判定，没有直连对时经英语中继'
+                '（如中→日需同时下载「中→英」和「英→日」两个包）。'
+                '想要中↔日直接互译，把上面的引擎换成 M2M-100。',
+            'Argos uses per-language pairs: the source is auto-detected, and'
+                ' without a direct pair it relays through English (e.g. Zh→Ja'
+                ' needs both the "Zh→En" and "En→Ja" packs). For direct'
+                ' Zh↔Ja, switch the engine above to M2M-100.',
+          );
     return Padding(
       padding: const EdgeInsets.only(top: 6),
       child: Text(
@@ -474,25 +503,30 @@ class _SelectionSettingsPanelState extends State<SelectionSettingsPanel> {
 
   List<Widget> _scrollCaptureSection() {
     return [
-      const Padding(
-        padding: EdgeInsets.only(top: 10, bottom: 2),
+      Padding(
+        padding: const EdgeInsets.only(top: 10, bottom: 2),
         child: Text(
-          '长截图',
-          style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600),
+          L.pick(context, '长截图', 'Scrolling capture'),
+          style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600),
         ),
       ),
-      _group('滚动方式（是否自动滚动）', _settings.autoScroll ? 'auto' : 'manual', const [
-        ('auto', '自动滚动（默认）'),
-        ('manual', '手动滚动'),
-      ], (value) => _apply(_settings.copyWith(autoScroll: value == 'auto'))),
+      _group(
+        L.pick(context, '滚动方式（是否自动滚动）', 'Scroll mode (auto or manual)'),
+        _settings.autoScroll ? 'auto' : 'manual',
+        const [
+          ('auto', '自动滚动（默认）', 'Auto-scroll (default)'),
+          ('manual', '手动滚动', 'Manual scroll'),
+        ],
+        (value) => _apply(_settings.copyWith(autoScroll: value == 'auto')),
+      ),
       if (_settings.autoScroll) ...[
         _group(
-          '注入方式',
+          L.pick(context, '注入方式', 'Key injector'),
           _settings.scrollInjector,
           const [
-            ('denial', 'denial 虚拟键盘（默认）'),
-            ('wtype', 'wtype'),
-            ('ydotool', 'ydotool'),
+            ('denial', 'denial 虚拟键盘（默认）', 'denial virtual keyboard (default)'),
+            ('wtype', 'wtype', 'wtype'),
+            ('ydotool', 'ydotool', 'ydotool'),
           ],
           (value) {
             _apply(_settings.copyWith(scrollInjector: value));
@@ -500,22 +534,39 @@ class _SelectionSettingsPanelState extends State<SelectionSettingsPanel> {
           },
         ),
         if (_settings.scrollInjector != 'denial') _toolInstallRow(),
-        _group('滚动速度', _settings.autoScrollSpeed, const [
-          ('fast', '快'),
-          ('normal', '中'),
-          ('slow', '慢'),
-        ], (value) => _apply(_settings.copyWith(autoScrollSpeed: value))),
-        _group('滚动按键', _settings.autoScrollKey, const [
-          ('Down', '逐行 ↓'),
-          ('space', '翻页 空格'),
-        ], (value) => _apply(_settings.copyWith(autoScrollKey: value))),
-        const Padding(
-          padding: EdgeInsets.only(top: 4),
+        _group(
+          L.pick(context, '滚动速度', 'Scroll speed'),
+          _settings.autoScrollSpeed,
+          const [
+            ('fast', '快', 'Fast'),
+            ('normal', '中', 'Medium'),
+            ('slow', '慢', 'Slow'),
+          ],
+          (value) => _apply(_settings.copyWith(autoScrollSpeed: value)),
+        ),
+        _group(
+          L.pick(context, '滚动按键', 'Scroll key'),
+          _settings.autoScrollKey,
+          const [
+            ('Down', '逐行 ↓', 'Line ↓'),
+            ('space', '翻页 空格', 'Page space'),
+          ],
+          (value) => _apply(_settings.copyWith(autoScrollKey: value)),
+        ),
+        Padding(
+          padding: const EdgeInsets.only(top: 4),
           child: Text(
-            '自动滚动靠向目标窗口注入按键实现，仅对浏览器、阅读器等'
-            '“方向键/空格可滚动”的应用有效；文本编辑器里按键可能改变光标。'
-            'wtype 直接连 Wayland 会话，ydotool 需要 ydotoold 守护进程。',
-            style: TextStyle(fontSize: 11, color: Colors.white60),
+            L.pick(
+              context,
+              '自动滚动靠向目标窗口注入按键实现，仅对浏览器、阅读器等'
+                  '“方向键/空格可滚动”的应用有效；文本编辑器里按键可能改变光标。'
+                  'wtype 直接连 Wayland 会话，ydotool 需要 ydotoold 守护进程。',
+              'Auto-scroll injects keys into the target window, so it only works'
+                  ' for apps that scroll with arrow/space keys (browsers, readers);'
+                  ' in text editors the keys may move the caret. wtype talks to the'
+                  ' Wayland session directly; ydotool needs the ydotoold daemon.',
+            ),
+            style: const TextStyle(fontSize: 11, color: Colors.white60),
           ),
         ),
       ],
@@ -543,7 +594,9 @@ class _SelectionSettingsPanelState extends State<SelectionSettingsPanel> {
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 Text(
-                  installed ? '$tool 已安装' : '$tool 未安装',
+                  installed
+                      ? L.pick(context, '$tool 已安装', '$tool installed')
+                      : L.pick(context, '$tool 未安装', '$tool not installed'),
                   style: const TextStyle(fontSize: 12, color: Colors.white),
                 ),
                 if (_toolMessage.isNotEmpty && !busy)
@@ -569,7 +622,10 @@ class _SelectionSettingsPanelState extends State<SelectionSettingsPanel> {
                       visualDensity: VisualDensity.compact,
                       padding: const EdgeInsets.symmetric(horizontal: 10),
                     ),
-                    child: const Text('安装', style: TextStyle(fontSize: 12)),
+                    child: Text(
+                      L.pick(context, '安装', 'Install'),
+                      style: const TextStyle(fontSize: 12),
+                    ),
                   ),
         ],
       ),
@@ -578,18 +634,20 @@ class _SelectionSettingsPanelState extends State<SelectionSettingsPanel> {
 
   List<Widget> _apiSection() {
     final details = <String>[
-      _apiTypeLabel(_settings.apiType),
+      _apiTypeLabel(context, _settings.apiType),
       if (_settings.apiEndpoint.trim().isNotEmpty) _settings.apiEndpoint.trim(),
       if (_settings.apiModel.trim().isNotEmpty) _settings.apiModel.trim(),
       if (_settings.apiType == 'baidu' && _settings.apiAppId.trim().isNotEmpty)
         'APP ID ${_settings.apiAppId.trim()}',
-      _settings.apiKey.trim().isNotEmpty ? '密钥已填' : '密钥未填',
+      _settings.apiKey.trim().isNotEmpty
+          ? L.pick(context, '密钥已填', 'Key set')
+          : L.pick(context, '密钥未填', 'No key'),
     ];
     return [
       Padding(
         padding: const EdgeInsets.only(top: 4),
         child: Text(
-          '当前接口：${details.join(' · ')}',
+          L.pick(context, '当前接口：${details.join(' · ')}', 'Current: ${details.join(' · ')}'),
           style: const TextStyle(fontSize: 12, color: Colors.white70),
         ),
       ),
@@ -600,32 +658,41 @@ class _SelectionSettingsPanelState extends State<SelectionSettingsPanel> {
             if (!_apiOpen) _resetApiDraft();
             setState(() => _apiOpen = !_apiOpen);
           },
-          child: Text(_apiOpen ? '收起配置' : '配置在线翻译 API'),
+          child: Text(
+            _apiOpen
+                ? L.pick(context, '收起配置', 'Hide config')
+                : L.pick(context, '配置在线翻译 API', 'Configure online API'),
+          ),
         ),
       ),
       if (_apiOpen) ...[
-        _group('翻译协议', _apiTypeV, const [
-          ('openai', 'OpenAI 兼容（DeepSeek / OpenAI / Ollama…）'),
-          ('baidu', '百度翻译'),
-          ('deepl', 'DeepL'),
-          ('libre', 'LibreTranslate'),
-        ], (value) => setState(() => _draftApiType = value)),
+        _group(
+          L.pick(context, '翻译协议', 'Protocol'),
+          _apiTypeV,
+          const [
+            ('openai', 'OpenAI 兼容（DeepSeek / OpenAI / Ollama…）', 'OpenAI-compatible (DeepSeek / OpenAI / Ollama…)'),
+            ('baidu', '百度翻译', 'Baidu Translate'),
+            ('deepl', 'DeepL', 'DeepL'),
+            ('libre', 'LibreTranslate', 'LibreTranslate'),
+          ],
+          (value) => setState(() => _draftApiType = value),
+        ),
         if (_apiTypeV == 'openai') ...[
           _apiField(
-            'API 地址',
+            L.pick(context, 'API 地址', 'API endpoint'),
             _apiEndpointV,
             'https://api.deepseek.com',
             (value) => setState(() => _draftApiEndpoint = value),
           ),
           _apiField(
-            'API 密钥',
+            L.pick(context, 'API 密钥', 'API key'),
             _apiKeyV,
             'sk-…',
             (value) => setState(() => _draftApiKey = value),
             obscure: true,
           ),
           _apiField(
-            '模型名',
+            L.pick(context, '模型名', 'Model name'),
             _apiModelV,
             'deepseek-chat',
             (value) => setState(() => _draftApiModel = value),
@@ -634,35 +701,35 @@ class _SelectionSettingsPanelState extends State<SelectionSettingsPanel> {
           _apiField(
             'APP ID',
             _apiAppIdV,
-            '在 fanyi-api.baidu.com 免费申请',
+            L.pick(context, '在 fanyi-api.baidu.com 免费申请', 'Free at fanyi-api.baidu.com'),
             (value) => setState(() => _draftApiAppId = value),
           ),
           _apiField(
-            '密钥',
+            L.pick(context, '密钥', 'Secret key'),
             _apiKeyV,
-            '与 APP ID 配对',
+            L.pick(context, '与 APP ID 配对', 'Paired with the APP ID'),
             (value) => setState(() => _draftApiKey = value),
             obscure: true,
           ),
         ] else if (_apiTypeV == 'deepl')
           _apiField(
-            '密钥',
+            L.pick(context, '密钥', 'Secret key'),
             _apiKeyV,
-            '…:fx 结尾为免费版',
+            L.pick(context, '…:fx 结尾为免费版', 'ends with :fx for the free tier'),
             (value) => setState(() => _draftApiKey = value),
             obscure: true,
           )
         else ...[
           _apiField(
-            'API 地址',
+            L.pick(context, 'API 地址', 'API endpoint'),
             _apiEndpointV,
             'https://libretranslate.example.com',
             (value) => setState(() => _draftApiEndpoint = value),
           ),
           _apiField(
-            'API 密钥',
+            L.pick(context, 'API 密钥', 'API key'),
             _apiKeyV,
-            '可留空',
+            L.pick(context, '可留空', 'Optional'),
             (value) => setState(() => _draftApiKey = value),
             obscure: true,
           ),
@@ -670,7 +737,11 @@ class _SelectionSettingsPanelState extends State<SelectionSettingsPanel> {
         Padding(
           padding: const EdgeInsets.only(top: 8),
           child: Text(
-            '改完点「测试连接」，成功后才会保存并生效。',
+            L.pick(
+              context,
+              '改完点「测试连接」，成功后才会保存并生效。',
+              'Edit, then press "Test connection"; it saves only on success.',
+            ),
             style: TextStyle(
               fontSize: 11,
               color: Colors.white.withValues(alpha: 0.6),
@@ -681,7 +752,11 @@ class _SelectionSettingsPanelState extends State<SelectionSettingsPanel> {
           padding: const EdgeInsets.only(top: 4),
           child: OutlinedButton(
             onPressed: _apiTesting ? null : _runApiTest,
-            child: Text(_apiTesting ? '测试中…' : '测试连接'),
+            child: Text(
+              _apiTesting
+                  ? L.pick(context, '测试中…', 'Testing…')
+                  : L.pick(context, '测试连接', 'Test connection'),
+            ),
           ),
         ),
         if (_apiTestResult.isNotEmpty)
@@ -704,7 +779,15 @@ class _SelectionSettingsPanelState extends State<SelectionSettingsPanel> {
         padding: const EdgeInsets.only(top: 6),
         child: OutlinedButton(
           onPressed: () => setState(() => _modelsOpen = !_modelsOpen),
-          child: Text(_modelsOpen ? '收起模型列表' : '管理本地翻译模型（下载/删除）'),
+          child: Text(
+            _modelsOpen
+                ? L.pick(context, '收起模型列表', 'Hide model list')
+                : L.pick(
+                    context,
+                    '管理本地翻译模型（下载/删除）',
+                    'Manage local translation models (download/delete)',
+                  ),
+          ),
         ),
       ),
       if (_modelsOpen) ...[
@@ -733,7 +816,10 @@ class _SelectionSettingsPanelState extends State<SelectionSettingsPanel> {
             dense: true,
             visualDensity: VisualDensity.compact,
             contentPadding: EdgeInsets.zero,
-            title: Text(label, style: const TextStyle(fontSize: 13)),
+            title: Text(
+              L.pick(context, label.zh, label.en),
+              style: const TextStyle(fontSize: 13),
+            ),
             trailing: _packBusy == (from, to)
                 ? const SizedBox(
                     width: 16,
@@ -743,7 +829,9 @@ class _SelectionSettingsPanelState extends State<SelectionSettingsPanel> {
                 : TextButton(
                     onPressed: () => _togglePack(from, to),
                     child: Text(
-                      (_packInstalled[(from, to)] ?? false) ? '删除' : '下载',
+                      (_packInstalled[(from, to)] ?? false)
+                          ? L.pick(context, '删除', 'Delete')
+                          : L.pick(context, '下载', 'Download'),
                       style: const TextStyle(fontSize: 12),
                     ),
                   ),
@@ -754,11 +842,15 @@ class _SelectionSettingsPanelState extends State<SelectionSettingsPanel> {
 
   List<Widget> _ocrSection() {
     return [
-      const Padding(
-        padding: EdgeInsets.only(top: 10, bottom: 2),
+      Padding(
+        padding: const EdgeInsets.only(top: 10, bottom: 2),
         child: Text(
-          '识字模型（截图取字与翻译共用，CPU 推理）',
-          style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600),
+          L.pick(
+            context,
+            '识字模型（截图取字与翻译共用，CPU 推理）',
+            'OCR model (shared by capture-to-text and translation, CPU inference)',
+          ),
+          style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600),
         ),
       ),
       RadioGroup<String>(
@@ -777,11 +869,15 @@ class _SelectionSettingsPanelState extends State<SelectionSettingsPanel> {
                 visualDensity: VisualDensity.compact,
                 contentPadding: EdgeInsets.zero,
                 value: key,
-                title: Text(label, style: const TextStyle(fontSize: 13)),
+                title: Text(
+                  L.pick(context, label.zh, label.en),
+                  style: const TextStyle(fontSize: 13),
+                ),
                 subtitle: Text(
                   TranslateService.isDownloadableOcr(key)
-                      ? '$note · ${_ocrInstalled[key] ?? false ? '已下载' : '未下载'}'
-                      : note,
+                      ? '${L.pick(context, note.zh, note.en)} · '
+                            '${_ocrInstalled[key] ?? false ? L.pick(context, '已下载', 'Downloaded') : L.pick(context, '未下载', 'Not downloaded')}'
+                      : L.pick(context, note.zh, note.en),
                   style: const TextStyle(fontSize: 11, color: Colors.white60),
                 ),
               ),
@@ -798,21 +894,29 @@ class _SelectionSettingsPanelState extends State<SelectionSettingsPanel> {
               borderRadius: BorderRadius.circular(8),
               border: Border.all(color: Colors.orangeAccent),
             ),
-            child: const Row(
+            child: Row(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Icon(
+                const Icon(
                   Icons.warning_amber_rounded,
                   size: 16,
                   color: Colors.orangeAccent,
                 ),
-                SizedBox(width: 6),
+                const SizedBox(width: 6),
                 Expanded(
                   child: Text(
-                    '在线视觉模型识字：文字能读出来，但框的位置常常对不准'
-                    '（漏行、粗框、把图标当文字），翻译蒙版可能盖偏或盖不全。'
-                    '需要逐行精确定位，请改用上面的本地 PP-OCR 模型。',
-                    style: TextStyle(fontSize: 11, color: Colors.white),
+                    L.pick(
+                      context,
+                      '在线视觉模型识字：文字能读出来，但框的位置常常对不准'
+                          '（漏行、粗框、把图标当文字），翻译蒙版可能盖偏或盖不全。'
+                          '需要逐行精确定位，请改用上面的本地 PP-OCR 模型。',
+                      'Online vision-model OCR: the text can be read, but the box '
+                          'positions are often off (missed lines, coarse boxes, '
+                          'icons mistaken for text), so the translation mask may be '
+                          'misplaced or incomplete. For precise per-line positioning, '
+                          'switch to a local PP-OCR model above.',
+                    ),
+                    style: const TextStyle(fontSize: 11, color: Colors.white),
                   ),
                 ),
               ],
@@ -842,16 +946,24 @@ class _SelectionSettingsPanelState extends State<SelectionSettingsPanel> {
           child: OutlinedButton(
             onPressed: () => _toggleOcr(_settings.ocrModel),
             child: Text(
-              (_ocrInstalled[_settings.ocrModel] ?? false) ? '删除模型' : '下载模型',
+              (_ocrInstalled[_settings.ocrModel] ?? false)
+                  ? L.pick(context, '删除模型', 'Delete model')
+                  : L.pick(context, '下载模型', 'Download model'),
             ),
           ),
         ),
-      const Padding(
-        padding: EdgeInsets.only(top: 6),
+      Padding(
+        padding: const EdgeInsets.only(top: 6),
         child: Text(
-          '默认 v3 自带离线、中英稳；v4/v5/v6 需下载，覆盖更全；'
-          '「在线（视觉大模型）」复用翻译 API 端点识字，但框定位常不准。',
-          style: TextStyle(fontSize: 11, color: Colors.white60),
+          L.pick(
+            context,
+            '默认 v3 自带离线、中英稳；v4/v5/v6 需下载，覆盖更全；'
+                '「在线（视觉大模型）」复用翻译 API 端点识字，但框定位常不准。',
+            'v3 ships offline and is solid for Chinese/English; v4/v5/v6 need '
+                'download for broader coverage; "Online (vision LLM)" reuses the '
+                'translation API endpoint for OCR, but box positions are often off.',
+          ),
+          style: const TextStyle(fontSize: 11, color: Colors.white60),
         ),
       ),
     ];
@@ -860,7 +972,7 @@ class _SelectionSettingsPanelState extends State<SelectionSettingsPanel> {
   Widget _group(
     String title,
     String groupValue,
-    List<(String, String)> options,
+    List<(String, String, String)> options,
     ValueChanged<String> onChanged,
   ) {
     return Column(
@@ -878,9 +990,9 @@ class _SelectionSettingsPanelState extends State<SelectionSettingsPanel> {
           spacing: 6,
           runSpacing: 6,
           children: [
-            for (final (value, label) in options)
+            for (final (value, zh, en) in options)
               _ChoiceChip(
-                label: label,
+                label: L.pick(context, zh, en),
                 selected: value == groupValue,
                 onTap: () => onChanged(value),
               ),
@@ -908,8 +1020,8 @@ class _SelectionSettingsPanelState extends State<SelectionSettingsPanel> {
   }
 }
 
-String _apiTypeLabel(String type) => switch (type) {
-  'openai' => 'OpenAI 兼容',
+String _apiTypeLabel(BuildContext context, String type) => switch (type) {
+  'openai' => L.pick(context, 'OpenAI 兼容', 'OpenAI-compatible'),
   'baidu' => '百度翻译',
   'deepl' => 'DeepL',
   'libre' => 'LibreTranslate',

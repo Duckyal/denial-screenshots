@@ -8,6 +8,7 @@ import 'package:flutter/foundation.dart' show ValueListenable;
 import 'package:flutter/widgets.dart';
 
 import 'clipboard.dart';
+import 'l10n.dart';
 import 'pin_surface.dart';
 import 'screenshot_store.dart';
 import 'scroll_stitch.dart';
@@ -223,29 +224,39 @@ final class ScrollCaptureManager {
     _stitcher = null;
     final frameCount = _captured;
     if (stitcher == null || frameCount < 2) {
-      PinCardBus.instance.showToast('长截图失败：当前界面不能滚动/翻页');
+      PinCardBus.instance.showToast(
+        L.s('长截图失败：当前界面不能滚动/翻页', "Scroll capture failed: this view can't scroll or page"),
+      );
       return;
     }
     final result = stitcher.result;
     if (result == null ||
         result.rgba.length != result.width * result.height * 4) {
-      PinCardBus.instance.showToast('长截图失败：帧没有可对齐的重叠');
+      PinCardBus.instance.showToast(
+        L.s('长截图失败：帧没有可对齐的重叠', 'Scroll capture failed: no overlapping frames to align'),
+      );
       return;
     }
     // 页面一通到底没滚过：帧全是同一张原图（拼接管线一次都没推进），
     // 这种“异常退出”别写文件也别进编辑器，直接告诉用户界面不能滚动。
     if (result.height <= _firstFrameHeight) {
-      PinCardBus.instance.showToast('当前界面不能滚动/翻页，长截图失败');
+      PinCardBus.instance.showToast(
+        L.s('当前界面不能滚动/翻页，长截图失败', "This view can't scroll or page; scroll capture failed"),
+      );
       return;
     }
     final png = await _encodePng(result.rgba, result.width, result.height);
     if (png == null) {
-      PinCardBus.instance.showToast('长截图失败：帧没有可对齐的重叠');
+      PinCardBus.instance.showToast(
+        L.s('长截图失败：帧没有可对齐的重叠', 'Scroll capture failed: no overlapping frames to align'),
+      );
       return;
     }
     final dir = _store.directory;
     if (dir == null) {
-      PinCardBus.instance.showToast('找不到截图目录，长图未保存');
+      PinCardBus.instance.showToast(
+        L.s('找不到截图目录，长图未保存', 'Screenshot folder not found; long image not saved'),
+      );
       return;
     }
     final stamp = DateTime.now().millisecondsSinceEpoch;
@@ -253,11 +264,16 @@ final class ScrollCaptureManager {
     try {
       await File(path).writeAsBytes(png, flush: true);
     } on Object {
-      PinCardBus.instance.showToast('长图保存失败');
+      PinCardBus.instance.showToast(L.s('长图保存失败', 'Failed to save the long image'));
       return;
     }
     PinCardBus.instance.showToast(
-      stitcher.hadGap ? '长截图完成（滚动太快，可能缺了内容），正在打开编辑器…' : '长截图完成，正在打开编辑器…',
+      stitcher.hadGap
+          ? L.s(
+              '长截图完成（滚动太快，可能缺了内容），正在打开编辑器…',
+              'Scroll capture done (scrolled too fast, content may be missing), opening editor…',
+            )
+          : L.s('长截图完成，正在打开编辑器…', 'Scroll capture done, opening editor…'),
     );
   }
 

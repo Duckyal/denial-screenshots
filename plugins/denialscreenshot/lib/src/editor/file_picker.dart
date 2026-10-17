@@ -3,6 +3,7 @@ import 'dart:io';
 
 import 'package:flutter/material.dart';
 
+import '../l10n.dart';
 import 'dialog_style.dart';
 
 /// 插件内置的文件选择对话框。
@@ -48,7 +49,11 @@ Future<String?> choosePathWithDialog({
     context: context,
     barrierColor: const Color(0x66000000),
     builder: (BuildContext dialogContext) => _PathChooser(
-      title: title.isEmpty ? (save ? '保存' : '打开') : title,
+      title: title.isEmpty
+          ? (save
+                ? L.pick(context, '保存', 'Save')
+                : L.pick(context, '打开', 'Open'))
+          : title,
       save: save,
       initialDirectory: initial,
       initialFileName: filename,
@@ -168,11 +173,15 @@ class _PathChooserState extends State<_PathChooser> {
         actions: <Widget>[
           TextButton(
             onPressed: () => Navigator.of(context).pop(),
-            child: const Text('取消'),
+            child: Text(L.pick(context, '取消', 'Cancel')),
           ),
           FilledButton(
             onPressed: _confirm,
-            child: Text(widget.save ? '保存' : '打开'),
+            child: Text(
+              widget.save
+                  ? L.pick(context, '保存', 'Save')
+                  : L.pick(context, '打开', 'Open'),
+            ),
           ),
         ],
       ),
@@ -215,7 +224,7 @@ class _PathChooserContent extends StatelessWidget {
             children: <Widget>[
               IconButton(
                 icon: const Icon(Icons.arrow_upward),
-                tooltip: '上级目录',
+                tooltip: L.pick(context, '上级目录', 'Parent folder'),
                 onPressed: () {
                   final parent = directory.parent;
                   if (parent.path != directory.path) onEnter(parent);
@@ -240,7 +249,7 @@ class _PathChooserContent extends StatelessWidget {
               child: entries.isEmpty
                   ? Center(
                       child: Text(
-                        error ?? '空目录',
+                        error ?? L.pick(context, '空目录', 'Empty folder'),
                         style: theme.textTheme.bodySmall,
                       ),
                     )
@@ -271,9 +280,9 @@ class _PathChooserContent extends StatelessWidget {
           const SizedBox(height: 12),
           TextField(
             controller: nameController,
-            decoration: const InputDecoration(
-              labelText: '文件名',
-              border: OutlineInputBorder(),
+            decoration: InputDecoration(
+              labelText: L.pick(context, '文件名', 'File name'),
+              border: const OutlineInputBorder(),
               isDense: true,
             ),
             onSubmitted: (_) => onConfirm(),

@@ -16,6 +16,7 @@ import 'clipboard.dart';
 import 'editor/settings.dart';
 import 'editor/translate_service.dart';
 import 'editor_bus.dart';
+import 'l10n.dart';
 import 'panel_nav.dart';
 import 'pin_surface.dart';
 import 'scroll_capture.dart';
@@ -429,15 +430,27 @@ class _CaptureFlowHostState extends ConsumerState<CaptureFlowHost> {
           top: toolbar.top,
           onToolbarHitChanged: (hit) => _toolbarHit = hit,
           children: [
-            _toolItem(Icons.text_fields, '识字', () => _runText('ocr')),
-            _toolItem(Icons.translate, '翻译', () => _runText('translate')),
-            _toolItem(Icons.screenshot, '长截屏', _startScrollCapture),
-            _toolItem(Icons.edit, '编辑', _openEditor),
-            _toolItem(Icons.copy, '复制', _copyImage),
-            _toolItem(Icons.save_alt, '保存', _saveImage),
-            _toolItem(Icons.push_pin, '置顶', _pinImage),
-            _toolItem(Icons.settings, '设置', _openSettings),
-            _toolItem(Icons.close, '关闭', _close),
+            _toolItem(Icons.text_fields, L.pick(context, '识字', 'OCR'), () => _runText('ocr')),
+            _toolItem(
+              Icons.translate,
+              L.pick(context, '翻译', 'Translate'),
+              () => _runText('translate'),
+            ),
+            _toolItem(
+              Icons.screenshot,
+              L.pick(context, '长截屏', 'Scroll'),
+              _startScrollCapture,
+            ),
+            _toolItem(Icons.edit, L.pick(context, '编辑', 'Edit'), _openEditor),
+            _toolItem(Icons.copy, L.pick(context, '复制', 'Copy'), _copyImage),
+            _toolItem(Icons.save_alt, L.pick(context, '保存', 'Save'), _saveImage),
+            _toolItem(Icons.push_pin, L.pick(context, '置顶', 'Pin'), _pinImage),
+            _toolItem(
+              Icons.settings,
+              L.pick(context, '设置', 'Settings'),
+              _openSettings,
+            ),
+            _toolItem(Icons.close, L.pick(context, '关闭', 'Close'), _close),
           ],
         ),
       ],
@@ -563,7 +576,9 @@ class _CaptureFlowHostState extends ConsumerState<CaptureFlowHost> {
     final useVertical = side == 'below' || side == 'above';
 
     Widget card({required double maxWidth, required double maxHeight}) {
-      final title = _resultMode == 'ocr' ? '识别结果' : '翻译结果';
+      final title = _resultMode == 'ocr'
+          ? L.pick(context, '识别结果', 'Recognized text')
+          : L.pick(context, '翻译结果', 'Translation');
       final hasText = _resultRegions.isNotEmpty;
       return KeyedSubtree(
         key: _resultCardKey,
@@ -626,7 +641,9 @@ class _CaptureFlowHostState extends ConsumerState<CaptureFlowHost> {
                     )
                   else if (!hasText)
                     Text(
-                      _resultStatus.isEmpty ? '未识别到文字' : _resultStatus,
+                      _resultStatus.isEmpty
+                          ? L.pick(context, '未识别到文字', 'No text recognized')
+                          : _resultStatus,
                       style: const TextStyle(
                         fontSize: 13,
                         color: Colors.white54,
@@ -655,7 +672,7 @@ class _CaptureFlowHostState extends ConsumerState<CaptureFlowHost> {
                       alignment: Alignment.centerRight,
                       child: TextButton(
                         onPressed: _copyResultText,
-                        child: const Text('复制文字'),
+                        child: Text(L.pick(context, '复制文字', 'Copy text')),
                       ),
                     ),
                   ],
@@ -1152,13 +1169,13 @@ class _CaptureFlowHostState extends ConsumerState<CaptureFlowHost> {
       bytes = null;
     }
     if (bytes == null || bytes.isEmpty) {
-      PinCardBus.instance.showToast('截取失败，请重试');
+      PinCardBus.instance.showToast(L.s('截取失败，请重试', 'Capture failed, try again'));
       if (mounted) setState(() => _captureHidden = false);
       return null;
     }
     final file = await _writeCapture(region, bytes);
     if (file == null) {
-      PinCardBus.instance.showToast('截取失败，请重试');
+      PinCardBus.instance.showToast(L.s('截取失败，请重试', 'Capture failed, try again'));
       return null;
     }
     return (file: file, bytes: bytes);
@@ -1278,12 +1295,12 @@ class _CaptureFlowHostState extends ConsumerState<CaptureFlowHost> {
       });
     }
     if (bytes == null || bytes.isEmpty) {
-      PinCardBus.instance.showToast('截取失败，请重试');
+      PinCardBus.instance.showToast(L.s('截取失败，请重试', 'Capture failed, try again'));
       return null;
     }
     final file = await _writeCapture(region, bytes);
     if (file == null) {
-      PinCardBus.instance.showToast('截取失败，请重试');
+      PinCardBus.instance.showToast(L.s('截取失败，请重试', 'Capture failed, try again'));
       return null;
     }
     return (file: file, bytes: bytes);
@@ -1307,14 +1324,19 @@ class _CaptureFlowHostState extends ConsumerState<CaptureFlowHost> {
     }
     if (!await _translateService.isReady()) {
       if (mounted) setState(() => _captureHidden = false);
-      PinCardBus.instance.showToast('翻译组件未安装，请先在编辑器设置中安装');
+      PinCardBus.instance.showToast(L.s(
+        '翻译组件未安装，请先在编辑器设置中安装',
+        'Translation component not installed; install it in the editor settings first',
+      ));
       return;
     }
     setState(() {
       _captureHidden = false;
       _resultMode = mode;
       _resultRegions = const [];
-      _resultStatus = mode == 'ocr' ? '正在识别文字…' : '正在翻译…';
+      _resultStatus = mode == 'ocr'
+          ? L.s('正在识别文字…', 'Recognizing text…')
+          : L.s('正在翻译…', 'Translating…');
       _resultBusy = true;
       _resultOpen = true;
       _resultWindowHeight = null;
@@ -1342,7 +1364,7 @@ class _CaptureFlowHostState extends ConsumerState<CaptureFlowHost> {
           case 'error':
             setState(() {
               _resultBusy = false;
-              _resultStatus = event.message ?? '处理失败';
+              _resultStatus = event.message ?? L.s('处理失败', 'Processing failed');
             });
         }
       }
@@ -1362,7 +1384,9 @@ class _CaptureFlowHostState extends ConsumerState<CaptureFlowHost> {
       _captureHidden = false;
       _resultMode = mode;
       _resultRegions = const [];
-      _resultStatus = mode == 'ocr' ? '正在识别文字…' : '正在翻译…';
+      _resultStatus = mode == 'ocr'
+          ? L.s('正在识别文字…', 'Recognizing text…')
+          : L.s('正在翻译…', 'Translating…');
       _resultBusy = true;
       _resultOpen = true;
       _resultWindowHeight = null;
@@ -1371,7 +1395,10 @@ class _CaptureFlowHostState extends ConsumerState<CaptureFlowHost> {
         _settings.apiModel.trim().isEmpty) {
       setState(() {
         _resultBusy = false;
-        _resultStatus = '未配置 API 地址或模型名，请在设置中填写';
+        _resultStatus = L.s(
+          '未配置 API 地址或模型名，请在设置中填写',
+          'No API endpoint or model set; fill them in Settings',
+        );
       });
       return;
     }
@@ -1381,7 +1408,10 @@ class _CaptureFlowHostState extends ConsumerState<CaptureFlowHost> {
         if (mounted) {
           setState(() {
             _resultBusy = false;
-            _resultStatus = '截图解析失败，无法在线识字';
+            _resultStatus = L.s(
+              '截图解析失败，无法在线识字',
+              'Failed to decode the capture; cannot run online OCR',
+            );
           });
         }
         return;
@@ -1401,9 +1431,12 @@ class _CaptureFlowHostState extends ConsumerState<CaptureFlowHost> {
       if (regions.isEmpty) {
         setState(() {
           _resultBusy = false;
-          _resultStatus =
-              '未识别到文字：模型「${_settings.apiModel.trim()}」可能不支持图片'
-              '输入，请改用带视觉的模型（如 glm-4v-flash）';
+          _resultStatus = L.s(
+            '未识别到文字：模型「${_settings.apiModel.trim()}」可能不支持图片'
+            '输入，请改用带视觉的模型（如 glm-4v-flash）',
+            'No text recognized: model "${_settings.apiModel.trim()}" may not '
+            'accept image input; switch to a vision model (e.g. glm-4v-flash)',
+          );
         });
         return;
       }
@@ -1415,7 +1448,9 @@ class _CaptureFlowHostState extends ConsumerState<CaptureFlowHost> {
         });
         return;
       }
-      setState(() => _resultStatus = '调用翻译 API…');
+      setState(
+        () => _resultStatus = L.s('调用翻译 API…', 'Calling translation API…'),
+      );
       final texts = [for (final region in regions) region.source];
       final translations = await _translateService.translateViaApi(
         texts: texts,
@@ -1482,7 +1517,11 @@ class _CaptureFlowHostState extends ConsumerState<CaptureFlowHost> {
     if (text.isEmpty) return;
     final ok = await copyTextToClipboard(text);
     if (!mounted) return;
-    PinCardBus.instance.showToast(ok ? '已复制文字' : '复制失败（缺 wl-copy / xclip）');
+    PinCardBus.instance.showToast(
+      ok
+          ? L.s('已复制文字', 'Text copied')
+          : L.s('复制失败（缺 wl-copy / xclip）', 'Copy failed (missing wl-copy / xclip)'),
+    );
   }
 
   Future<void> _openEditor() async {
@@ -1501,11 +1540,11 @@ class _CaptureFlowHostState extends ConsumerState<CaptureFlowHost> {
     final ok = await copyPngToClipboard(captured.bytes);
     if (!mounted) return;
     if (ok) {
-      PinCardBus.instance.showToast('已复制图片到剪贴板');
+      PinCardBus.instance.showToast(L.s('已复制图片到剪贴板', 'Image copied to clipboard'));
       _close();
     } else {
       setState(() => _captureHidden = false);
-      PinCardBus.instance.showToast('复制失败（缺 wl-copy / xclip）');
+      PinCardBus.instance.showToast(L.s('复制失败（缺 wl-copy / xclip）', 'Copy failed (missing wl-copy / xclip)'));
     }
   }
 
@@ -1531,7 +1570,7 @@ class _CaptureFlowHostState extends ConsumerState<CaptureFlowHost> {
       await File(path).writeAsBytes(captured.bytes, flush: true);
     } on Object {
       if (mounted) setState(() => _captureHidden = false);
-      PinCardBus.instance.showToast('保存失败');
+      PinCardBus.instance.showToast(L.s('保存失败', 'Save failed'));
       return;
     }
     if (!mounted) return;
@@ -1545,7 +1584,7 @@ class _CaptureFlowHostState extends ConsumerState<CaptureFlowHost> {
         if (name.isNotEmpty) _saveFileName = name;
       }
     });
-    PinCardBus.instance.showToast('已保存：$path');
+    PinCardBus.instance.showToast(L.s('已保存：$path', 'Saved: $path'));
   }
 
   Future<void> _pinImage() async {
