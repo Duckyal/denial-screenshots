@@ -19,7 +19,8 @@ class ScreenshotSettings {
     this.translateTextColor = '000000',
     this.translateMaskMode = 'blur',
     this.translateTextColorMode = 'auto',
-    this.ocrModel = 'builtin',
+    this.ocrModel = 'v3',
+    this.translateEngine = 'argos',
     this.autoScroll = true,
     this.autoScrollKey = 'Down',
     this.scrollInjector = 'denial',
@@ -37,9 +38,16 @@ class ScreenshotSettings {
   /// 翻译文字颜色模式：'auto'（提取图片里文字的原色）| 'fixed'（固定颜色）。
   final String translateTextColorMode;
 
-  /// 识字用的 OCR 模型：'builtin'（组件自带的 PP-OCRv3）|
-  /// 'v4mobile'（PP-OCRv4 移动版，需下载）| 'v4server'（服务器版，需下载）。
+  /// 识字用的 OCR 模型（默认 'v3'）：'v3'（自带 PP-OCRv3 中英）|
+  /// 'v4mobile'/'v4server'/'v5mobile'/'v5server'/'v6tiny'/'v6medium'（需下载）|
+  /// 'builtin'（统一包内置 PP-OCRv6 small，多语言，自带离线）|
+  /// 'api'（在线视觉大模型，复用翻译 API 的 OpenAI 兼容端点）。
   final String ocrModel;
+
+  /// 本地翻译引擎：'argos'（默认，逐语对语言包，中英最稳最快）|
+  /// 'm2m100'（M2M-100 418M 单模型多语言，需下载，适合源语言未知/混杂的
+  /// 截图，但英→中方向偏弱、CPU 上每句更慢）。
+  final String translateEngine;
 
   /// 长截图是否自动滚动。开启后按 [autoScrollKey] 向聚焦的客户端注入
   /// 键盘按键来翻页，无需手动滚动（依赖目标应用认可该按键为滚动）。
@@ -138,6 +146,7 @@ class ScreenshotSettings {
     String? translateMaskMode,
     String? translateTextColorMode,
     String? ocrModel,
+    String? translateEngine,
     bool? autoScroll,
     String? autoScrollKey,
     String? scrollInjector,
@@ -159,6 +168,7 @@ class ScreenshotSettings {
       translateTextColorMode:
           translateTextColorMode ?? this.translateTextColorMode,
       ocrModel: ocrModel ?? this.ocrModel,
+      translateEngine: translateEngine ?? this.translateEngine,
       autoScroll: autoScroll ?? this.autoScroll,
       autoScrollKey: autoScrollKey ?? this.autoScrollKey,
       scrollInjector: scrollInjector ?? this.scrollInjector,
@@ -181,6 +191,7 @@ class ScreenshotSettings {
     'translateMaskMode': translateMaskMode,
     'translateTextColorMode': translateTextColorMode,
     'ocrModel': ocrModel,
+    'translateEngine': translateEngine,
     'autoScroll': autoScroll,
     'autoScrollKey': autoScrollKey,
     'scrollInjector': scrollInjector,
@@ -216,7 +227,8 @@ class ScreenshotSettings {
           : 'blur',
       translateTextColorMode:
           json['translateTextColorMode'] as String? ?? 'auto',
-      ocrModel: json['ocrModel'] as String? ?? 'builtin',
+      ocrModel: json['ocrModel'] as String? ?? 'v3',
+      translateEngine: json['translateEngine'] as String? ?? 'argos',
       autoScroll: json['autoScroll'] as bool? ?? true,
       autoScrollKey: json['autoScrollKey'] as String? ?? 'Down',
       scrollInjector: switch (json['scrollInjector'] as String?) {

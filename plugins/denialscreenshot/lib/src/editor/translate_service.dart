@@ -47,7 +47,14 @@ class TranslateService {
   Future<void> _serialTail = Future<void>.value();
 
   static const _mirror = 'https://pypi.tuna.tsinghua.edu.cn/simple';
+  static const _pypiFallback = 'https://pypi.org/simple';
   static const _packages = [
+    'rapidocr',
+    // 统一 rapidocr 包不再自带推理引擎，必须显式装 onnxruntime，否则
+    // 加载模型时 ImportError。
+    'onnxruntime',
+    // 默认识字模型 PP-OCRv3 由这个老包提供（自带 ch_PP-OCRv3 det+rec，零
+    // 下载、中英识别稳）。它和统一包并存、各导各的 API。
     'rapidocr-onnxruntime',
     'ctranslate2',
     'sentencepiece',
@@ -62,55 +69,138 @@ class TranslateService {
   static const _ocrModelRepo =
       'https://www.modelscope.cn/models/RapidAI/RapidOCR/resolve/master';
 
-  /// 可选 OCR 模型：(key, 标签, 说明)。builtin 无需下载。
+  /// 可选 OCR 模型：(key, 标签, 说明)。v3/builtin 自带离线无需下载。
   static const ocrModelCatalog = <(String, String, String)>[
-    ('builtin', '内置标准（PP-OCRv3）', '随识别组件自带，无需下载'),
-    ('v4mobile', '高精度（PP-OCRv4 移动版）', '约 16MB，精度更高、速度接近'),
-    ('v4server', '超高精度（PP-OCRv4 服务器版）', '约 204MB，CPU 识别明显变慢'),
+    ('v3', '经典 PP-OCRv3（中英）', '自带离线 · 中英识别稳 · CPU 快 · 默认'),
+    ('v4mobile', 'PP-OCRv4 移动版（中英）', '约 15MB · 中英比 v3 覆盖更全 · 速度快'),
+    ('v4server', 'PP-OCRv4 服务端（中英）', '约 120MB · 中英精度更高 · CPU 较慢'),
+    ('v5mobile', 'PP-OCRv5 移动版（多语种）', '约 20MB · 简繁中英等语种更广 · 速度均衡'),
+    ('v5server', 'PP-OCRv5 服务端（多语种）', '体积大 · 精度更高 · CPU 明显更慢'),
+    ('builtin', 'PP-OCRv6 small（多语言）', '自带离线 · 51 语种（简/繁中·英·日·法德西等）· 精度均衡'),
+    ('v6tiny', 'PP-OCRv6 tiny（多语言）', '约 6MB · 最快最省 · 50 语种（比内置少日文）'),
+    (
+      'v6medium',
+      'PP-OCRv6 medium（多语言）',
+      '约 139MB · 精度最高 · 同 51 语种 · CPU 识别明显更慢',
+    ),
+    (
+      'api',
+      '在线（视觉大模型）',
+      '复用翻译 API 的 OpenAI 兼容端点 · 需填 API 地址+密钥+支持图片的模型 · 精度取决于模型',
+    ),
   ];
+
+  /// 自带离线、无需下载的模型：builtin = 统一包内置 v6 small；v3 = 遗留包
+  /// rapidocr_onnxruntime 自带（默认模型）。
+  static const _bundledOcr = {'builtin', 'v3'};
+
+  /// 需下载的离线模型：key -> (ModelScope 版本目录, det 文件名, rec 文件名)。
+  static const _downloadableOcr = <String, (String, String, String)>{
+    'v4mobile': (
+      'PP-OCRv4',
+      'ch_PP-OCRv4_det_mobile.onnx',
+      'ch_PP-OCRv4_rec_mobile.onnx',
+    ),
+    'v4server': (
+      'PP-OCRv4',
+      'ch_PP-OCRv4_det_server.onnx',
+      'ch_PP-OCRv4_rec_server.onnx',
+    ),
+    'v5mobile': (
+      'PP-OCRv5',
+      'ch_PP-OCRv5_det_mobile.onnx',
+      'ch_PP-OCRv5_rec_mobile.onnx',
+    ),
+    'v5server': (
+      'PP-OCRv5',
+      'ch_PP-OCRv5_det_server.onnx',
+      'ch_PP-OCRv5_rec_server.onnx',
+    ),
+    'v6tiny': ('PP-OCRv6', 'PP-OCRv6_det_tiny.onnx', 'PP-OCRv6_rec_tiny.onnx'),
+    'v6medium': (
+      'PP-OCRv6',
+      'PP-OCRv6_det_medium.onnx',
+      'PP-OCRv6_rec_medium.onnx',
+    ),
+  };
 
   static String _ocrModelDir(String key) => '$dataDir/models/ocr/$key';
 
-  static String? _ocrModelFile(String key, String part) {
-    final suffix = switch (key) {
-      'v4server' => 'server',
-      'v4mobile' => 'mobile',
-      _ => null,
-    };
-    if (suffix == null) return null;
-    return 'ch_PP-OCRv4_${part}_$suffix.onnx';
-  }
+  /// 该识字模型是否需要下载（内置 v3/builtin 与在线 api 都不用）。
+  static bool isDownloadableOcr(String key) =>
+      _downloadableOcr.containsKey(key);
 
-  /// 高精度 OCR 模型（det+rec 两个文件）是否已下载就绪。
+  /// OCR 模型（det+rec 两个文件）是否已就绪。内置模型恒为已就绪。
   Future<bool> isOcrModelInstalled(String key) async {
-    if (key == 'builtin') return true;
-    for (final part in ['det', 'rec']) {
-      final name = _ocrModelFile(key, part);
-      if (name == null) return true;
+    if (_bundledOcr.contains(key)) return true;
+    final entry = _downloadableOcr[key];
+    if (entry == null) return true;
+    for (final name in [entry.$2, entry.$3]) {
       if (!await File('${_ocrModelDir(key)}/$name').exists()) return false;
     }
     return true;
   }
 
-  /// 下载所选 OCR 模型（[onStatus] 汇报进度）。
+  /// 下载所选 OCR 模型（[onStatus] 汇报进度）。内置模型无操作。
   Future<void> installOcrModel(
     String key, {
     void Function(String)? onStatus,
   }) async {
-    for (final part in ['det', 'rec']) {
-      final name = _ocrModelFile(key, part);
-      if (name == null) return;
+    final entry = _downloadableOcr[key];
+    if (entry == null) return;
+    final files = <(String, String)>[('det', entry.$2), ('rec', entry.$3)];
+    for (final (part, name) in files) {
       final dest = File('${_ocrModelDir(key)}/$name');
       if (await dest.exists()) continue;
       onStatus?.call('下载 $name…');
       await Directory(_ocrModelDir(key)).create(recursive: true);
-      await _download('$_ocrModelRepo/onnx/PP-OCRv4/$part/$name', dest);
+      await _download('$_ocrModelRepo/onnx/${entry.$1}/$part/$name', dest);
     }
   }
 
   /// 删除已下载的 OCR 模型（回到内置模型）。
   Future<void> deleteOcrModel(String key) async {
     final dir = Directory(_ocrModelDir(key));
+    if (await dir.exists()) {
+      await dir.delete(recursive: true);
+    }
+  }
+
+  /// M2M-100 418M（JustFrederik 版）：单模型多语言翻译，走 HF 镜像下载。
+  /// 只有这个仓库的转换能在 ctranslate2 4.8.2 下正常解码（另几家会退化
+  /// 重复或加载报错，已逐一实测）。sp 文件在仓库里叫 spm.128k.model，
+  /// 落地时统一改成 sidecar 认识的 sentencepiece.bpe.model。
+  static const _m2mRepo =
+      '$_hfMirror/JustFrederik/m2m_100_418m_ct2_int8/resolve/main';
+  static const _m2mFiles = <(String, String)>[
+    ('config.json', 'config.json'),
+    ('shared_vocabulary.txt', 'shared_vocabulary.txt'),
+    ('spm.128k.model', 'sentencepiece.bpe.model'),
+    ('model.bin', 'model.bin'),
+  ];
+
+  static String _m2mDir() => '$dataDir/models/mt/m2m100';
+
+  /// M2M 模型（四个文件齐全）是否已下载就绪。
+  Future<bool> isM2mInstalled() async {
+    for (final (_, local) in _m2mFiles) {
+      if (!await File('${_m2mDir()}/$local').exists()) return false;
+    }
+    return true;
+  }
+
+  /// 下载 M2M-100 418M（约 490MB，走 HF 镜像；[onStatus] 汇报进度）。
+  Future<void> installM2m({void Function(String)? onStatus}) async {
+    await Directory(_m2mDir()).create(recursive: true);
+    for (final (remote, local) in _m2mFiles) {
+      if (await File('${_m2mDir()}/$local').exists()) continue;
+      onStatus?.call('下载 M2M 模型 $local…');
+      await _download('$_m2mRepo/$remote', File('${_m2mDir()}/$local'));
+    }
+  }
+
+  Future<void> deleteM2m() async {
+    final dir = Directory(_m2mDir());
     if (await dir.exists()) {
       await dir.delete(recursive: true);
     }
@@ -138,7 +228,7 @@ class TranslateService {
     try {
       final result = await Process.run(venvPython, [
         '-c',
-        'import rapidocr_onnxruntime, ctranslate2, sentencepiece, PIL',
+        'import rapidocr, rapidocr_onnxruntime, onnxruntime, ctranslate2, sentencepiece, PIL',
       ]);
       return result.exitCode == 0;
     } on Object {
@@ -196,6 +286,9 @@ class TranslateService {
         '--quiet',
         '-i',
         _mirror,
+        // 新统一包 rapidocr 偶有镜像未同步/限流，回退官方 PyPI 保证能装上。
+        '--extra-index-url',
+        _pypiFallback,
         ..._packages,
       ]);
       pip.stdout.transform(utf8.decoder).listen((_) {});
@@ -262,6 +355,7 @@ class TranslateService {
   Future<List<(String, bool)>> translateTextsLocal(
     List<String> texts,
     String target, {
+    String engine = 'argos',
     void Function(String message)? onStatus,
   }) async {
     if (!await isReady()) {
@@ -273,6 +367,7 @@ class TranslateService {
         'target': target,
         'mode': 'texts',
         'texts': texts,
+        'engine': engine,
       });
     });
 
@@ -414,6 +509,7 @@ class TranslateService {
     required String target,
     String mode = 'translate',
     String ocrModel = 'builtin',
+    String engine = 'argos',
   }) async* {
     final ready = await isReady();
     if (!ready) {
@@ -431,6 +527,7 @@ class TranslateService {
         'target': target,
         'mode': mode,
         'ocr_model': ocrModel,
+        'engine': engine,
       });
     });
 
@@ -565,6 +662,193 @@ class TranslateService {
     if (await dir.exists()) {
       await dir.delete(recursive: true);
     }
+  }
+
+  /// 把 OpenAI 兼容 base URL 规整成 chat/completions 端点。路径已带版本段
+  /// （DeepSeek /v1、智谱 /v4…）只补 chat/completions，否则补 /v1/chat/completions。
+  Uri _chatCompletionsUri(String endpoint) {
+    var url = endpoint.trim().replaceAll(RegExp(r'/+$'), '');
+    if (!url.contains('chat/completions')) {
+      final path = Uri.parse(url).path;
+      url = path.contains('/v1') || RegExp(r'/v\d+$').hasMatch(path)
+          ? '$url/chat/completions'
+          : '$url/v1/chat/completions';
+    }
+    return Uri.parse(url);
+  }
+
+  /// 从模型回复里抠出第一个 JSON 数组（容忍 markdown 代码围栏）。
+  List<dynamic>? _extractJsonArray(String content) {
+    final cleaned = content.replaceAll(RegExp(r'```[A-Za-z0-9]*'), '');
+    final start = cleaned.indexOf('[');
+    final end = cleaned.lastIndexOf(']');
+    if (start < 0 || end <= start) return null;
+    try {
+      final decoded = jsonDecode(cleaned.substring(start, end + 1));
+      return decoded is List ? decoded : null;
+    } on FormatException {
+      return null;
+    }
+  }
+
+  /// 在线视觉大模型识字：把截图交给 OpenAI 兼容的 vision 端点，取回文字块
+  /// 和像素框。复用翻译 API 的同一套 endpoint / key / model 配置。
+  /// 返回的 region 只带文字与框（背景/前景色为空，落图时退到设置里的固定色）。
+  Future<List<TranslateRegion>> ocrViaApi({
+    required List<int> imageBytes,
+    required int width,
+    required int height,
+    required String endpoint,
+    required String apiKey,
+    required String model,
+    void Function(String note)? onRetry,
+  }) async {
+    if (endpoint.trim().isEmpty) {
+      throw Exception('未配置 API 地址，请在设置中填写');
+    }
+    if (model.trim().isEmpty) {
+      throw Exception('未配置模型名，请在设置中填写（需支持图片输入）');
+    }
+    final uri = _chatCompletionsUri(endpoint);
+    final disableThinking =
+        uri.host.endsWith('bigmodel.cn') || uri.host.endsWith('z.ai');
+    final dataUrl = 'data:image/png;base64,${base64Encode(imageBytes)}';
+    final prompt =
+        'Extract ALL visible text from this image as OCR. For every text '
+        'segment, give its bounding box in PIXELS measured from the image '
+        'top-left, plus the exact original text. Reply ONLY with a JSON '
+        'array, no prose, each element shaped like '
+        '{"text": "原文", "box": [x, y, w, h]} where x,y is the top-left '
+        'corner in pixels and w,h the width and height in pixels. The image '
+        'is $width pixels wide and $height pixels tall; do NOT normalize or '
+        'rescale coordinates.';
+
+    Object? lastError;
+    for (var attempt = 0; attempt < 3; attempt++) {
+      if (attempt > 0) {
+        final wait = attempt * 2;
+        onRetry?.call('限流/服务忙，${wait}s 后重试（第 $attempt 次）');
+        await Future<void>.delayed(Duration(seconds: wait));
+      }
+      final client = HttpClient()
+        ..connectionTimeout = const Duration(seconds: apiConnectTimeoutSeconds);
+      try {
+        final request = await client.postUrl(uri);
+        request.headers.contentType = ContentType.json;
+        if (apiKey.isNotEmpty) {
+          request.headers.set('Authorization', 'Bearer $apiKey');
+        }
+        request.write(
+          jsonEncode({
+            'model': model.trim(),
+            'temperature': 0,
+            if (disableThinking) 'thinking': {'type': 'disabled'},
+            'messages': [
+              {
+                'role': 'user',
+                'content': [
+                  {'type': 'text', 'text': prompt},
+                  {
+                    'type': 'image_url',
+                    'image_url': {'url': dataUrl},
+                  },
+                ],
+              },
+            ],
+          }),
+        );
+        final response = await request.close().timeout(
+          const Duration(seconds: apiTimeoutSeconds),
+        );
+        final body = await response.transform(utf8.decoder).join();
+        if (response.statusCode != HttpStatus.ok) {
+          final error = _apiErrorOf(response.statusCode, body);
+          if (attempt < 2 &&
+              (response.statusCode == 429 || response.statusCode >= 500)) {
+            lastError = error;
+            continue;
+          }
+          throw error;
+        }
+        final content =
+            ((((jsonDecode(body) as Map<String, dynamic>)['choices'] as List?)
+                            ?.first
+                        as Map<String, dynamic>?)?['message']
+                    as Map<String, dynamic>?)?['content']
+                as String?;
+        if (content == null || content.trim().isEmpty) {
+          throw Exception('API 返回为空');
+        }
+        return _parseApiOcr(content, width, height);
+      } on ApiTranslateException {
+        rethrow;
+      } on Object catch (error) {
+        if (attempt < 2 &&
+            (error is TimeoutException || error is SocketException)) {
+          lastError = error;
+          continue;
+        }
+        rethrow;
+      } finally {
+        client.close();
+      }
+    }
+    throw lastError ?? Exception('在线识字 API 调用失败（已重试 2 次）');
+  }
+
+  /// 解析视觉模型的 OCR 回复为文字块：容忍 text/box 的多种键名与坐标写法，
+  /// 把框夹回图片范围内，坐标明显越界时按 [x1,y1,x2,y2] 角点再解释一次。
+  List<TranslateRegion> _parseApiOcr(String content, int width, int height) {
+    final array = _extractJsonArray(content);
+    if (array == null) return const [];
+    final regions = <TranslateRegion>[];
+    for (final raw in array) {
+      if (raw is! Map) continue;
+      final map = raw.cast<String, dynamic>();
+      final text =
+          (map['text'] ??
+                  map['txt'] ??
+                  map['content'] ??
+                  map['text_content'] ??
+                  map['words_result'] ??
+                  '')
+              .toString();
+      final box =
+          (map['box'] ??
+          map['bbox'] ??
+          map['bbox_2d'] ??
+          map['box_2d'] ??
+          map['rect']);
+      if (box is! List || box.length < 4 || text.trim().isEmpty) continue;
+      final x = (box[0] as num).toDouble();
+      final y = (box[1] as num).toDouble();
+      final a = (box[2] as num).toDouble();
+      final b = (box[3] as num).toDouble();
+      var w = a;
+      var h = b;
+      // a,b 当宽高用却把框推出画布一大截 → 更像 [x1,y1,x2,y2] 角点，换算法。
+      if (x + w > width * 1.2 || y + h > height * 1.2 || w <= 0 || h <= 0) {
+        if (a > x && b > y) {
+          w = a - x;
+          h = b - y;
+        }
+      }
+      final left = x.clamp(0.0, width.toDouble());
+      final top = y.clamp(0.0, height.toDouble());
+      final right = (x + w).clamp(0.0, width.toDouble());
+      final bottom = (y + h).clamp(0.0, height.toDouble());
+      if (right - left <= 1 || bottom - top <= 1) continue;
+      regions.add(
+        TranslateRegion(
+          rect: Rect.fromLTRB(left, top, right, bottom),
+          source: text,
+          translated: text,
+          background: const [],
+          foreground: const [],
+        ),
+      );
+    }
+    return regions;
   }
 
   /// 在线翻译 API：把 [texts] 逐条翻译，返回与输入对齐的结果。

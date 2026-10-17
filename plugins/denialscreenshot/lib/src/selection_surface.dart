@@ -1284,6 +1284,7 @@ class _CaptureFlowHostState extends ConsumerState<CaptureFlowHost> {
         target: _targetLanguage(),
         mode: mode,
         ocrModel: _settings.ocrModel,
+        engine: _settings.translateEngine,
       )) {
         if (!mounted) return;
         switch (event.type) {
@@ -1317,8 +1318,11 @@ class _CaptureFlowHostState extends ConsumerState<CaptureFlowHost> {
     final text = _resultMode == 'ocr'
         ? _resultRegions.map((region) => region.source).join('\n')
         : _resultRegions
-              .map((region) => region.translated)
-              .where((line) => line.isNotEmpty)
+              .map(
+                (region) => region.translated.isNotEmpty
+                    ? region.translated
+                    : region.source,
+              )
               .join('\n');
     if (text.isEmpty) return;
     final ok = await copyTextToClipboard(text);
@@ -1329,8 +1333,10 @@ class _CaptureFlowHostState extends ConsumerState<CaptureFlowHost> {
   Future<void> _openEditor() async {
     final captured = await _captureNow(restore: false);
     if (captured == null) return;
-    DenialScreenshotEditorBus.instance
-        .openBytes(captured.bytes, path: captured.file.path);
+    DenialScreenshotEditorBus.instance.openBytes(
+      captured.bytes,
+      path: captured.file.path,
+    );
     _close();
   }
 
@@ -1467,7 +1473,8 @@ class _CaptureFlowHostState extends ConsumerState<CaptureFlowHost> {
   }
 }
 
-/// 识字/翻译结果列表里的单行：OCR 显示原文，翻译显示序号+原文+译文。
+/// 识字/翻译结果列表里的单行：OCR 显示原文；翻译只出一行——真被翻译的
+/// 块用加粗+主题蓝标出，没翻的（译文即原文）按原样显示，不再前后两行对比。
 class _ResultRow extends StatelessWidget {
   const _ResultRow({
     required this.mode,
@@ -1489,19 +1496,25 @@ class _ResultRow extends StatelessWidget {
         style: const TextStyle(fontSize: 13, color: Colors.white),
       );
     }
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Text(
-          '${index + 1}. $source',
-          style: const TextStyle(fontSize: 12, color: Colors.white54),
-        ),
-        const SizedBox(height: 2),
-        Text(
-          translated,
-          style: const TextStyle(fontSize: 13, color: Colors.white),
-        ),
-      ],
+    final translatedHere =
+        translated.trim().isNotEmpty && translated.trim() != source.trim();
+    return Text.rich(
+      TextSpan(
+        children: [
+          TextSpan(
+            text: '${index + 1}. ',
+            style: const TextStyle(fontSize: 13, color: Colors.white54),
+          ),
+          TextSpan(
+            text: translatedHere ? translated : source,
+            style: TextStyle(
+              fontSize: 13,
+              color: translatedHere ? const Color(0xFF6FC3FF) : Colors.white,
+              fontWeight: translatedHere ? FontWeight.bold : FontWeight.normal,
+            ),
+          ),
+        ],
+      ),
     );
   }
 }

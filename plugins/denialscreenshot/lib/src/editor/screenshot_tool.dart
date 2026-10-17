@@ -3478,6 +3478,10 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
   String _ocrBusyKey = '';
   String _ocrBusyMessage = '';
 
+  bool _m2mInstalled = false;
+  bool _m2mBusy = false;
+  String _m2mMessage = '';
+
   /// 设置面板浮层：随停靠条位置锚在设置按钮旁（横向停靠时在条的上/下
   /// 方，纵向停靠时在条的左/右侧），打开/关闭带淡入淡出。
   Widget _buildSettingsPanelOverlay({required bool dockShown}) {
@@ -3794,7 +3798,36 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
     for (final (key, _, _) in TranslateService.ocrModelCatalog) {
       installed[key] = await _translateService.isOcrModelInstalled(key);
     }
-    if (mounted) setState(() => _ocrInstalled = installed);
+    final m2m = await _translateService.isM2mInstalled();
+    if (mounted) {
+      setState(() {
+        _ocrInstalled = installed;
+        _m2mInstalled = m2m;
+      });
+    }
+  }
+
+  /// 下载/删除 M2M-100 多语言模型。切到 m2m100 引擎但模型没下载时，
+  /// 翻译会明确报错提示先下载，不会静默回退 Argos。
+  Future<void> _toggleM2m() async {
+    setState(() {
+      _m2mBusy = true;
+      _m2mMessage = '';
+    });
+    try {
+      if (_m2mInstalled) {
+        await _translateService.deleteM2m();
+      } else {
+        await _translateService.installM2m(
+          onStatus: (status) => setState(() => _m2mMessage = status),
+        );
+      }
+      final m2m = await _translateService.isM2mInstalled();
+      if (mounted) setState(() => _m2mInstalled = m2m);
+    } on Object catch (error) {
+      if (mounted) setState(() => _m2mMessage = '$error');
+    }
+    if (mounted) setState(() => _m2mBusy = false);
   }
 
   /// 设置面板的按键：捕获快捷键绑定；Esc 先取消捕获、再关面板。
@@ -3833,8 +3866,8 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
     const tabs = [
       ('general', '常规'),
       ('keys', '快捷键'),
-      ('translate', '翻译'),
       ('ocr', '识字'),
+      ('translate', '翻译'),
     ];
     final content = switch (_settingsTab) {
       'keys' => _buildSettingsKeysTab(),
@@ -4021,6 +4054,7 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
               child: const Text('管理本地翻译模型（下载/删除）'),
             ),
           ),
+        if (_settings.translateBackend == 'local') _buildEnginePicker(),
         _settingsGroup(
           '翻译为',
           _settings.translateTarget,
@@ -4073,6 +4107,93 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
     );
   }
 
+  Widget _buildEnginePicker() {
+    return Padding(
+      padding: const EdgeInsets.only(top: 6),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Padding(
+            padding: EdgeInsets.only(bottom: 4),
+            child: Text(
+              '翻译引擎',
+              style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600),
+            ),
+          ),
+          RadioGroup<String>(
+            groupValue: _settings.translateEngine,
+            onChanged: (next) {
+              if (next != null) {
+                _applySettings(_settings.copyWith(translateEngine: next));
+              }
+            },
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                const RadioListTile<String>(
+                  dense: true,
+                  visualDensity: VisualDensity.compact,
+                  contentPadding: EdgeInsets.zero,
+                  title: Text('Argos 语言包（默认）', style: TextStyle(fontSize: 13)),
+                  subtitle: Text(
+                    '逐语对，中英等已装方向最稳最快；未装方向需先下载语言包',
+                    style: TextStyle(fontSize: 11, color: Colors.white60),
+                  ),
+                  value: 'argos',
+                ),
+                RadioListTile<String>(
+                  dense: true,
+                  visualDensity: VisualDensity.compact,
+                  contentPadding: EdgeInsets.zero,
+                  title: const Text(
+                    'M2M-100 多语言单模型',
+                    style: TextStyle(fontSize: 13),
+                  ),
+                  subtitle: Text(
+                    '源语言未知/混杂也能译（12 受监督语种）· '
+                    '${_m2mInstalled ? '已下载' : '未下载，约 490MB'} · '
+                    '英→中偏弱、CPU 每句更慢',
+                    style: const TextStyle(fontSize: 11, color: Colors.white60),
+                  ),
+                  value: 'm2m100',
+                ),
+              ],
+            ),
+          ),
+          if (_m2mBusy)
+            Padding(
+              padding: const EdgeInsets.symmetric(vertical: 6),
+              child: Row(
+                children: [
+                  const SizedBox(
+                    width: 14,
+                    height: 14,
+                    child: CircularProgressIndicator(strokeWidth: 2),
+                  ),
+                  const SizedBox(width: 10),
+                  Expanded(
+                    child: Text(
+                      _m2mMessage,
+                      style: const TextStyle(fontSize: 12),
+                    ),
+                  ),
+                ],
+              ),
+            )
+          else if (_settings.translateEngine == 'm2m100')
+            Padding(
+              padding: const EdgeInsets.only(top: 4),
+              child: OutlinedButton(
+                onPressed: _toggleM2m,
+                child: Text(_m2mInstalled ? '删除 M2M 模型' : '下载 M2M 模型（约 490MB）'),
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+
   Widget _buildSettingsOcrTab() {
     return Column(
       mainAxisSize: MainAxisSize.min,
@@ -4102,9 +4223,9 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
                   contentPadding: EdgeInsets.zero,
                   title: Text(label, style: const TextStyle(fontSize: 13)),
                   subtitle: Text(
-                    key == 'builtin'
-                        ? note
-                        : '$note · ${_ocrInstalled[key] ?? false ? '已下载' : '未下载'}',
+                    TranslateService.isDownloadableOcr(key)
+                        ? '$note · ${_ocrInstalled[key] ?? false ? '已下载' : '未下载'}'
+                        : note,
                     style: const TextStyle(fontSize: 11, color: Colors.white60),
                   ),
                   value: key,
@@ -4137,7 +4258,7 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
             padding: const EdgeInsets.only(top: 4),
             child: Row(
               children: [
-                if (_settings.ocrModel != 'builtin')
+                if (TranslateService.isDownloadableOcr(_settings.ocrModel))
                   OutlinedButton(
                     onPressed: () => _toggleOcrModel(_settings.ocrModel),
                     child: Text(
@@ -4152,9 +4273,12 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
         const Padding(
           padding: EdgeInsets.only(top: 4),
           child: Text(
-            '高精度模型来自 RapidOCR 官方 ModelScope 仓库；下载完成后下一次'
-            '识字/翻译即生效。服务器版在 CPU 上速度明显更慢，截图很大时建议'
-            '先用移动版。',
+            '默认 PP-OCRv3 自带离线、中英识别稳。v4/v5 有移动/服务端两档，需下载；'
+            'v5 起覆盖简繁中英等多语种，server 档精度更高但 CPU 明显更慢。'
+            'v6（builtin 即 small）自带 51 语种多语言，tiny 更快少日文、medium 最准最慢。'
+            '选中标了体积的模型需先下载，完成后下次识字即生效。'
+            '「在线（视觉大模型）」复用翻译 API 的 OpenAI 兼容端点做识字，需在设置里填好'
+            ' API 地址、密钥和一个支持图片输入的模型名，精度取决于所选模型。',
             style: TextStyle(fontSize: 11, color: Colors.white60),
           ),
         ),
@@ -4620,6 +4744,11 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
   }
 
   Future<List<TranslateRegion>> _runBackgroundOcr(int generation) async {
+    // 在线视觉大模型识字：不走 venv/sidecar，直接调 API。缺地址或模型名
+    // 就静默跳过（和离线未就绪时的表现一致，不打扰用户）。
+    if (_settings.ocrModel == 'api') {
+      return _runBackgroundApiOcr(generation);
+    }
     if (!await _translateService.isReady()) return const [];
     _startRecognizeElapsed();
     try {
@@ -4643,6 +4772,48 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
       }
       return const [];
     } on Object {
+      return const [];
+    } finally {
+      _stopRecognizeElapsed();
+      if (mounted && generation == _ocrGeneration) {
+        setState(() => _recognizing = false);
+      }
+    }
+  }
+
+  /// 在线视觉大模型识字：把当前图片喂给 OpenAI 兼容端点，直接拿回带坐标的
+  /// 文字块（像素坐标，和离线 sidecar 对齐）。出错静默返回空，不弹安装向导。
+  Future<List<TranslateRegion>> _runBackgroundApiOcr(int generation) async {
+    if (_settings.apiEndpoint.trim().isEmpty ||
+        _settings.apiModel.trim().isEmpty) {
+      return const [];
+    }
+    final decoded = _decodedImage;
+    if (decoded == null) return const [];
+    _startRecognizeElapsed();
+    try {
+      final regions = await _translateService.ocrViaApi(
+        imageBytes: _currentImageBytes,
+        width: decoded.width,
+        height: decoded.height,
+        endpoint: _settings.apiEndpoint,
+        apiKey: _settings.apiKey,
+        model: _settings.apiModel,
+        onRetry: (note) {
+          if (mounted && generation == _ocrGeneration) {
+            _ocrBaseStatus = note;
+            _updateRecognizeStatus();
+          }
+        },
+      );
+      if (!mounted || generation != _ocrGeneration) return const [];
+      _ocrRegions = regions.length;
+      _updateRecognizeStatus();
+      return regions;
+    } on Object catch (error) {
+      if (mounted && generation == _ocrGeneration) {
+        _showMessage('在线识字失败：$error');
+      }
       return const [];
     } finally {
       _stopRecognizeElapsed();
@@ -4719,8 +4890,18 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
           ),
         ),
         for (var i = 0; i < _ocrBlocks.length; i++)
+          // 命中区比识别框略宽：OCR 框常贴着字形边缘，若命中区==框，起选时
+          // 点在首/尾字的边缘像素会落到块外而漏选。向外扩一小圈，落点即便在
+          // 框外，[_ocrOffsetInBlock] 也会夹到 0/len，正好带上两端字符；高亮
+          // 仍按原框绘制，不受影响。左右各 4、上下各 2，横向给足因为漏选主要
+          // 发生在首尾字。
           Positioned.fromRect(
-            rect: _ocrBlocks[i].rect,
+            rect: Rect.fromLTRB(
+              _ocrBlocks[i].rect.left - 4,
+              _ocrBlocks[i].rect.top - 2,
+              _ocrBlocks[i].rect.right + 4,
+              _ocrBlocks[i].rect.bottom + 2,
+            ),
             child: MouseRegion(
               cursor: SystemMouseCursors.text,
               child: GestureDetector(
@@ -4912,9 +5093,10 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
         '[translate] backend=${_settings.translateBackend} '
         'target=${_settings.translateTarget}',
       );
-      if (useApi && _settings.apiEndpoint.trim().isEmpty) {
+      if ((useApi || _settings.ocrModel == 'api') &&
+          _settings.apiEndpoint.trim().isEmpty) {
         // LLM/API 不默认开启：没配置就引导用户去设置。
-        _showMessage('请先在设置中配置翻译 API');
+        _showMessage('请先在设置中配置 API');
         await _openSettings();
         return;
       }
@@ -4947,6 +5129,38 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
       );
       await inputFile.writeAsBytes(png);
 
+      // 在线识字：后台没缓存文字块时，对快照直接调视觉模型 OCR，拿到
+      // 带坐标的文字块后走与离线一致的「翻译 + 落画布」流程。
+      if (_settings.ocrModel == 'api') {
+        _setTranslateStatus('调用在线识字 API…');
+        final size = await _pngSizeOf(png);
+        if (size == null) {
+          _showMessage('快照解析失败，无法在线识字');
+          return;
+        }
+        final List<TranslateRegion> regions;
+        try {
+          regions = await _translateService.ocrViaApi(
+            imageBytes: png,
+            width: size.$1,
+            height: size.$2,
+            endpoint: _settings.apiEndpoint,
+            apiKey: _settings.apiKey,
+            model: _settings.apiModel,
+            onRetry: _setTranslateStatus,
+          );
+        } on Object catch (error) {
+          _showMessage(_describeApiError(error), seconds: 5);
+          return;
+        }
+        if (regions.isEmpty) {
+          _showMessage('未识别到文字');
+          return;
+        }
+        await _translateFromRegions(regions, target, useApi);
+        return;
+      }
+
       if (useApi) {
         await _translateViaApi(inputFile, target);
         return;
@@ -4957,6 +5171,7 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
         imagePath: inputFile.path,
         target: target,
         ocrModel: _settings.ocrModel,
+        engine: _settings.translateEngine,
       )) {
         if (!mounted) return;
         switch (event.type) {
@@ -5031,6 +5246,7 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
       results = await _translateService.translateTextsLocal(
         texts,
         target,
+        engine: _settings.translateEngine,
         onStatus: _setTranslateStatus,
       );
     }
@@ -5333,6 +5549,21 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
     final data = await image.toByteData(format: ui.ImageByteFormat.png);
     image.dispose();
     return data?.buffer.asUint8List();
+  }
+
+  /// 读出 PNG 字节集的像素尺寸，供在线识花开提示词时告诉模型真实宽高。
+  Future<(int, int)?> _pngSizeOf(Uint8List bytes) async {
+    try {
+      final codec = await ui.instantiateImageCodec(bytes);
+      final frame = await codec.getNextFrame();
+      codec.dispose();
+      final image = frame.image;
+      final size = (image.width, image.height);
+      image.dispose();
+      return size;
+    } on Object {
+      return null;
+    }
   }
 
   /// 置顶快照：画布截图后裁掉图像外的留白（画布跟随平铺窗口比例，图像

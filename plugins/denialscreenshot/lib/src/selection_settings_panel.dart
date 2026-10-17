@@ -52,12 +52,45 @@ class _SelectionSettingsPanelState extends State<SelectionSettingsPanel> {
   bool _apiTesting = false;
   String _apiTestResult = '';
 
+  /// M2M-100 多语言单模型的下载状态（本地翻译引擎用）。
+  bool _m2mInstalled = false;
+  bool _m2mBusy = false;
+  String _m2mMessage = '';
+
   @override
   void initState() {
     super.initState();
     unawaited(_refreshPacks());
     unawaited(_refreshOcr());
     unawaited(_refreshTools());
+    unawaited(_refreshM2m());
+  }
+
+  Future<void> _refreshM2m() async {
+    final installed = await widget.translateService.isM2mInstalled();
+    if (mounted) setState(() => _m2mInstalled = installed);
+  }
+
+  Future<void> _toggleM2m() async {
+    setState(() {
+      _m2mBusy = true;
+      _m2mMessage = '';
+    });
+    try {
+      if (_m2mInstalled) {
+        await widget.translateService.deleteM2m();
+      } else {
+        await widget.translateService.installM2m(
+          onStatus: (status) {
+            if (mounted) setState(() => _m2mMessage = status);
+          },
+        );
+      }
+      await _refreshM2m();
+    } on Object catch (error) {
+      if (mounted) setState(() => _m2mMessage = '$error');
+    }
+    if (mounted) setState(() => _m2mBusy = false);
   }
 
   void _apply(ScreenshotSettings next) {
@@ -313,6 +346,7 @@ class _SelectionSettingsPanelState extends State<SelectionSettingsPanel> {
 
   List<Widget> _sections() {
     return [
+      ..._ocrSection(),
       _group(
         '翻译接口',
         _settings.translateBackend,
@@ -324,6 +358,7 @@ class _SelectionSettingsPanelState extends State<SelectionSettingsPanel> {
         },
       ),
       if (_settings.translateBackend == 'api') ..._apiSection(),
+      if (_settings.translateBackend == 'local') ..._engineSection(),
       if (_settings.translateBackend == 'local') ..._localModelsSection(),
       _group('翻译为', _settings.translateTarget, const [
         ('system', '跟随系统'),
@@ -336,9 +371,65 @@ class _SelectionSettingsPanelState extends State<SelectionSettingsPanel> {
         ('ru', 'Русский'),
         ('es', 'Español'),
       ], (value) => _apply(_settings.copyWith(translateTarget: value))),
-      ..._ocrSection(),
+      if (_settings.translateBackend == 'local') _localTargetHint(),
       ..._scrollCaptureSection(),
     ];
+  }
+
+  /// 本地翻译引擎选择：Argos 逐语对（默认）/ M2M-100 单模型任意互译。
+  List<Widget> _engineSection() {
+    return [
+      _group('翻译引擎', _settings.translateEngine, const [
+        ('argos', 'Argos 语言包（默认）'),
+        ('m2m100', 'M2M-100 多语言单模型'),
+      ], (value) => _apply(_settings.copyWith(translateEngine: value))),
+      if (_settings.translateEngine == 'm2m100')
+        if (_m2mBusy)
+          Padding(
+            padding: const EdgeInsets.only(top: 6),
+            child: Row(
+              children: [
+                const SizedBox(
+                  width: 14,
+                  height: 14,
+                  child: CircularProgressIndicator(strokeWidth: 2),
+                ),
+                const SizedBox(width: 10),
+                Expanded(
+                  child: Text(
+                    _m2mMessage,
+                    style: const TextStyle(fontSize: 12),
+                  ),
+                ),
+              ],
+            ),
+          )
+        else
+          Padding(
+            padding: const EdgeInsets.only(top: 6),
+            child: OutlinedButton(
+              onPressed: _toggleM2m,
+              child: Text(_m2mInstalled ? '删除 M2M 模型' : '下载 M2M 模型（约 490MB）'),
+            ),
+          ),
+    ];
+  }
+
+  /// 本地翻译的目标语言说明：讲清直连对 / 经英语中继 / M2M 的区别。
+  Widget _localTargetHint() {
+    final note = _settings.translateEngine == 'm2m100'
+        ? 'M2M 单模型覆盖中↔日/韩/法德西俄等 12 语种互译，无需逐语对下载；'
+              '源语言自动判定，混杂也能译。'
+        : 'Argos 逐语对：源语言自动判定，没有直连对时经英语中继'
+              '（如中→日需同时下载「中→英」和「英→日」两个包）。'
+              '想要中↔日直接互译，把上面的引擎换成 M2M-100。';
+    return Padding(
+      padding: const EdgeInsets.only(top: 6),
+      child: Text(
+        note,
+        style: const TextStyle(fontSize: 11, color: Colors.white60),
+      ),
+    );
   }
 
   List<Widget> _scrollCaptureSection() {
@@ -635,9 +726,9 @@ class _SelectionSettingsPanelState extends State<SelectionSettingsPanel> {
                 value: key,
                 title: Text(label, style: const TextStyle(fontSize: 13)),
                 subtitle: Text(
-                  key == 'builtin'
-                      ? note
-                      : '$note · ${_ocrInstalled[key] ?? false ? '已下载' : '未下载'}',
+                  TranslateService.isDownloadableOcr(key)
+                      ? '$note · ${_ocrInstalled[key] ?? false ? '已下载' : '未下载'}'
+                      : note,
                   style: const TextStyle(fontSize: 11, color: Colors.white60),
                 ),
               ),
@@ -661,7 +752,7 @@ class _SelectionSettingsPanelState extends State<SelectionSettingsPanel> {
             ],
           ),
         )
-      else if (_settings.ocrModel != 'builtin')
+      else if (TranslateService.isDownloadableOcr(_settings.ocrModel))
         Padding(
           padding: const EdgeInsets.only(top: 4),
           child: OutlinedButton(
@@ -671,6 +762,14 @@ class _SelectionSettingsPanelState extends State<SelectionSettingsPanel> {
             ),
           ),
         ),
+      const Padding(
+        padding: EdgeInsets.only(top: 6),
+        child: Text(
+          '默认 v3 自带离线、中英稳；v4/v5/v6 需下载，覆盖更全；'
+          '「在线（视觉大模型）」复用翻译 API 端点识字。',
+          style: TextStyle(fontSize: 11, color: Colors.white60),
+        ),
+      ),
     ];
   }
 
