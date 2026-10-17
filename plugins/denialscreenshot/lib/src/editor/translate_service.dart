@@ -86,7 +86,7 @@ class TranslateService {
     (
       'api',
       '在线（视觉大模型）',
-      '复用翻译 API 的 OpenAI 兼容端点 · 需填 API 地址+密钥+支持图片的模型 · 精度取决于模型',
+      '复用翻译 API 端点 · 能读文字但框定位常不准（漏行/粗框/幻觉）· 要精确定位请用上面的本地 PP-OCR',
     ),
   ];
 
@@ -725,13 +725,12 @@ class TranslateService {
     final dataUrl = 'data:image/png;base64,${base64Encode(imageBytes)}';
     final prompt =
         'Extract ALL visible text from this image as OCR. For every text '
-        'segment, give its bounding box in PIXELS measured from the image '
-        'top-left, plus the exact original text. Reply ONLY with a JSON '
-        'array, no prose, each element shaped like '
-        '{"text": "原文", "box": [x, y, w, h]} where x,y is the top-left '
-        'corner in pixels and w,h the width and height in pixels. The image '
-        'is $width pixels wide and $height pixels tall; do NOT normalize or '
-        'rescale coordinates.';
+        'segment, give its bounding box plus the exact original text. Reply '
+        'ONLY with a JSON array, no prose, each element shaped like '
+        '{"text": "原文", "box": [x, y, w, h]} where the box is NORMALIZED to '
+        'the range 0.0-1.0: x,y is the top-left corner and w,h the width and '
+        'height, all as fractions of the image width/height (0.0 = left/top, '
+        '1.0 = right/bottom). Do not use raw pixel values.';
 
     Object? lastError;
     for (var attempt = 0; attempt < 3; attempt++) {
@@ -806,12 +805,18 @@ class TranslateService {
     throw lastError ?? Exception('在线识字 API 调用失败（已重试 2 次）');
   }
 
-  /// 解析视觉模型的 OCR 回复为文字块：容忍 text/box 的多种键名与坐标写法，
-  /// 把框夹回图片范围内，坐标明显越界时按 [x1,y1,x2,y2] 角点再解释一次。
+  /// 解析视觉模型的 OCR 回复为文字块：容忍 text/box 的多种键名与坐标写法。
+  ///
+  /// 关键：视觉大模型（GLM-4V / Qwen-VL 等）经常无视「用像素」的指令，回传
+  /// 归一化坐标——要么是 [0,1] 小数，要么是 [0,1000] 整数。所以先从所有框里
+  /// 取坐标最大值判定用的是哪种坐标系，换算回像素，再做越界/角点兜底。
   List<TranslateRegion> _parseApiOcr(String content, int width, int height) {
     final array = _extractJsonArray(content);
     if (array == null) return const [];
-    final regions = <TranslateRegion>[];
+    // 先把有效条目挑出来，顺带记下所有坐标里的最大值（判定坐标系的依据）。
+    final entries = <List<num>>[];
+    final texts = <String>[];
+    var maxCoord = 0.0;
     for (final raw in array) {
       if (raw is! Map) continue;
       final map = raw.cast<String, dynamic>();
@@ -830,29 +835,81 @@ class TranslateService {
           map['box_2d'] ??
           map['rect']);
       if (box is! List || box.length < 4 || text.trim().isEmpty) continue;
-      final x = (box[0] as num).toDouble();
-      final y = (box[1] as num).toDouble();
-      final a = (box[2] as num).toDouble();
-      final b = (box[3] as num).toDouble();
-      var w = a;
-      var h = b;
-      // a,b 当宽高用却把框推出画布一大截 → 更像 [x1,y1,x2,y2] 角点，换算法。
-      if (x + w > width * 1.2 || y + h > height * 1.2 || w <= 0 || h <= 0) {
-        if (a > x && b > y) {
-          w = a - x;
-          h = b - y;
+      final nums = <double>[
+        for (final v in box.take(4))
+          if (v is num) v.toDouble() else double.tryParse(v.toString()) ?? 0.0,
+      ];
+      for (final v in nums) {
+        if (v > maxCoord) maxCoord = v;
+      }
+      entries.add(nums);
+      texts.add(text);
+    }
+    // 坐标系判定：
+    // - 最大坐标 ≤1.5 → [0,1] 归一化小数（乘宽高得像素）。
+    // - 最大坐标 ≤1050 而画布明显更大 → [0,1000] 归一化（除以 1000 再乘宽高）。
+    // - 其余按真实像素，原样用。
+    final double sx;
+    final double sy;
+    if (maxCoord <= 1.5) {
+      sx = width.toDouble();
+      sy = height.toDouble();
+    } else if (maxCoord <= 1050 && (width > 1100 || height > 1100)) {
+      sx = width / 1000.0;
+      sy = height / 1000.0;
+    } else {
+      sx = 1;
+      sy = 1;
+    }
+    // 角点 vs 宽高：视觉模型（Qwen-VL 等）常无视「[x,y,w,h]」而回传
+    // [x1,y1,x2,y2] 角点。单框无法区分（宽高也可能大于起点），整组可以：按
+    // 「宽高」解会把文字框撑得又高又互相重叠，按「角点」解则彼此不重叠。取重叠
+    // 更小的那种解释作为全体框的解法。
+    Rect rectFor(int i, bool asCorners) {
+      final box = entries[i];
+      final x = box[0].toDouble() * sx;
+      final y = box[1].toDouble() * sy;
+      final a = box[2].toDouble() * sx;
+      final b = box[3].toDouble() * sy;
+      final corner = asCorners && a > x && b > y;
+      final w = corner ? a - x : a;
+      final h = corner ? b - y : b;
+      return Rect.fromLTRB(
+        x.clamp(0.0, width.toDouble()),
+        y.clamp(0.0, height.toDouble()),
+        (x + w).clamp(0.0, width.toDouble()),
+        (y + h).clamp(0.0, width.toDouble()),
+      );
+    }
+
+    double overlapTotal(bool asCorners) {
+      var total = 0.0;
+      for (var i = 0; i < entries.length; i++) {
+        final ri = rectFor(i, asCorners);
+        for (var j = i + 1; j < entries.length; j++) {
+          final rj = rectFor(j, asCorners);
+          final l = ri.left > rj.left ? ri.left : rj.left;
+          final t = ri.top > rj.top ? ri.top : rj.top;
+          final r = ri.right < rj.right ? ri.right : rj.right;
+          final b = ri.bottom < rj.bottom ? ri.bottom : rj.bottom;
+          if (r > l && b > t) total += (r - l) * (b - t);
         }
       }
-      final left = x.clamp(0.0, width.toDouble());
-      final top = y.clamp(0.0, height.toDouble());
-      final right = (x + w).clamp(0.0, width.toDouble());
-      final bottom = (y + h).clamp(0.0, height.toDouble());
-      if (right - left <= 1 || bottom - top <= 1) continue;
+      return total;
+    }
+
+    final asCorners =
+        entries.length > 1 && overlapTotal(true) < overlapTotal(false);
+
+    final regions = <TranslateRegion>[];
+    for (var i = 0; i < entries.length; i++) {
+      final rect = rectFor(i, asCorners);
+      if (rect.width <= 1 || rect.height <= 1) continue;
       regions.add(
         TranslateRegion(
-          rect: Rect.fromLTRB(left, top, right, bottom),
-          source: text,
-          translated: text,
+          rect: rect,
+          source: texts[i],
+          translated: texts[i],
           background: const [],
           foreground: const [],
         ),

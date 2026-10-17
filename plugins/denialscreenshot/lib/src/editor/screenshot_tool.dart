@@ -190,6 +190,12 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
   double _canvasDisplayScale = 1.0;
   ui.Image? _decodedImage;
 
+  /// 翻译落回画布时采样原文块背景色用的原始像素缓存（raw RGBA）。
+  /// 跟着 _decodedImage 生命周期走：换图/重解码时置空，下次翻译再取。
+  Uint8List? _rgbaPixels;
+  int _rgbaWidth = 0;
+  int _rgbaHeight = 0;
+
   /// 文本工具拖拽圈定的文本框（约束换行宽度）；null = 点击创建的单行文本。
   Rect? _textBoxRect;
 
@@ -489,6 +495,9 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
     setState(() {
       _decodedImage?.dispose();
       _decodedImage = frame.image;
+      _rgbaPixels = null;
+      _rgbaWidth = 0;
+      _rgbaHeight = 0;
       // 换图回到刚进编辑器的 contain 尺寸。
       _canvasZoom = 1.0;
       _canvasPan = Offset.zero;
@@ -4283,6 +4292,37 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
             ],
           ),
         ),
+        if (_settings.ocrModel == 'api')
+          Padding(
+            padding: const EdgeInsets.only(top: 6),
+            child: Container(
+              padding: const EdgeInsets.all(8),
+              decoration: BoxDecoration(
+                color: Colors.orange.withValues(alpha: 0.12),
+                borderRadius: BorderRadius.circular(8),
+                border: Border.all(color: Colors.orangeAccent),
+              ),
+              child: const Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Icon(
+                    Icons.warning_amber_rounded,
+                    size: 16,
+                    color: Colors.orangeAccent,
+                  ),
+                  SizedBox(width: 6),
+                  Expanded(
+                    child: Text(
+                      '在线视觉模型识字：文字能读出来，但框的位置常常对不准'
+                      '（漏行、粗框、把图标当文字），翻译蒙版可能盖偏或盖不全。'
+                      '需要逐行精确定位，请改用上面的本地 PP-OCR 模型。',
+                      style: TextStyle(fontSize: 11, color: Colors.white),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
         if (_ocrBusyKey.isNotEmpty)
           Padding(
             padding: const EdgeInsets.symmetric(vertical: 6),
@@ -4328,7 +4368,8 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
             'v6（builtin 即 small）自带 51 语种多语言，tiny 更快少日文、medium 最准最慢。'
             '选中标了体积的模型需先下载，完成后下次识字即生效。'
             '「在线（视觉大模型）」复用翻译 API 的 OpenAI 兼容端点做识字，需在设置里填好'
-            ' API 地址、密钥和一个支持图片输入的模型名，精度取决于所选模型。',
+            ' API 地址、密钥和一个支持图片输入的模型名；它能读出文字，但框定位常不准，'
+            '要逐行精确盖字建议用本地 PP-OCR。',
             style: TextStyle(fontSize: 11, color: Colors.white60),
           ),
         ),
@@ -5290,7 +5331,7 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
                 '[translate] region ${event.region!.source} -> '
                 '${event.region!.translated}',
               );
-              _applyTranslateRegion(event.region!);
+              await _applyTranslateRegion(event.region!);
               translatedCount++;
               _setTranslateStatus('已翻译 $translatedCount 块…');
             }
@@ -5360,7 +5401,7 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
     var applied = 0;
     for (var i = 0; i < regions.length; i++) {
       if (results[i].$2) continue;
-      _applyTranslateRegion(
+      await _applyTranslateRegion(
         TranslateRegion(
           rect: regions[i].rect,
           source: regions[i].source,
@@ -5378,7 +5419,7 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
 
   /// 侧车返回的坐标基于裁剪后的显示图像，换算回画布坐标并落两条命令：
   /// 蒙版（盖住原文）+ 文字（原位显示译文），颜色取设置里的固定配色。
-  void _applyTranslateRegion(TranslateRegion region) {
+  Future<void> _applyTranslateRegion(TranslateRegion region) async {
     final box = _canvasKey.currentContext?.findRenderObject() as RenderBox?;
     final decoded = _decodedImage;
     if (box == null || !box.hasSize || decoded == null) {
@@ -5410,14 +5451,30 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
     final maskFillColor = _settings.translateMaskColorValue;
     final maskStyle = maskMode == 'solid' ? MaskStyle.solid : MaskStyle.blur;
 
-    // 文字颜色：auto = 用 sidecar 从图里测得的文字原色（前景色），
-    // 与蒙版色太接近时退到黑/白，保证译文显眼。
+    // 译文压在哪层背景上：solid 蒙版是纯色，blur 蒙版露出的是原图。
+    // API 识图不返回前景/背景色，blur 时直接从原图采样这块的平均色，
+    // 否则深色截图上「黑字黑底」会糊成一片。
+    Color backdrop;
+    if (maskStyle == MaskStyle.solid) {
+      backdrop = maskFillColor;
+    } else if (region.background.isNotEmpty) {
+      backdrop = region.backgroundColor;
+    } else {
+      backdrop =
+          await _sampleRegionColor(decoded, region.rect) ??
+          region.backgroundColor;
+    }
+
+    // 文字颜色：auto 按背景挑对比色——sidecar 给了原文前景色就沿用它，
+    // 压不住背景再退黑/白；API 没有前景色，就拿固定色去和背景比，
+    // 比不过同样退黑/白。fixed 模式则一律用设置里的固定色。
     var textColor = _settings.translateTextColorValue;
-    if (_settings.translateTextColorMode == 'auto' &&
-        region.foreground.isNotEmpty) {
+    if (_settings.translateTextColorMode == 'auto') {
       textColor = _contrastSafeTextColor(
-        region.foregroundColor,
-        maskStyle == MaskStyle.blur ? region.backgroundColor : maskFillColor,
+        region.foreground.isNotEmpty
+            ? region.foregroundColor
+            : _settings.translateTextColorValue,
+        backdrop,
       );
     }
 
@@ -5473,14 +5530,17 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
       _pushCommand(
         DrawCommand(
           type: ScreenshotToolType.text,
-          start: onCanvas.topLeft,
-          end: onCanvas.bottomRight,
+          start: maskRect.center,
+          end: maskRect.bottomRight,
           path: Path(),
           text: region.translated,
-          rect: onCanvas,
+          rect: maskRect,
           color: textColor,
           strokeWidth: fontStroke,
           textMaxWidth: maxTextWidth,
+          // 交回文本框：painter 会在蒙版内水平、垂直居中并按框自适应，
+          // 译文尺寸与蒙版始终一致（不再左上角对齐、超出蒙版）。
+          textBox: maskRect,
         ),
       );
     });
@@ -5492,6 +5552,49 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
     final dl = (text.computeLuminance() - mask.computeLuminance()).abs();
     if (dl >= 0.25) return text;
     return mask.computeLuminance() > 0.55 ? Colors.black : Colors.white;
+  }
+
+  /// 惰性取原图 raw RGBA 像素，缓存给整轮翻译复用（换图时已置空）。
+  Future<void> _ensureRgbaPixels(ui.Image image) async {
+    if (_rgbaPixels != null &&
+        _rgbaWidth == image.width &&
+        _rgbaHeight == image.height) {
+      return;
+    }
+    final data = await image.toByteData(format: ui.ImageByteFormat.rawRgba);
+    if (data == null) return;
+    _rgbaPixels = data.buffer.asUint8List();
+    _rgbaWidth = image.width;
+    _rgbaHeight = image.height;
+  }
+
+  /// 采样图片像素坐标 [rect] 区域的平均色，作为 blur 蒙版下真实背景的近似，
+  /// 用来给没有前景色信息（API 识图）的译文挑对比安全的文字色。
+  Future<Color?> _sampleRegionColor(ui.Image image, Rect rect) async {
+    await _ensureRgbaPixels(image);
+    final px = _rgbaPixels;
+    if (px == null || _rgbaWidth == 0 || _rgbaHeight == 0) return null;
+    final left = rect.left.clamp(0, _rgbaWidth - 1).round();
+    final top = rect.top.clamp(0, _rgbaHeight - 1).round();
+    final right = rect.right.clamp(0, _rgbaWidth - 1).round();
+    final bottom = rect.bottom.clamp(0, _rgbaHeight - 1).round();
+    if (right <= left || bottom <= top) return null;
+    // 大区域按步长抽样，够估亮度又不拖慢翻译落图。
+    final stepX = math.max(1, ((right - left) / 48).ceil());
+    final stepY = math.max(1, ((bottom - top) / 48).ceil());
+    var r = 0, g = 0, b = 0, n = 0;
+    for (var y = top; y <= bottom; y += stepY) {
+      final rowBase = y * _rgbaWidth * 4;
+      for (var x = left; x <= right; x += stepX) {
+        final i = rowBase + x * 4;
+        r += px[i];
+        g += px[i + 1];
+        b += px[i + 2];
+        n++;
+      }
+    }
+    if (n == 0) return null;
+    return Color.fromARGB(255, r ~/ n, g ~/ n, b ~/ n);
   }
 
   /// 首次使用的依赖安装向导：流式进度，完成后可开始翻译。
@@ -5630,7 +5733,7 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
       final result = translated[i].trim();
       if (result.isEmpty || result == source) unchanged++;
       debugPrint('[translate] "$source" -> "$result"');
-      _applyTranslateRegion(
+      await _applyTranslateRegion(
         TranslateRegion(
           rect: regions[i].rect,
           source: regions[i].source,

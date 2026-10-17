@@ -7,6 +7,7 @@ import 'api_config_field.dart';
 import 'clipboard.dart';
 import 'editor/settings.dart';
 import 'editor/translate_service.dart';
+import 'panel_nav.dart';
 
 /// 框选截图工具栏里的「设置」面板。
 ///
@@ -20,12 +21,14 @@ class SelectionSettingsPanel extends StatefulWidget {
     required this.translateService,
     required this.onChanged,
     required this.onClose,
+    this.nav,
   });
 
   final ScreenshotSettings settings;
   final TranslateService translateService;
   final ValueChanged<ScreenshotSettings> onChanged;
   final VoidCallback onClose;
+  final SelectionPanelNav? nav;
 
   @override
   State<SelectionSettingsPanel> createState() => _SelectionSettingsPanelState();
@@ -85,6 +88,11 @@ class _SelectionSettingsPanelState extends State<SelectionSettingsPanel> {
     unawaited(_refreshOcr());
     unawaited(_refreshTools());
     unawaited(_refreshM2m());
+    widget.nav?.canGoBack = () => _apiOpen || _modelsOpen;
+    widget.nav?.goBack = () => setState(() {
+      _apiOpen = false;
+      _modelsOpen = false;
+    });
   }
 
   Future<void> _refreshM2m() async {
@@ -780,6 +788,37 @@ class _SelectionSettingsPanelState extends State<SelectionSettingsPanel> {
           ],
         ),
       ),
+      if (_settings.ocrModel == 'api')
+        Padding(
+          padding: const EdgeInsets.only(top: 6),
+          child: Container(
+            padding: const EdgeInsets.all(8),
+            decoration: BoxDecoration(
+              color: Colors.orange.withValues(alpha: 0.12),
+              borderRadius: BorderRadius.circular(8),
+              border: Border.all(color: Colors.orangeAccent),
+            ),
+            child: const Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Icon(
+                  Icons.warning_amber_rounded,
+                  size: 16,
+                  color: Colors.orangeAccent,
+                ),
+                SizedBox(width: 6),
+                Expanded(
+                  child: Text(
+                    '在线视觉模型识字：文字能读出来，但框的位置常常对不准'
+                    '（漏行、粗框、把图标当文字），翻译蒙版可能盖偏或盖不全。'
+                    '需要逐行精确定位，请改用上面的本地 PP-OCR 模型。',
+                    style: TextStyle(fontSize: 11, color: Colors.white),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
       if (_ocrBusyKey.isNotEmpty)
         Padding(
           padding: const EdgeInsets.symmetric(vertical: 6),
@@ -811,7 +850,7 @@ class _SelectionSettingsPanelState extends State<SelectionSettingsPanel> {
         padding: EdgeInsets.only(top: 6),
         child: Text(
           '默认 v3 自带离线、中英稳；v4/v5/v6 需下载，覆盖更全；'
-          '「在线（视觉大模型）」复用翻译 API 端点识字。',
+          '「在线（视觉大模型）」复用翻译 API 端点识字，但框定位常不准。',
           style: TextStyle(fontSize: 11, color: Colors.white60),
         ),
       ),

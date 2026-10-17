@@ -16,6 +16,7 @@ import 'clipboard.dart';
 import 'editor/settings.dart';
 import 'editor/translate_service.dart';
 import 'editor_bus.dart';
+import 'panel_nav.dart';
 import 'pin_surface.dart';
 import 'scroll_capture.dart';
 import 'scroll_stitch.dart' show eraseRegionInPlace;
@@ -93,9 +94,20 @@ class _CaptureFlowHostState extends ConsumerState<CaptureFlowHost> {
   String _resultStatus = '';
   List<TranslateRegion> _resultRegions = const [];
 
+  /// 结果窗整块列表共用一个选择组（SelectableRegion）：跨行拖选、一次复制
+  /// 多行。SelectableRegion 需要一个常驻 FocusNode 承载选择焦点。
+  final FocusNode _resultSelectFocus = FocusNode();
+
   /// 设置面板（框选流程专用精简面板）。
   bool _settingsOpen = false;
+
+  /// 设置面板内部导航桥：ESC 先在面板里返回上一级（收起展开的 API 配置 /
+  /// 模型列表），都收起了才关面板。见 [SelectionPanelNav]。
+  final SelectionPanelNav _settingsNav = SelectionPanelNav();
   bool _savePanelOpen = false;
+
+  /// 保存面板（文件浏览器）导航桥：ESC 先回到上级目录，到根目录才关面板。
+  final SelectionPanelNav _saveNav = SelectionPanelNav();
   String _saveDirectory = '';
   String _saveFileName = 'Screenshot.png';
 
@@ -139,6 +151,7 @@ class _CaptureFlowHostState extends ConsumerState<CaptureFlowHost> {
     _requests?.cancel();
     _cursorSub?.cancel();
     _cursorPosition.dispose();
+    _resultSelectFocus.dispose();
     _translateService.dispose();
     _disposeKeyFrame();
     super.dispose();
@@ -158,8 +171,16 @@ class _CaptureFlowHostState extends ConsumerState<CaptureFlowHost> {
           if (event is KeyDownEvent &&
               event.logicalKey == LogicalKeyboardKey.escape) {
             if (!_visible || _capturing) return KeyEventResult.handled;
+            if (_settingsOpen && (_settingsNav.canGoBack?.call() ?? false)) {
+              _settingsNav.goBack?.call();
+              return KeyEventResult.handled;
+            }
             if (_settingsOpen) {
               setState(() => _settingsOpen = false);
+              return KeyEventResult.handled;
+            }
+            if (_savePanelOpen && (_saveNav.canGoBack?.call() ?? false)) {
+              _saveNav.goBack?.call();
               return KeyEventResult.handled;
             }
             if (_savePanelOpen) {
@@ -256,6 +277,7 @@ class _CaptureFlowHostState extends ConsumerState<CaptureFlowHost> {
         settings: _settings,
         translateService: _translateService,
         onChanged: _onSettingsChanged,
+        nav: _settingsNav,
         onClose: () => setState(() => _settingsOpen = false),
       ),
     );
@@ -336,6 +358,7 @@ class _CaptureFlowHostState extends ConsumerState<CaptureFlowHost> {
         initialDirectory: _saveDirectory,
         initialFileName: _saveFileName,
         onConfirm: _confirmSave,
+        nav: _saveNav,
         onClose: () => setState(() => _savePanelOpen = false),
       ),
     );
@@ -611,15 +634,18 @@ class _CaptureFlowHostState extends ConsumerState<CaptureFlowHost> {
                     )
                   else
                     Flexible(
-                      child: ListView.separated(
-                        shrinkWrap: true,
-                        itemCount: _resultRegions.length,
-                        separatorBuilder: (_, _) => const SizedBox(height: 8),
-                        itemBuilder: (context, index) => _ResultRow(
-                          mode: _resultMode,
-                          source: _resultRegions[index].source,
-                          translated: _resultRegions[index].translated,
-                          index: index,
+                      child: SelectableRegion(
+                        focusNode: _resultSelectFocus,
+                        selectionControls: MaterialTextSelectionControls(),
+                        child: ListView.separated(
+                          shrinkWrap: true,
+                          itemCount: _resultRegions.length,
+                          separatorBuilder: (_, _) => const SizedBox(height: 8),
+                          itemBuilder: (context, index) => _ResultRow(
+                            mode: _resultMode,
+                            source: _resultRegions[index].source,
+                            translated: _resultRegions[index].translated,
+                          ),
                         ),
                       ),
                     ),
@@ -1603,19 +1629,18 @@ class _CaptureFlowHostState extends ConsumerState<CaptureFlowHost> {
 }
 
 /// 识字/翻译结果列表里的单行：OCR 显示原文；翻译只出一行——真被翻译的
-/// 块用加粗+主题蓝标出，没翻的（译文即原文）按原样显示，不再前后两行对比。
+/// 块用加粗+主题蓝标出，没翻的（译文即原文）按原样显示。行本身用普通
+/// [Text]，跨行选择由外层 [SelectableRegion] 统一接管（不再逐行 SelectableText）。
 class _ResultRow extends StatelessWidget {
   const _ResultRow({
     required this.mode,
     required this.source,
     required this.translated,
-    required this.index,
   });
 
   final String mode;
   final String source;
   final String translated;
-  final int index;
 
   @override
   Widget build(BuildContext context) {
@@ -1627,22 +1652,12 @@ class _ResultRow extends StatelessWidget {
     }
     final translatedHere =
         translated.trim().isNotEmpty && translated.trim() != source.trim();
-    return Text.rich(
-      TextSpan(
-        children: [
-          TextSpan(
-            text: '${index + 1}. ',
-            style: const TextStyle(fontSize: 13, color: Colors.white54),
-          ),
-          TextSpan(
-            text: translatedHere ? translated : source,
-            style: TextStyle(
-              fontSize: 13,
-              color: translatedHere ? const Color(0xFF6FC3FF) : Colors.white,
-              fontWeight: translatedHere ? FontWeight.bold : FontWeight.normal,
-            ),
-          ),
-        ],
+    return Text(
+      translatedHere ? translated : source,
+      style: TextStyle(
+        fontSize: 13,
+        color: translatedHere ? const Color(0xFF6FC3FF) : Colors.white,
+        fontWeight: translatedHere ? FontWeight.bold : FontWeight.normal,
       ),
     );
   }

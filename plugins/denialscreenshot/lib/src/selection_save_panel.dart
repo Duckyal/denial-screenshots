@@ -2,6 +2,8 @@ import 'dart:io';
 
 import 'package:flutter/material.dart';
 
+import 'panel_nav.dart';
+
 /// 框选工具栏里的「保存」面板。
 ///
 /// 参照 [SelectionSettingsPanel] 的浮层样式：宽 380、深色卡片、可滚动内容，
@@ -16,12 +18,14 @@ class SelectionSavePanel extends StatefulWidget {
     required this.initialFileName,
     required this.onConfirm,
     required this.onClose,
+    this.nav,
   });
 
   final String initialDirectory;
   final String initialFileName;
   final ValueChanged<String> onConfirm;
   final VoidCallback onClose;
+  final SelectionPanelNav? nav;
 
   @override
   State<SelectionSavePanel> createState() => _SelectionSavePanelState();
@@ -40,6 +44,9 @@ class _SelectionSavePanelState extends State<SelectionSavePanel> {
   void initState() {
     super.initState();
     _refresh();
+    widget.nav?.canGoBack = () =>
+        Directory(_directory).parent.path != _directory;
+    widget.nav?.goBack = _up;
   }
 
   @override
