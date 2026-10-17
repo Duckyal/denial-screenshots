@@ -221,9 +221,10 @@ class PreviewDrawPainter extends CustomPainter {
       oldDelegate.backgroundImage != backgroundImage;
 }
 
-/// OCR 文字选区高亮：把当前跨块选中的文字区间逐块涂成半透明蓝，贴合每块
-/// 的 OCR 框。矩形由调用方按字符比例算好（world 坐标），这里只负责画。
-/// 整层在 `_canvasKey` 重绘边界之外，保存/置顶不会带上。
+/// OCR 文字选区高亮：把当前跨块选中的文字区间逐块涂成半透明蓝，并沿每块
+/// 选中边界描一圈实线，让选中的文本轮廓清晰可辨。矩形由调用方按字符比例
+/// 算好（world 坐标），这里只负责画。整层在 `_canvasKey` 重绘边界之外，
+/// 保存/置顶不会带上。
 class OcrSelectionPainter extends CustomPainter {
   const OcrSelectionPainter({required this.rects});
 
@@ -232,9 +233,14 @@ class OcrSelectionPainter extends CustomPainter {
   @override
   void paint(Canvas canvas, Size size) {
     if (rects.isEmpty) return;
-    final paint = Paint()..color = const Color(0x6633AADD);
+    final fill = Paint()..color = const Color(0x6633AADD);
+    final border = Paint()
+      ..color = const Color(0xFF1E88C9)
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 1;
     for (final rect in rects) {
-      canvas.drawRect(rect, paint);
+      canvas.drawRect(rect, fill);
+      canvas.drawRect(rect, border);
     }
   }
 

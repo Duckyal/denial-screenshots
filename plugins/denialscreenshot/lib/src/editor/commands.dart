@@ -128,25 +128,9 @@ class DrawCommand {
       ),
       textDirection: TextDirection.ltr,
     )..layout(maxWidth: inner?.width ?? textMaxWidth);
-    if (inner == null) return build(baseFontSize);
-    // 字号随框自适应：装不下就按比例逐级缩小（不放大，框大不多占）。
-    var fontSize = baseFontSize;
-    var painter = build(fontSize);
-    var attempts = 0;
-    while ((painter.width > inner.width || painter.height > inner.height) &&
-        fontSize > 7 &&
-        attempts < 24) {
-      final scale =
-          math.min(
-            inner.width / math.max(painter.width, 1),
-            inner.height / math.max(painter.height, 1),
-          ) *
-          0.92;
-      fontSize = (fontSize * scale).clamp(7.0, baseFontSize);
-      painter = build(fontSize);
-      attempts++;
-    }
-    return painter;
+    // 字号优先：文本框只当换行宽度，字号一律按用户设定值渲染，不再随框
+    // 自适应缩小（装不下就溢出），避免"字号调大到某点反而变小"。
+    return build(baseFontSize);
   }
 
   DrawCommand({

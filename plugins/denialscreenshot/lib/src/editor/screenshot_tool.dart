@@ -248,6 +248,7 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
     if (_showTextDialog) return MouseCursor.defer;
     switch (currentTool) {
       case ScreenshotToolType.text:
+      case ScreenshotToolType.select:
         return SystemMouseCursors.text;
       case ScreenshotToolType.line:
       case ScreenshotToolType.arrow:
@@ -1081,9 +1082,6 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
                                           if (_ocrBlocks.isNotEmpty)
                                             Positioned.fill(
                                               child: IgnorePointer(
-                                                ignoring:
-                                                    currentTool !=
-                                                    ScreenshotToolType.select,
                                                 child:
                                                     _buildTextSelectOverlay(),
                                               ),
@@ -5190,45 +5188,11 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
   /// 只在光标模式吃指针事件（外层 IgnorePointer 控制），块外的空白仍透给
   /// 画布，选中对象/移动不受影响。
   Widget _buildTextSelectOverlay() {
-    return Stack(
-      fit: StackFit.expand,
-      children: [
-        Positioned.fill(
-          child: IgnorePointer(
-            child: CustomPaint(
-              painter: OcrSelectionPainter(rects: _ocrSelectionRects()),
-            ),
-          ),
-        ),
-        for (var i = 0; i < _ocrBlocks.length; i++)
-          // 命中区比识别框略宽：OCR 框常贴着字形边缘，若命中区==框，起选时
-          // 点在首/尾字的边缘像素会落到块外而漏选。向外扩一小圈，落点即便在
-          // 框外，[_ocrOffsetInBlock] 也会夹到 0/len，正好带上两端字符；高亮
-          // 仍按原框绘制，不受影响。左右各 4、上下各 2，横向给足因为漏选主要
-          // 发生在首尾字。
-          Positioned.fromRect(
-            rect: Rect.fromLTRB(
-              _ocrBlocks[i].rect.left - 4,
-              _ocrBlocks[i].rect.top - 2,
-              _ocrBlocks[i].rect.right + 4,
-              _ocrBlocks[i].rect.bottom + 2,
-            ),
-            child: MouseRegion(
-              cursor: SystemMouseCursors.text,
-              child: GestureDetector(
-                behavior: HitTestBehavior.opaque,
-                onTap: _clearOcrSelection,
-                onPanStart: (details) =>
-                    _beginOcrSelection(details.globalPosition),
-                onPanUpdate: (details) =>
-                    _updateOcrSelection(details.globalPosition),
-                onPanEnd: (_) => _finishOcrSelection(),
-                onPanCancel: _finishOcrSelection,
-                child: const SizedBox.expand(),
-              ),
-            ),
-          ),
-      ],
+    // 纯视觉层：跨块选区高亮 + 文本边界，由外层 IgnorePointer 保证不吃指针。
+    // 光标模式的选字/选对象命中全部收敛到画布手势（见 _onPanStart），
+    // 从而让绘图对象优先于文本高亮。
+    return CustomPaint(
+      painter: OcrSelectionPainter(rects: _ocrSelectionRects()),
     );
   }
 
@@ -5255,7 +5219,17 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
     final world = _ocrToWorld(globalPosition);
     if (world == null) return null;
     for (var i = 0; i < _ocrBlocks.length; i++) {
-      if (_ocrBlocks[i].rect.contains(world)) {
+      // 命中区比识别框略宽：OCR 框常贴着字形边缘，落在首/尾字边缘像素时按
+      // 原框判定会漏选。左右各 4、上下各 2，起选/命中都按外扩后的框判，
+      // [_ocrOffsetInBlock] 会把落点夹到 0/len，正好带上两端字符；高亮仍按
+      // 原框绘制，不受影响。
+      final hit = Rect.fromLTRB(
+        _ocrBlocks[i].rect.left - 4,
+        _ocrBlocks[i].rect.top - 2,
+        _ocrBlocks[i].rect.right + 4,
+        _ocrBlocks[i].rect.bottom + 2,
+      );
+      if (hit.contains(world)) {
         return (i, _ocrOffsetInBlock(i, world.dx));
       }
     }
@@ -6594,6 +6568,7 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
         }
       case ScreenshotToolType.select:
         final target = findManipulableCommandIndex(history, position);
+        _clearOcrSelection();
         setState(() => _selectedCommandIndex = target);
       case ScreenshotToolType.brush:
         _commitTapDot(position);
@@ -6669,11 +6644,12 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
           return;
         }
       }
-      // 光标模式：点谁选中谁（内部空白也能抓住），按住拖动即移动；
-      // 点空白取消选中。选中后可用 Delete 删除。
+      // 光标模式命中优先：先抓绘图对象（内部空白也能抓住），按住拖动即移动；
+      // 选中对象时清掉文字高亮，二者互斥。绘图对象优先于文本选区。
       final target = findManipulableCommandIndex(history, position);
-      setState(() => _selectedCommandIndex = target);
       if (target != null) {
+        _clearOcrSelection();
+        setState(() => _selectedCommandIndex = target);
         _editingCommandIndex = target;
         _movingOriginalCommand = history[target];
         _movingStartPosition = position;
@@ -6681,6 +6657,12 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
         _dragStart = null;
         _dragEnd = null;
         _dragPath = null;
+        return;
+      }
+      // 未命中对象：取消选中；若落在文字块上则起跨块选字（对象已让位）。
+      setState(() => _selectedCommandIndex = null);
+      if (_ocrIndexAt(details.globalPosition) != null) {
+        _beginOcrSelection(details.globalPosition);
       }
       return;
     }
@@ -6704,6 +6686,10 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
 
   void _onPanUpdate(DragUpdateDetails details) {
     _cursorPosition = details.localPosition;
+    if (_ocrSelecting) {
+      _updateOcrSelection(details.globalPosition);
+      return;
+    }
     if (_editingCommandIndex != null &&
         _movingOriginalCommand != null &&
         _movingStartPosition != null) {
@@ -6761,6 +6747,7 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
 
   /// 丢弃进行中的手势（不提交）：被移动的对象还原，其余拖动状态清空。
   void _cancelActiveGesture() {
+    if (_ocrSelecting) _finishOcrSelection();
     _pendingEraseSegment = null;
     _eraseTail = null;
     final moving = _editingCommandIndex;
@@ -6781,6 +6768,10 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
   }
 
   void _onPanEnd(DragEndDetails details) {
+    if (_ocrSelecting) {
+      _finishOcrSelection();
+      return;
+    }
     // 增量擦除状态只服务于拖动期间；未烘完的尾段由提交时的位图重建
     // 兜底（命令里的完整路径），这里直接丢弃。
     _pendingEraseSegment = null;
