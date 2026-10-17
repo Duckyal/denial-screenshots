@@ -2309,7 +2309,7 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
       Tooltip(
         message: L.pick(context, '减小字号', 'Decrease font size'),
         child: GestureDetector(
-          onTap: () => _adjustSize(-2),
+          onTap: () => _stepFontSize(-1),
           child: Container(
             width: 28,
             height: 28,
@@ -2358,7 +2358,7 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
       Tooltip(
         message: L.pick(context, '增大字号', 'Increase font size'),
         child: GestureDetector(
-          onTap: () => _adjustSize(2),
+          onTap: () => _stepFontSize(1),
           child: Container(
             width: 28,
             height: 28,
@@ -2720,10 +2720,28 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
 
   /// `[` / `]`: eraser steps by 2 so its big range is quick to traverse.
   void _nudgeSize(int direction) {
+    if (currentTool == ScreenshotToolType.text) {
+      _stepFontSize(direction);
+      return;
+    }
     _adjustSize(
       _activeSize +
           direction * (currentTool == ScreenshotToolType.eraser ? 2 : 1),
     );
+  }
+
+  /// Excel 字号档表：文本模式的 +/- 与 [ ] 按表步进，小字号细步、大字号粗步；
+  /// 当前值不在表上时向外吸附到相邻档（与 Excel 字号框手感一致）。
+  static const _excelFontSizes = <double>[
+    8, 9, 10, 11, 12, 14, 16, 18, 20, 22, 24, 26, 28, 36, 48, 72,
+  ];
+
+  void _stepFontSize(int direction) {
+    final current = _activeSize;
+    final next = direction > 0
+        ? _excelFontSizes.firstWhere((s) => s > current, orElse: () => current)
+        : _excelFontSizes.lastWhere((s) => s < current, orElse: () => current);
+    if (next != current) _adjustSize(next);
   }
 
   void _undo() {
