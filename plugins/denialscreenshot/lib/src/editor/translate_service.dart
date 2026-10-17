@@ -633,6 +633,16 @@ class TranslateService {
         .any((entry) => entry.path.endsWith('metadata.json'));
   }
 
+  /// Argos 引擎能否产出 [target]：目录里存在某个「→target」语言包且已下载。
+  /// 命中即视为该目标语言有本地模型（缺则点翻译前先提醒去安装/下载）。
+  Future<bool> canProduceTargetLanguage(String target) async {
+    for (final (from, to, _) in packCatalog) {
+      if (to != target) continue;
+      if (await isPackInstalled(from, to)) return true;
+    }
+    return false;
+  }
+
   /// 下载并解压语言包（走 HF 镜像）。[onStatus] 汇报进度。
   Future<void> installPack(
     String from,

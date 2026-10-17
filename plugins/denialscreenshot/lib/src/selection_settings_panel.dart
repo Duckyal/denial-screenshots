@@ -3,6 +3,7 @@ import 'dart:io';
 
 import 'package:flutter/material.dart';
 
+import 'api_config_field.dart';
 import 'clipboard.dart';
 import 'editor/settings.dart';
 import 'editor/translate_service.dart';
@@ -51,6 +52,26 @@ class _SelectionSettingsPanelState extends State<SelectionSettingsPanel> {
 
   bool _apiTesting = false;
   String _apiTestResult = '';
+
+  /// API 配置草稿：编辑只动草稿、不写盘；点「测试连接」成功后才写回设置生效。
+  /// null 表示沿用已保存值。与编辑器设置面板同一套行为。
+  String? _draftApiType;
+  String? _draftApiEndpoint;
+  String? _draftApiKey;
+  String? _draftApiModel;
+  String? _draftApiAppId;
+  String get _apiTypeV => _draftApiType ?? _settings.apiType;
+  String get _apiEndpointV => _draftApiEndpoint ?? _settings.apiEndpoint;
+  String get _apiKeyV => _draftApiKey ?? _settings.apiKey;
+  String get _apiModelV => _draftApiModel ?? _settings.apiModel;
+  String get _apiAppIdV => _draftApiAppId ?? _settings.apiAppId;
+  void _resetApiDraft() {
+    _draftApiType = null;
+    _draftApiEndpoint = null;
+    _draftApiKey = null;
+    _draftApiModel = null;
+    _draftApiAppId = null;
+  }
 
   /// M2M-100 多语言单模型的下载状态（本地翻译引擎用）。
   bool _m2mInstalled = false;
@@ -257,13 +278,24 @@ class _SelectionSettingsPanelState extends State<SelectionSettingsPanel> {
       final result = await widget.translateService.translateViaApi(
         texts: const ['Hello, world'],
         target: _target(),
-        apiType: _settings.apiType,
-        endpoint: _settings.apiEndpoint,
-        apiKey: _settings.apiKey,
-        model: _settings.apiModel,
-        apiAppId: _settings.apiAppId,
+        apiType: _apiTypeV,
+        endpoint: _apiEndpointV,
+        apiKey: _apiKeyV,
+        model: _apiModelV,
+        apiAppId: _apiAppIdV,
       );
       if (!mounted) return;
+      // 测通了才把草稿写回设置并生效。
+      _apply(
+        _settings.copyWith(
+          apiType: _apiTypeV,
+          apiEndpoint: _apiEndpointV,
+          apiKey: _apiKeyV,
+          apiModel: _apiModelV,
+          apiAppId: _apiAppIdV,
+        ),
+      );
+      _resetApiDraft();
       setState(() {
         _apiTesting = false;
         _apiTestResult = '可用：Hello, world → ${result.first}';
@@ -556,76 +588,89 @@ class _SelectionSettingsPanelState extends State<SelectionSettingsPanel> {
       Padding(
         padding: const EdgeInsets.only(top: 6),
         child: OutlinedButton(
-          onPressed: () => setState(() => _apiOpen = !_apiOpen),
+          onPressed: () {
+            if (!_apiOpen) _resetApiDraft();
+            setState(() => _apiOpen = !_apiOpen);
+          },
           child: Text(_apiOpen ? '收起配置' : '配置在线翻译 API'),
         ),
       ),
       if (_apiOpen) ...[
-        _group('翻译协议', _settings.apiType, const [
+        _group('翻译协议', _apiTypeV, const [
           ('openai', 'OpenAI 兼容（DeepSeek / OpenAI / Ollama…）'),
           ('baidu', '百度翻译'),
           ('deepl', 'DeepL'),
           ('libre', 'LibreTranslate'),
-        ], (value) => _apply(_settings.copyWith(apiType: value))),
-        if (_settings.apiType == 'openai') ...[
+        ], (value) => setState(() => _draftApiType = value)),
+        if (_apiTypeV == 'openai') ...[
           _apiField(
             'API 地址',
-            _settings.apiEndpoint,
+            _apiEndpointV,
             'https://api.deepseek.com',
-            (value) => _apply(_settings.copyWith(apiEndpoint: value)),
+            (value) => setState(() => _draftApiEndpoint = value),
           ),
           _apiField(
             'API 密钥',
-            _settings.apiKey,
+            _apiKeyV,
             'sk-…',
-            (value) => _apply(_settings.copyWith(apiKey: value)),
+            (value) => setState(() => _draftApiKey = value),
             obscure: true,
           ),
           _apiField(
             '模型名',
-            _settings.apiModel,
+            _apiModelV,
             'deepseek-chat',
-            (value) => _apply(_settings.copyWith(apiModel: value)),
+            (value) => setState(() => _draftApiModel = value),
           ),
-        ] else if (_settings.apiType == 'baidu') ...[
+        ] else if (_apiTypeV == 'baidu') ...[
           _apiField(
             'APP ID',
-            _settings.apiAppId,
+            _apiAppIdV,
             '在 fanyi-api.baidu.com 免费申请',
-            (value) => _apply(_settings.copyWith(apiAppId: value)),
+            (value) => setState(() => _draftApiAppId = value),
           ),
           _apiField(
             '密钥',
-            _settings.apiKey,
+            _apiKeyV,
             '与 APP ID 配对',
-            (value) => _apply(_settings.copyWith(apiKey: value)),
+            (value) => setState(() => _draftApiKey = value),
             obscure: true,
           ),
-        ] else if (_settings.apiType == 'deepl')
+        ] else if (_apiTypeV == 'deepl')
           _apiField(
             '密钥',
-            _settings.apiKey,
+            _apiKeyV,
             '…:fx 结尾为免费版',
-            (value) => _apply(_settings.copyWith(apiKey: value)),
+            (value) => setState(() => _draftApiKey = value),
             obscure: true,
           )
         else ...[
           _apiField(
             'API 地址',
-            _settings.apiEndpoint,
+            _apiEndpointV,
             'https://libretranslate.example.com',
-            (value) => _apply(_settings.copyWith(apiEndpoint: value)),
+            (value) => setState(() => _draftApiEndpoint = value),
           ),
           _apiField(
             'API 密钥',
-            _settings.apiKey,
+            _apiKeyV,
             '可留空',
-            (value) => _apply(_settings.copyWith(apiKey: value)),
+            (value) => setState(() => _draftApiKey = value),
             obscure: true,
           ),
         ],
         Padding(
           padding: const EdgeInsets.only(top: 8),
+          child: Text(
+            '改完点「测试连接」，成功后才会保存并生效。',
+            style: TextStyle(
+              fontSize: 11,
+              color: Colors.white.withValues(alpha: 0.6),
+            ),
+          ),
+        ),
+        Padding(
+          padding: const EdgeInsets.only(top: 4),
           child: OutlinedButton(
             onPressed: _apiTesting ? null : _runApiTest,
             child: Text(_apiTesting ? '测试中…' : '测试连接'),
@@ -813,21 +858,13 @@ class _SelectionSettingsPanelState extends State<SelectionSettingsPanel> {
     ValueChanged<String> onChanged, {
     bool obscure = false,
   }) {
-    return Padding(
-      padding: const EdgeInsets.only(top: 8),
-      child: TextField(
-        controller: TextEditingController(text: value)
-          ..selection = TextSelection.collapsed(offset: value.length),
-        obscureText: obscure,
-        style: const TextStyle(fontSize: 13),
-        decoration: InputDecoration(
-          isDense: true,
-          labelText: label,
-          hintText: hint,
-          border: const OutlineInputBorder(),
-        ),
-        onChanged: onChanged,
-      ),
+    return ApiConfigField(
+      label: label,
+      value: value,
+      hint: hint,
+      obscure: obscure,
+      topPadding: 8,
+      onChanged: onChanged,
     );
   }
 }

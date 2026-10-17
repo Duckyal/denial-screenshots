@@ -12,6 +12,7 @@ import 'package:flutter/scheduler.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart' show ProviderScope;
 
+import '../api_config_field.dart';
 import '../clipboard.dart';
 import '../editor_bus.dart';
 import '../scroll_capture.dart';
@@ -2808,39 +2809,52 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
     for (final (from, to, _) in TranslateService.packCatalog) {
       installed[(from, to)] = await service.isPackInstalled(from, to);
     }
-    if (mounted) setState(() => _modelInstalled = installed);
+    if (mounted) {
+      setState(() {
+        // 正在下载/删除的语言对保留上次已知状态：磁盘快照可能是在它完成前
+        // 抓的，直接整表覆盖会把在途下载的转圈和结果一起冲掉。
+        _modelInstalled = {
+          ...installed,
+          for (final e in _modelInstalled.entries)
+            if (_modelBusy.containsKey(e.key)) e.key: e.value,
+        };
+      });
+    }
   }
 
   Future<void> _toggleModelPack(String from, String to) async {
     final service = _translateService;
-    setState(() {
-      _modelBusyPair = (from, to);
-      _modelBusyMessage = '';
-    });
+    final pair = (from, to);
+    // 同一对不重复触发；不同对可各自并发下载，互不顶替进度。
+    if (_modelBusy.containsKey(pair)) return;
+    setState(() => _modelBusy[pair] = '');
+    final wasInstalled = _modelInstalled[pair] ?? false;
     try {
-      if (_modelInstalled[(from, to)] ?? false) {
+      if (wasInstalled) {
         await service.deletePack(from, to);
       } else {
         await service.installPack(
           from,
           to,
           onStatus: (status) {
-            if (mounted) setState(() => _modelBusyMessage = status);
+            if (mounted && _modelBusy.containsKey(pair)) {
+              setState(() => _modelBusy[pair] = status);
+            }
           },
         );
       }
       if (mounted) {
         setState(() {
-          _modelInstalled = {
-            ..._modelInstalled,
-            (from, to): !(_modelInstalled[(from, to)] ?? false),
-          };
+          _modelInstalled = {..._modelInstalled, pair: !wasInstalled};
+          _modelBusy.remove(pair);
         });
       }
     } on Object catch (error) {
-      if (mounted) setState(() => _modelBusyMessage = '$error');
+      if (mounted) {
+        setState(() => _modelBusy.remove(pair));
+        _showMessage('${wasInstalled ? '删除' : '下载'} $from→$to 失败：$error');
+      }
     }
-    if (mounted) setState(() => _modelBusyPair = const ('', ''));
   }
 
   /// 模型管理浮层：锚在设置面板旁（右侧放不下就翻到左侧），随设置一起收起。
@@ -2968,24 +2982,12 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
                   ],
                 ),
               ),
-              if (_modelBusyPair != const ('', ''))
+              if (_modelBusy.isNotEmpty)
                 Padding(
                   padding: const EdgeInsets.fromLTRB(14, 0, 12, 6),
-                  child: Row(
-                    children: [
-                      const SizedBox(
-                        width: 14,
-                        height: 14,
-                        child: CircularProgressIndicator(strokeWidth: 2),
-                      ),
-                      const SizedBox(width: 10),
-                      Expanded(
-                        child: Text(
-                          _modelBusyMessage,
-                          style: const TextStyle(fontSize: 12),
-                        ),
-                      ),
-                    ],
+                  child: Text(
+                    '正在处理 ${_modelBusy.length} 个语言包…',
+                    style: const TextStyle(fontSize: 12, color: Colors.white70),
                   ),
                 ),
               Flexible(
@@ -3003,7 +3005,16 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
                             label,
                             style: const TextStyle(fontSize: 13),
                           ),
-                          trailing: _modelBusyPair == (from, to)
+                          subtitle: _modelBusy.containsKey((from, to))
+                              ? Text(
+                                  _modelBusy[(from, to)]!,
+                                  style: const TextStyle(
+                                    fontSize: 11,
+                                    color: Colors.white60,
+                                  ),
+                                )
+                              : null,
+                          trailing: _modelBusy.containsKey((from, to))
                               ? const SizedBox(
                                   width: 16,
                                   height: 16,
@@ -3087,23 +3098,38 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
       final result = await _translateService.translateViaApi(
         texts: const ['Hello, world'],
         target: _resolveTranslateTarget(),
-        apiType: _settings.apiType,
-        endpoint: _settings.apiEndpoint,
-        apiKey: _settings.apiKey,
-        model: _settings.apiModel,
-        apiAppId: _settings.apiAppId,
+        apiType: _apiTypeV,
+        endpoint: _apiEndpointV,
+        apiKey: _apiKeyV,
+        model: _apiModelV,
+        apiAppId: _apiAppIdV,
       );
-      setState(() {
-        _apiTesting = false;
-        _apiTestResult =
-            '可用（${sw.elapsedMilliseconds}ms）：'
-            'Hello, world → ${result.first}';
-      });
+      // 测通了才把草稿写回设置：保存生效并（若改了 API/模型）刷新后台 OCR。
+      _applySettings(
+        _settings.copyWith(
+          apiType: _apiTypeV,
+          apiEndpoint: _apiEndpointV,
+          apiKey: _apiKeyV,
+          apiModel: _apiModelV,
+          apiAppId: _apiAppIdV,
+        ),
+      );
+      _resetApiDraft();
+      if (mounted) {
+        setState(() {
+          _apiTesting = false;
+          _apiTestResult =
+              '可用（${sw.elapsedMilliseconds}ms）：'
+              'Hello, world → ${result.first}';
+        });
+      }
     } on Object catch (error) {
-      setState(() {
-        _apiTesting = false;
-        _apiTestResult = _describeApiError(error);
-      });
+      if (mounted) {
+        setState(() {
+          _apiTesting = false;
+          _apiTestResult = _describeApiError(error);
+        });
+      }
     }
   }
 
@@ -3238,42 +3264,31 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
                     mainAxisSize: MainAxisSize.min,
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      _settingsGroup(
-                        '翻译协议',
-                        _settings.apiType,
-                        const [
-                          ('openai', 'OpenAI 兼容（DeepSeek / OpenAI / Ollama…）'),
-                          ('baidu', '百度翻译'),
-                          ('deepl', 'DeepL'),
-                          ('libre', 'LibreTranslate'),
-                        ],
-                        (value) =>
-                            _applySettings(_settings.copyWith(apiType: value)),
-                      ),
-                      if (_settings.apiType == 'openai') ...[
+                      _settingsGroup('翻译协议', _apiTypeV, const [
+                        ('openai', 'OpenAI 兼容（DeepSeek / OpenAI / Ollama…）'),
+                        ('baidu', '百度翻译'),
+                        ('deepl', 'DeepL'),
+                        ('libre', 'LibreTranslate'),
+                      ], (value) => setState(() => _draftApiType = value)),
+                      if (_apiTypeV == 'openai') ...[
                         _settingsApiField(
                           'API 地址',
-                          _settings.apiEndpoint,
+                          _apiEndpointV,
                           'https://api.deepseek.com',
-                          (value) => _applySettings(
-                            _settings.copyWith(apiEndpoint: value),
-                          ),
+                          (value) => setState(() => _draftApiEndpoint = value),
                         ),
                         _settingsApiField(
                           'API 密钥',
-                          _settings.apiKey,
+                          _apiKeyV,
                           'sk-…',
-                          (value) =>
-                              _applySettings(_settings.copyWith(apiKey: value)),
+                          (value) => setState(() => _draftApiKey = value),
                           obscure: true,
                         ),
                         _settingsApiField(
                           '模型名',
-                          _settings.apiModel,
+                          _apiModelV,
                           'deepseek-chat',
-                          (value) => _applySettings(
-                            _settings.copyWith(apiModel: value),
-                          ),
+                          (value) => setState(() => _draftApiModel = value),
                         ),
                         // 模型名写错是最常见的「调了没反应」，按厂商给几个
                         // 可直接点的预设，省得手抄。
@@ -3283,68 +3298,68 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
                             spacing: 6,
                             runSpacing: 4,
                             children: [
-                              for (final preset in _modelPresets(
-                                _settings.apiEndpoint,
-                              ))
+                              for (final preset in _modelPresets(_apiEndpointV))
                                 ActionChip(
                                   visualDensity: VisualDensity.compact,
                                   label: Text(
                                     preset,
                                     style: const TextStyle(fontSize: 12),
                                   ),
-                                  onPressed: () => _applySettings(
-                                    _settings.copyWith(apiModel: preset),
-                                  ),
+                                  onPressed: () =>
+                                      setState(() => _draftApiModel = preset),
                                 ),
                             ],
                           ),
                         ),
-                      ] else if (_settings.apiType == 'baidu') ...[
+                      ] else if (_apiTypeV == 'baidu') ...[
                         _settingsApiField(
                           'APP ID',
-                          _settings.apiAppId,
+                          _apiAppIdV,
                           '在 fanyi-api.baidu.com 免费申请',
-                          (value) => _applySettings(
-                            _settings.copyWith(apiAppId: value),
-                          ),
+                          (value) => setState(() => _draftApiAppId = value),
                         ),
                         _settingsApiField(
                           '密钥',
-                          _settings.apiKey,
+                          _apiKeyV,
                           '与 APP ID 配对',
-                          (value) =>
-                              _applySettings(_settings.copyWith(apiKey: value)),
+                          (value) => setState(() => _draftApiKey = value),
                           obscure: true,
                         ),
-                      ] else if (_settings.apiType == 'deepl')
+                      ] else if (_apiTypeV == 'deepl')
                         _settingsApiField(
                           '密钥',
-                          _settings.apiKey,
+                          _apiKeyV,
                           '…:fx 结尾为免费版',
-                          (value) =>
-                              _applySettings(_settings.copyWith(apiKey: value)),
+                          (value) => setState(() => _draftApiKey = value),
                           obscure: true,
                         )
                       else ...[
                         _settingsApiField(
                           'API 地址',
-                          _settings.apiEndpoint,
+                          _apiEndpointV,
                           'https://libretranslate.example.com',
-                          (value) => _applySettings(
-                            _settings.copyWith(apiEndpoint: value),
-                          ),
+                          (value) => setState(() => _draftApiEndpoint = value),
                         ),
                         _settingsApiField(
                           'API 密钥',
-                          _settings.apiKey,
+                          _apiKeyV,
                           '可留空',
-                          (value) =>
-                              _applySettings(_settings.copyWith(apiKey: value)),
+                          (value) => setState(() => _draftApiKey = value),
                           obscure: true,
                         ),
                       ],
                       Padding(
                         padding: const EdgeInsets.only(top: 8),
+                        child: Text(
+                          '改完点「测试连接」，成功后才会保存并生效。',
+                          style: TextStyle(
+                            fontSize: 11,
+                            color: Colors.white.withValues(alpha: 0.6),
+                          ),
+                        ),
+                      ),
+                      Padding(
+                        padding: const EdgeInsets.only(top: 4),
                         child: OutlinedButton(
                           onPressed: _apiTesting ? null : _runApiTest,
                           child: Text(_apiTesting ? '测试中…' : '测试连接'),
@@ -3412,8 +3427,9 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
   Offset? _modelManagerPanelOffset;
   bool _modelManagerPanelVisible = false;
   Map<(String, String), bool> _modelInstalled = const {};
-  (String, String) _modelBusyPair = const ('', '');
-  String _modelBusyMessage = '';
+
+  /// 每个语言对各自的下载/删除进度文案；键在表里即代表该对正在忙。多个可并发。
+  final Map<(String, String), String> _modelBusy = {};
 
   /// 翻译配色里正在展开主题色网格的行（''=都收起，'mask'/'text'=对应行）。
   String _settingsColorGridOpen = '';
@@ -3472,6 +3488,27 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
   /// API 连通性测试状态（翻译页）。
   bool _apiTesting = false;
   String _apiTestResult = '';
+
+  /// API 配置草稿：编辑只动草稿，不写盘、不触发后台 OCR（否则每敲一个字都会
+  /// 发一次在线识字请求、401 也连刷一串）。点「测试连接」成功后才把草稿写回
+  /// [_settings]（保存并生效、刷新识字）。null 表示沿用已保存值。
+  String? _draftApiType;
+  String? _draftApiEndpoint;
+  String? _draftApiKey;
+  String? _draftApiModel;
+  String? _draftApiAppId;
+  String get _apiTypeV => _draftApiType ?? _settings.apiType;
+  String get _apiEndpointV => _draftApiEndpoint ?? _settings.apiEndpoint;
+  String get _apiKeyV => _draftApiKey ?? _settings.apiKey;
+  String get _apiModelV => _draftApiModel ?? _settings.apiModel;
+  String get _apiAppIdV => _draftApiAppId ?? _settings.apiAppId;
+  void _resetApiDraft() {
+    _draftApiType = null;
+    _draftApiEndpoint = null;
+    _draftApiKey = null;
+    _draftApiModel = null;
+    _draftApiAppId = null;
+  }
 
   /// 识字模型的安装状态缓存（进设置时刷新）与下载进度。
   Map<String, bool> _ocrInstalled = const {};
@@ -3771,10 +3808,10 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
     }
   }
 
-  Future<void> _openSettings() async {
+  Future<void> _openSettings({String tab = 'general'}) async {
     setState(() {
       _settingsOpen = true;
-      _settingsTab = 'general';
+      _settingsTab = tab;
       _paletteVisible = false;
       _fontFamilyVisible = false;
       _filePanelOpen = false;
@@ -3789,8 +3826,18 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
   }
 
   void _applySettings(ScreenshotSettings next) {
+    final previous = _settings;
     setState(() => _settings = next);
     next.save();
+    // 后台 OCR 只在开图时跑一次：换了识字模型（离线↔在线大模型）后若不重跑，
+    // 当前图的文字块叠加层还停在旧模型结果上——切到在线 API 就像「没出文字」。
+    // OCR 来源由 ocrModel + API 端点/密钥/模型名共同决定，任一变了都重跑。
+    if (next.ocrModel != previous.ocrModel ||
+        next.apiEndpoint != previous.apiEndpoint ||
+        next.apiKey != previous.apiKey ||
+        next.apiModel != previous.apiModel) {
+      _startBackgroundOcr();
+    }
   }
 
   Future<void> _refreshOcrInstalled() async {
@@ -4041,7 +4088,10 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
           Padding(
             padding: const EdgeInsets.only(top: 8),
             child: OutlinedButton(
-              onPressed: () => setState(() => _apiConfigOpen = true),
+              onPressed: () {
+                _resetApiDraft();
+                setState(() => _apiConfigOpen = true);
+              },
               child: const Text('配置在线翻译 API'),
             ),
           ),
@@ -4375,21 +4425,12 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
     ValueChanged<String> onChanged, {
     bool obscure = false,
   }) {
-    return Padding(
-      padding: const EdgeInsets.only(top: 4),
-      child: TextField(
-        controller: TextEditingController(text: value)
-          ..selection = TextSelection.collapsed(offset: value.length),
-        obscureText: obscure,
-        style: const TextStyle(fontSize: 13),
-        decoration: InputDecoration(
-          isDense: true,
-          labelText: label,
-          hintText: hint,
-          border: const OutlineInputBorder(),
-        ),
-        onChanged: onChanged,
-      ),
+    return ApiConfigField(
+      label: label,
+      value: value,
+      hint: hint,
+      obscure: obscure,
+      onChanged: onChanged,
     );
   }
 
@@ -4782,10 +4823,17 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
   }
 
   /// 在线视觉大模型识字：把当前图片喂给 OpenAI 兼容端点，直接拿回带坐标的
-  /// 文字块（像素坐标，和离线 sidecar 对齐）。出错静默返回空，不弹安装向导。
+  /// 文字块（像素坐标，和离线 sidecar 对齐）。
+  ///
+  /// 不静默：识字模型是用户显式选的「在线」，配置缺失或没识别到都得说清楚，
+  /// 否则点上去像没反应。空结果最常见的原因是填了不支持图片输入的纯文本模型
+  /// （如 glm-4-flash），这里直接提示换成带视觉的模型。
   Future<List<TranslateRegion>> _runBackgroundApiOcr(int generation) async {
     if (_settings.apiEndpoint.trim().isEmpty ||
         _settings.apiModel.trim().isEmpty) {
+      if (mounted && generation == _ocrGeneration) {
+        _showMessage('在线识字未配置：请在设置里填写 API 地址和支持图片的模型名');
+      }
       return const [];
     }
     final decoded = _decodedImage;
@@ -4809,6 +4857,12 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
       if (!mounted || generation != _ocrGeneration) return const [];
       _ocrRegions = regions.length;
       _updateRecognizeStatus();
+      if (regions.isEmpty) {
+        _showMessage(
+          '在线识字没拿到文字：模型「${_settings.apiModel.trim()}」可能不支持图片'
+          '输入，请改用带视觉的模型（如 glm-4v-flash）',
+        );
+      }
       return regions;
     } on Object catch (error) {
       if (mounted && generation == _ocrGeneration) {
@@ -5079,6 +5133,53 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
     await Clipboard.setData(ClipboardData(text: text));
   }
 
+  /// 当前引擎下目标语言是否已有可离线翻译的本地模型：M2M 看单模型是否下
+  /// 载；Argos 看目录里是否存在已安装的「→target」语言包。
+  Future<bool> _hasLocalTranslateModel(String target) {
+    if (_settings.translateEngine == 'm2m100') {
+      return _translateService.isM2mInstalled();
+    }
+    return _translateService.canProduceTargetLanguage(target);
+  }
+
+  /// 目标语言缺本地模型时的提示窗：组件其实已装，只是缺对应模型，所以不能
+  /// 复用「安装翻译组件」向导（它秒回"就绪"、按钮只关窗、也下不到目标模型）。
+  /// 这里给准确文案，"去下载"直接打开设置·翻译页下载 M2M / 语言包。
+  Future<void> _showMissingTranslateModelReminder() async {
+    await showDialog<void>(
+      context: context,
+      builder: (dialogContext) => editorDialogTheme(
+        child: AlertDialog(
+          backgroundColor: editorDialogBackground,
+          shape: editorDialogShape,
+          title: const Text('还没有本地翻译模型'),
+          content: const SizedBox(
+            width: 360,
+            child: Text(
+              '当前翻译引擎缺少目标语言的本地模型，无法离线翻译。\n'
+              '请到「设置 → 翻译」下载对应语言包，'
+              '或下载 M2M-100 多语言模型（可译中↔日等任意语对）。',
+              style: TextStyle(fontSize: 13),
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(dialogContext).pop(),
+              child: const Text('稍后再说'),
+            ),
+            TextButton(
+              onPressed: () {
+                Navigator.of(dialogContext).pop();
+                _openSettings(tab: 'translate');
+              },
+              child: const Text('去下载'),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
   /// 翻译：快照 → sidecar OCR+翻译 → 每个文字块生成蒙版+译文两条命令。
   /// 依赖未就绪时先弹安装向导（在线装一次，之后离线）。
   Future<void> _translate() async {
@@ -5100,18 +5201,24 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
         await _openSettings();
         return;
       }
+      final target = _resolveTranslateTarget();
       if (!useApi) {
         _setTranslateStatus('检查翻译组件…');
         if (!await _translateService.isReady()) {
           await _showTranslateSetup();
           if (!await _translateService.isReady()) return;
         }
+        // 目标语言还没有本地翻译模型：弹准确提示窗引导去设置·翻译下载（组件
+        // 其实已装，不能复用组件安装向导）。别等 OCR 跑完才在错误里冒出来。
+        if (!await _hasLocalTranslateModel(target)) {
+          await _showMissingTranslateModelReminder();
+          return;
+        }
       }
 
       // 优先复用后台 OCR 的文字块：识别一次，框选和翻译共享，不再
       // 临时生成快照让 OCR 跑第二遍。没有缓存（模型后装、识别为空）
       // 才退回「快照 → sidecar」的原流程。
-      final target = _resolveTranslateTarget();
       final cached = await _readyOcrRegions();
       if (cached != null) {
         await _translateFromRegions(cached, target, useApi);

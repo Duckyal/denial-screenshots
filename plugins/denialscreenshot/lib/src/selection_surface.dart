@@ -220,8 +220,16 @@ class _CaptureFlowHostState extends ConsumerState<CaptureFlowHost> {
           if (_region != null) _buildRegionOverlay(size, _region!),
           if (_resultOpen && _region != null)
             _buildResultWindow(size, _region!),
-          if (_settingsOpen && _region != null)
-            _buildSettingsOverlay(size, _region!),
+          // 常驻挂载、仅用可见性切换：面板的下载状态（M2M/语言包/识字/外部
+          // 工具）都存在它自己的 State 里，若按 _settingsOpen 条件卸载，关面板
+          // 即 dispose、重开转圈就清空。maintainState 让 State 跨开关存活，
+          // 后台下载继续、重开时进度原样还在。
+          if (_region != null)
+            Visibility(
+              visible: _settingsOpen,
+              maintainState: true,
+              child: _buildSettingsOverlay(size, _region!),
+            ),
           if (_savePanelOpen && _region != null)
             _buildSaveOverlay(size, _region!),
         ],
@@ -1264,6 +1272,13 @@ class _CaptureFlowHostState extends ConsumerState<CaptureFlowHost> {
   Future<void> _runText(String mode) async {
     final captured = await _captureNow(restore: false);
     if (captured == null) return;
+    // 在线视觉大模型识字：和编辑器保持一致——选了「在线」就真走 API。
+    // 不能把 ocrModel='api' 丢给本地 sidecar：它只认 v3/builtin/下载目录，
+    // 遇到 'api' 会静默回退内置 PP-OCR，让人误以为在用大模型。
+    if (_settings.ocrModel == 'api') {
+      await _runTextViaApi(mode, captured.bytes);
+      return;
+    }
     if (!await _translateService.isReady()) {
       if (mounted) setState(() => _captureHidden = false);
       PinCardBus.instance.showToast('翻译组件未安装，请先在编辑器设置中安装');
@@ -1311,6 +1326,120 @@ class _CaptureFlowHostState extends ConsumerState<CaptureFlowHost> {
         _resultBusy = false;
         _resultStatus = '$error';
       });
+    }
+  }
+
+  /// 在线识字/翻译：对刚截的图直接调视觉模型 OCR（ocrViaApi），需要翻译时
+  /// 再逐条走翻译 API。缺配置、无结果、接口报错都在结果窗里写清楚，不静默。
+  Future<void> _runTextViaApi(String mode, Uint8List bytes) async {
+    setState(() {
+      _captureHidden = false;
+      _resultMode = mode;
+      _resultRegions = const [];
+      _resultStatus = mode == 'ocr' ? '正在识别文字…' : '正在翻译…';
+      _resultBusy = true;
+      _resultOpen = true;
+      _resultWindowHeight = null;
+    });
+    if (_settings.apiEndpoint.trim().isEmpty ||
+        _settings.apiModel.trim().isEmpty) {
+      setState(() {
+        _resultBusy = false;
+        _resultStatus = '未配置 API 地址或模型名，请在设置中填写';
+      });
+      return;
+    }
+    try {
+      final size = await _pngSizeOf(bytes);
+      if (size == null) {
+        if (mounted) {
+          setState(() {
+            _resultBusy = false;
+            _resultStatus = '截图解析失败，无法在线识字';
+          });
+        }
+        return;
+      }
+      final regions = await _translateService.ocrViaApi(
+        imageBytes: bytes,
+        width: size.$1,
+        height: size.$2,
+        endpoint: _settings.apiEndpoint,
+        apiKey: _settings.apiKey,
+        model: _settings.apiModel,
+        onRetry: (note) {
+          if (mounted) setState(() => _resultStatus = note);
+        },
+      );
+      if (!mounted) return;
+      if (regions.isEmpty) {
+        setState(() {
+          _resultBusy = false;
+          _resultStatus =
+              '未识别到文字：模型「${_settings.apiModel.trim()}」可能不支持图片'
+              '输入，请改用带视觉的模型（如 glm-4v-flash）';
+        });
+        return;
+      }
+      if (mode == 'ocr') {
+        setState(() {
+          _resultRegions = List<TranslateRegion>.of(regions);
+          _resultBusy = false;
+          _resultStatus = '';
+        });
+        return;
+      }
+      setState(() => _resultStatus = '调用翻译 API…');
+      final texts = [for (final region in regions) region.source];
+      final translations = await _translateService.translateViaApi(
+        texts: texts,
+        target: _targetLanguage(),
+        apiType: _settings.apiType,
+        endpoint: _settings.apiEndpoint,
+        apiKey: _settings.apiKey,
+        model: _settings.apiModel,
+        apiAppId: _settings.apiAppId,
+        onRetry: (note) {
+          if (mounted) setState(() => _resultStatus = note);
+        },
+      );
+      if (!mounted) return;
+      setState(() {
+        _resultRegions = [
+          for (var i = 0; i < regions.length; i++)
+            TranslateRegion(
+              rect: regions[i].rect,
+              source: regions[i].source,
+              translated: i < translations.length
+                  ? translations[i]
+                  : regions[i].source,
+              background: regions[i].background,
+              foreground: regions[i].foreground,
+            ),
+        ];
+        _resultBusy = false;
+        _resultStatus = '';
+      });
+    } on Object catch (error) {
+      if (!mounted) return;
+      setState(() {
+        _resultBusy = false;
+        _resultStatus = '$error';
+      });
+    }
+  }
+
+  Future<(int, int)?> _pngSizeOf(Uint8List bytes) async {
+    try {
+      final codec = await ui.instantiateImageCodec(bytes);
+      final frame = await codec.getNextFrame();
+      codec.dispose();
+      final image = frame.image;
+      final size = (image.width, image.height);
+      image.dispose();
+      return size;
+    } on Object {
+      return null;
     }
   }
 
