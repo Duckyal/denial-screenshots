@@ -257,7 +257,7 @@ class _SelectionSettingsPanelState extends State<SelectionSettingsPanel> {
   Future<void> _installTool(String tool) async {
     setState(() {
       _toolBusy = tool;
-      _toolMessage = '正在安装 $tool…';
+      _toolMessage = L.s('正在安装 $tool…', 'Installing $tool…');
     });
     try {
       const managers = <String, List<String>>{
@@ -278,7 +278,12 @@ class _SelectionSettingsPanelState extends State<SelectionSettingsPanel> {
       }
       if (manager == null) {
         if (mounted) {
-          setState(() => _toolMessage = '未找到包管理器，请手动安装 $tool');
+          setState(
+            () => _toolMessage = L.s(
+              '未找到包管理器，请手动安装 $tool',
+              'No package manager found, please install $tool manually',
+            ),
+          );
         }
         return;
       }
@@ -289,13 +294,19 @@ class _SelectionSettingsPanelState extends State<SelectionSettingsPanel> {
           ...args,
         ], environment: childProcessEnvironment());
         if (!mounted) return;
+        final detail = result.stderr.toString().trim();
         setState(() {
           _toolMessage = result.exitCode == 0
-              ? '$tool 安装完成'
-              : '安装失败：${result.stderr.toString().trim()}';
+              ? L.s('$tool 安装完成', '$tool installed')
+              : L.s('安装失败：$detail', 'Install failed: $detail');
         });
       } else {
-        setState(() => _toolMessage = '请手动执行：sudo $manager ${args.join(' ')}');
+        setState(
+          () => _toolMessage = L.s(
+            '请手动执行：sudo $manager ${args.join(' ')}',
+            'Run manually: sudo $manager ${args.join(' ')}',
+          ),
+        );
       }
     } on Object catch (error) {
       if (mounted) setState(() => _toolMessage = '$error');
@@ -1324,7 +1335,7 @@ class _SelectionSettingsPanelState extends State<SelectionSettingsPanel> {
 
 String _apiTypeLabel(BuildContext context, String type) => switch (type) {
   'openai' => L.pick(context, 'OpenAI 兼容', 'OpenAI-compatible'),
-  'baidu' => '百度翻译',
+  'baidu' => L.pick(context, '百度翻译', 'Baidu Translate'),
   'deepl' => 'DeepL',
   'libre' => 'LibreTranslate',
   _ => type,

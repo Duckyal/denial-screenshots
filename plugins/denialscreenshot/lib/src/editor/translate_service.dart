@@ -16,6 +16,61 @@ const int apiTimeoutSeconds = 60;
 /// 建连超时：连不上就快点失败，别让用户对着一个「转圈」等一整分钟。
 const int apiConnectTimeoutSeconds = 10;
 
+/// sidecar 进度 / 错误消息的双语目录。Python 侧只发稳定的 `code`（并把
+/// 中文留在 `message` 作 zh 兜底与旧版兼容），带插值的另发 `params`；这里
+/// 按 code 渲染当前界面语言。占位符用 `{name}`，与事件 `params` 的键对应。
+const Map<String, (String, String)> _sidecarCatalog = {
+  'pack_skip': (
+    '跳过语言包 {dir}: {error}',
+    'Skipping language pack {dir}: {error}',
+  ),
+  'handle_error': ('处理失败：{error}', 'Processing failed: {error}'),
+  'load_m2m': ('加载 M2M 多语言模型…', 'Loading the M2M multilingual model…'),
+  'm2m_missing': (
+    'M2M 多语言模型还没下载，请在设置中下载后再用',
+    'M2M multilingual model isn’t downloaded yet — download it in Settings first',
+  ),
+  'no_pack': (
+    '未找到翻译语言包，请在设置中管理本地模型',
+    'No translation language pack found — manage local models in Settings',
+  ),
+  'load_mt': ('加载翻译模型…', 'Loading the translation model…'),
+  'no_lang_pair': ('没有 {src}→{tgt} 的语言包', 'No language pack for {src}→{tgt}'),
+  'no_lang_pair_detail': (
+    '没有 {src}→{tgt} 的语言包（已装：{available}）',
+    'No language pack for {src}→{tgt} (installed: {available})',
+  ),
+  'load_ocr': ('加载 OCR 模型…', 'Loading the OCR model…'),
+  'ocr_fallback': (
+    '所选 OCR 模型还没下载完，这次先用内置模型',
+    'The selected OCR model isn’t fully downloaded yet — using the built-in model this time',
+  ),
+  'recognizing': ('识别文字…', 'Recognizing text…'),
+};
+
+/// 把一条 sidecar 事件里的进度 / 错误消息渲染成当前界面语言。未知或没有
+/// `code` 时回落到事件自带的 `message`（中文），保持旧行为不变。
+String _sidecarText(Map<String, dynamic> event, {String? fallback}) {
+  final code = event['code'] as String?;
+  final entry = code == null ? null : _sidecarCatalog[code];
+  final message = event['message'] as String?;
+  if (entry == null) return message ?? fallback ?? '';
+  final params = <String, String>{
+    for (final e
+        in (event['params'] as Map<String, dynamic>? ?? const {}).entries)
+      e.key.toString(): e.value.toString(),
+  };
+  String render(String template) {
+    var out = template;
+    params.forEach((key, value) => out = out.replaceAll('{$key}', value));
+    return out;
+  }
+
+  // zh 优先用事件自带的真实 message（已含插值结果），缺失时再按 zh 模板渲染；
+  // en 用模板 + params 拼出。
+  return L.s(message ?? render(entry.$1), render(entry.$2));
+}
+
 /// API 返回非 200：带上服务端给的原因（限流、余额不足、模型不存在…），
 /// UI 直接展示，用户不用去猜。
 class ApiTranslateException implements Exception {
@@ -507,10 +562,12 @@ class TranslateService {
               ),
           ];
         case 'error':
-          errorMessage =
-              event['message'] as String? ?? L.s('翻译失败', 'Translation failed');
+          errorMessage = _sidecarText(
+            event,
+            fallback: L.s('翻译失败', 'Translation failed'),
+          );
         case 'status':
-          onStatus?.call(event['message'] as String? ?? '');
+          onStatus?.call(_sidecarText(event));
       }
     }
     if (errorMessage != null) throw Exception(errorMessage);
@@ -548,7 +605,7 @@ class TranslateService {
           );
         case 'error':
           throw Exception(
-            event['message'] as String? ?? L.s('校验失败', 'Validation failed'),
+            _sidecarText(event, fallback: L.s('校验失败', 'Validation failed')),
           );
       }
     }
@@ -573,7 +630,9 @@ class TranslateService {
         final waiting = _lineWait;
         if (waiting != null) {
           _lineWait = null;
-          waiting.complete('{"event":"error","message":"翻译进程已退出"}');
+          waiting.complete(
+            '{"event":"error","message":"${L.s('翻译进程已退出', 'The translation process exited')}"}',
+          );
         }
       }),
     );
@@ -602,7 +661,9 @@ class TranslateService {
       return Future.value(_lineQueue.removeAt(0));
     }
     if (!_procAlive) {
-      return Future.value('{"event":"error","message":"翻译进程已退出"}');
+      return Future.value(
+        '{"event":"error","message":"${L.s('翻译进程已退出', 'The translation process exited')}"}',
+      );
     }
     final completer = Completer<String>();
     _lineWait = completer;
@@ -738,15 +799,9 @@ class TranslateService {
         }).toList();
         yield TranslateEvent('done', regions: regions);
       } else if (type == 'error') {
-        yield TranslateEvent(
-          'error',
-          message: event['message'] as String? ?? '',
-        );
+        yield TranslateEvent('error', message: _sidecarText(event));
       } else if (type == 'status') {
-        yield TranslateEvent(
-          'status',
-          message: event['message'] as String? ?? '',
-        );
+        yield TranslateEvent('status', message: _sidecarText(event));
       }
     }
   }
@@ -1462,7 +1517,13 @@ class TranslateService {
       final json = jsonDecode(body) as Map<String, dynamic>;
       final errorCode = json['error_code'] as String?;
       if (errorCode != null) {
-        throw Exception('百度翻译错误 $errorCode: ${json['error_msg'] ?? ''}');
+        final detail = json['error_msg'] ?? '';
+        throw Exception(
+          L.s(
+            '百度翻译错误 $errorCode: $detail',
+            'Baidu Translate error $errorCode: $detail',
+          ),
+        );
       }
       final items = (json['trans_result'] as List?)
           ?.cast<Map<String, dynamic>>();

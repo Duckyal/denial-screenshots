@@ -217,6 +217,8 @@ def load_packs():
         except (OSError, RuntimeError, ValueError) as error:
             emit({
                 "event": "status",
+                "code": "pack_skip",
+                "params": {"dir": package_dir, "error": str(error)},
                 "message": f"跳过语言包 {package_dir}: {error}",
             })
             continue
@@ -362,7 +364,12 @@ def main():
         try:
             handle(request)
         except Exception as error:  # noqa: BLE001
-            emit({"event": "error", "message": f"处理失败：{error}"})
+            emit({
+                "event": "error",
+                "code": "handle_error",
+                "params": {"error": str(error)},
+                "message": f"处理失败：{error}",
+            })
 
 
 def handle(request):
@@ -394,11 +401,12 @@ def handle(request):
 
     m2m = None
     if engine == "m2m100" and mode != "ocr":
-        emit({"event": "status", "message": "加载 M2M 多语言模型…"})
+        emit({"event": "status", "code": "load_m2m", "message": "加载 M2M 多语言模型…"})
         m2m = load_m2m()
         if m2m is None:
             emit({
                 "event": "error",
+                "code": "m2m_missing",
                 "message": "M2M 多语言模型还没下载，请在设置中下载后再用",
             })
             return 2
@@ -423,6 +431,7 @@ def handle(request):
         if not packs:
             emit({
                 "event": "error",
+                "code": "no_pack",
                 "message": "未找到翻译语言包，请在设置中管理本地模型",
             })
             return 2
@@ -438,12 +447,14 @@ def handle(request):
                 translations.append({"translated": text, "skip": False})
                 continue
             if source_lang not in pack_cache:
-                emit({"event": "status", "message": "加载翻译模型…"})
+                emit({"event": "status", "code": "load_mt", "message": "加载翻译模型…"})
                 pack_cache[source_lang] = pick_pack(packs, source_lang, target)
             first, second = pack_cache[source_lang]
             if first is None and second is None:
                 emit({
                     "event": "error",
+                    "code": "no_lang_pair",
+                    "params": {"src": source_lang, "tgt": target},
                     "message": f"没有 {source_lang}→{target} 的语言包",
                 })
                 return 2
@@ -459,12 +470,16 @@ def handle(request):
 
     image_path = request["image"]
 
-    emit({"event": "status", "message": "加载 OCR 模型…"})
+    emit({"event": "status", "code": "load_ocr", "message": "加载 OCR 模型…"})
     ocr, ocr_note = load_ocr(request.get("ocr_model", ""))
     if ocr_note:
-        emit({"event": "status", "message": ocr_note})
+        emit({
+            "event": "status",
+            "code": "ocr_fallback",
+            "message": ocr_note,
+        })
 
-    emit({"event": "status", "message": "识别文字…"})
+    emit({"event": "status", "code": "recognizing", "message": "识别文字…"})
     boxes, txts, scores = run_ocr(ocr, image_path)
     if not txts:
         emit({"event": "done", "regions": []})
@@ -476,6 +491,7 @@ def handle(request):
         if not packs:
             emit({
                 "event": "error",
+                "code": "no_pack",
                 "message": "未找到翻译语言包，请在设置中管理本地模型",
             })
             return 2
@@ -506,12 +522,18 @@ def handle(request):
             translated = m2m_translate(translator, sp, text, target)
         elif source_lang is not None and source_lang != target:
             if direct is None and via_en is None:
-                emit({"event": "status", "message": "加载翻译模型…"})
+                emit({"event": "status", "code": "load_mt", "message": "加载翻译模型…"})
                 direct, via_en = pick_pack(packs, source_lang, target)
                 if direct is None and via_en is None:
                     available = ", ".join(f"{k[0]}→{k[1]}" for k in packs)
                     emit({
                         "event": "error",
+                        "code": "no_lang_pair_detail",
+                        "params": {
+                            "src": source_lang,
+                            "tgt": target,
+                            "available": available,
+                        },
                         "message": f"没有 {source_lang}→{target} 的语言包"
                                    f"（已装：{available}）",
                     })
