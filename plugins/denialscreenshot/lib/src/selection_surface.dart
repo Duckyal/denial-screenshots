@@ -9,6 +9,7 @@ import 'package:denial_flutter_sdk/state.dart'
     show denialBridgeProvider, screenshotSelectionProvider;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart' show KeyDownEvent, LogicalKeyboardKey;
+import 'package:flutter_localizations/flutter_localizations.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import 'capture_flow_bus.dart';
@@ -201,6 +202,15 @@ class _CaptureFlowHostState extends ConsumerState<CaptureFlowHost> {
             ? const SizedBox.shrink()
             : MaterialApp(
                 debugShowCheckedModeBanner: false,
+                // 跟随壳层 locale：见 editor_surface 同款说明，避免框选工具栏/
+                // 设置面板的 L.pick 文案落回英文。
+                locale:
+                    Localizations.maybeLocaleOf(context) ??
+                    View.of(context).platformDispatcher.locale,
+                supportedLocales: const [Locale('zh'), Locale('en')],
+                // 非英文 locale 必须挂 Global*Localizations，否则 TextField 内部
+                // MaterialLocalizations.of 空断言崩成灰块 ErrorWidget。
+                localizationsDelegates: GlobalMaterialLocalizations.delegates,
                 theme: ThemeData(
                   colorScheme: ColorScheme.fromSeed(seedColor: Colors.blue),
                   useMaterial3: true,

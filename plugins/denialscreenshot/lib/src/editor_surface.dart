@@ -6,6 +6,7 @@ import 'package:denial_flutter_sdk/input.dart';
 import 'package:denial_flutter_sdk/state.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart' show KeyDownEvent, LogicalKeyboardKey;
+import 'package:flutter_localizations/flutter_localizations.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import 'editor/commands.dart';
@@ -102,6 +103,16 @@ class _EditorSurfaceHostState extends ConsumerState<EditorSurfaceHost> {
         child: _visible && session != null
             ? MaterialApp(
                 debugShowCheckedModeBanner: false,
+                // 跟随壳层 locale：MaterialApp 默认只认 en，会把内层
+                // Localizations.localeOf 落回英文，导致编辑器/设置的双语文案
+                // （L.pick）不跟随系统语言。这里显式沿用外层 scope 的 locale。
+                locale:
+                    Localizations.maybeLocaleOf(context) ??
+                    View.of(context).platformDispatcher.locale,
+                supportedLocales: const [Locale('zh'), Locale('en')],
+                // 非英文 locale 必须挂 Global*Localizations，否则 TextField 内部
+                // MaterialLocalizations.of 空断言崩成灰块 ErrorWidget。
+                localizationsDelegates: GlobalMaterialLocalizations.delegates,
                 theme: ThemeData(
                   colorScheme: ColorScheme.fromSeed(seedColor: Colors.blue),
                   useMaterial3: true,
