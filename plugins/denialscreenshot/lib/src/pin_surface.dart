@@ -83,10 +83,7 @@ final class PinCardBus {
     final content = await readClipboardPinContent();
     if (content == null) {
       showToast(
-        L.s(
-          '剪贴板里没有可钉住的图片或文字',
-          'No image or text in the clipboard to pin',
-        ),
+        L.s('剪贴板里没有可钉住的图片或文字', 'No image or text in the clipboard to pin'),
       );
       return;
     }
@@ -528,7 +525,11 @@ class _ScrollPreviewWindowState extends State<_ScrollPreviewWindow> {
     );
   }
 
-  Widget _buildHeader(BuildContext context, ScrollPreview preview, Size viewport) {
+  Widget _buildHeader(
+    BuildContext context,
+    ScrollPreview preview,
+    Size viewport,
+  ) {
     return GestureDetector(
       behavior: HitTestBehavior.opaque,
       onPanStart: (_) {

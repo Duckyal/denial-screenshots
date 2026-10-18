@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 
 import 'api_config_field.dart';
 import 'clipboard.dart';
+import 'editor/file_picker.dart';
 import 'editor/settings.dart';
 import 'editor/translate_service.dart';
 import 'l10n.dart';
@@ -126,6 +127,17 @@ class _SelectionSettingsPanelState extends State<SelectionSettingsPanel> {
   void _apply(ScreenshotSettings next) {
     setState(() => _settings = next);
     widget.onChanged(next);
+  }
+
+  /// 本地模型目录选择器的起始目录：已选优先，否则落到 OCR 模型根目录
+  /// （含已下载的子目录），再退回主目录。
+  String _ocrInitialDirectory() {
+    final chosen = _settings.ocrLocalPath.trim();
+    if (chosen.isNotEmpty) return chosen;
+    if (Directory(TranslateService.ocrModelsRoot).existsSync()) {
+      return TranslateService.ocrModelsRoot;
+    }
+    return Platform.environment['HOME'] ?? '/';
   }
 
   Future<void> _refreshPacks() async {
@@ -408,17 +420,22 @@ class _SelectionSettingsPanelState extends State<SelectionSettingsPanel> {
       if (_settings.translateBackend == 'api') ..._apiSection(),
       if (_settings.translateBackend == 'local') ..._engineSection(),
       if (_settings.translateBackend == 'local') ..._localModelsSection(),
-      _group(L.pick(context, '翻译为', 'Translate to'), _settings.translateTarget, const [
-        ('system', '跟随系统', 'System'),
-        ('zh', '中文', '中文'),
-        ('en', 'English', 'English'),
-        ('ja', '日本語', '日本語'),
-        ('ko', '한국어', '한국어'),
-        ('fr', 'Français', 'Français'),
-        ('de', 'Deutsch', 'Deutsch'),
-        ('ru', 'Русский', 'Русский'),
-        ('es', 'Español', 'Español'),
-      ], (value) => _apply(_settings.copyWith(translateTarget: value))),
+      _group(
+        L.pick(context, '翻译为', 'Translate to'),
+        _settings.translateTarget,
+        const [
+          ('system', '跟随系统', 'System'),
+          ('zh', '中文', '中文'),
+          ('en', 'English', 'English'),
+          ('ja', '日本語', '日本語'),
+          ('ko', '한국어', '한국어'),
+          ('fr', 'Français', 'Français'),
+          ('de', 'Deutsch', 'Deutsch'),
+          ('ru', 'Русский', 'Русский'),
+          ('es', 'Español', 'Español'),
+        ],
+        (value) => _apply(_settings.copyWith(translateTarget: value)),
+      ),
       if (_settings.translateBackend == 'local') _localTargetHint(),
       ..._scrollCaptureSection(),
     ];
@@ -427,10 +444,15 @@ class _SelectionSettingsPanelState extends State<SelectionSettingsPanel> {
   /// 本地翻译引擎选择：Argos 逐语对（默认）/ M2M-100 单模型任意互译。
   List<Widget> _engineSection() {
     return [
-      _group(L.pick(context, '翻译引擎', 'Translation engine'), _settings.translateEngine, const [
-        ('argos', 'Argos 语言包（默认）', 'Argos dictionaries (default)'),
-        ('m2m100', 'M2M-100 多语言单模型', 'M2M-100 multilingual model'),
-      ], (value) => _apply(_settings.copyWith(translateEngine: value))),
+      _group(
+        L.pick(context, '翻译引擎', 'Translation engine'),
+        _settings.translateEngine,
+        const [
+          ('argos', 'Argos 语言包（默认）', 'Argos dictionaries (default)'),
+          ('m2m100', 'M2M-100 多语言单模型', 'M2M-100 multilingual model'),
+        ],
+        (value) => _apply(_settings.copyWith(translateEngine: value)),
+      ),
       if (_settings.translateEngine == 'm2m100')
         if (_m2mBusy)
           Padding(
@@ -547,10 +569,7 @@ class _SelectionSettingsPanelState extends State<SelectionSettingsPanel> {
         _group(
           L.pick(context, '滚动按键', 'Scroll key'),
           _settings.autoScrollKey,
-          const [
-            ('Down', '逐行 ↓', 'Line ↓'),
-            ('space', '翻页 空格', 'Page space'),
-          ],
+          const [('Down', '逐行 ↓', 'Line ↓'), ('space', '翻页 空格', 'Page space')],
           (value) => _apply(_settings.copyWith(autoScrollKey: value)),
         ),
         Padding(
@@ -647,7 +666,11 @@ class _SelectionSettingsPanelState extends State<SelectionSettingsPanel> {
       Padding(
         padding: const EdgeInsets.only(top: 4),
         child: Text(
-          L.pick(context, '当前接口：${details.join(' · ')}', 'Current: ${details.join(' · ')}'),
+          L.pick(
+            context,
+            '当前接口：${details.join(' · ')}',
+            'Current: ${details.join(' · ')}',
+          ),
           style: const TextStyle(fontSize: 12, color: Colors.white70),
         ),
       ),
@@ -666,17 +689,16 @@ class _SelectionSettingsPanelState extends State<SelectionSettingsPanel> {
         ),
       ),
       if (_apiOpen) ...[
-        _group(
-          L.pick(context, '翻译协议', 'Protocol'),
-          _apiTypeV,
-          const [
-            ('openai', 'OpenAI 兼容（DeepSeek / OpenAI / Ollama…）', 'OpenAI-compatible (DeepSeek / OpenAI / Ollama…)'),
-            ('baidu', '百度翻译', 'Baidu Translate'),
-            ('deepl', 'DeepL', 'DeepL'),
-            ('libre', 'LibreTranslate', 'LibreTranslate'),
-          ],
-          (value) => setState(() => _draftApiType = value),
-        ),
+        _group(L.pick(context, '翻译协议', 'Protocol'), _apiTypeV, const [
+          (
+            'openai',
+            'OpenAI 兼容（DeepSeek / OpenAI / Ollama…）',
+            'OpenAI-compatible (DeepSeek / OpenAI / Ollama…)',
+          ),
+          ('baidu', '百度翻译', 'Baidu Translate'),
+          ('deepl', 'DeepL', 'DeepL'),
+          ('libre', 'LibreTranslate', 'LibreTranslate'),
+        ], (value) => setState(() => _draftApiType = value)),
         if (_apiTypeV == 'openai') ...[
           _apiField(
             L.pick(context, 'API 地址', 'API endpoint'),
@@ -701,7 +723,11 @@ class _SelectionSettingsPanelState extends State<SelectionSettingsPanel> {
           _apiField(
             'APP ID',
             _apiAppIdV,
-            L.pick(context, '在 fanyi-api.baidu.com 免费申请', 'Free at fanyi-api.baidu.com'),
+            L.pick(
+              context,
+              '在 fanyi-api.baidu.com 免费申请',
+              'Free at fanyi-api.baidu.com',
+            ),
             (value) => setState(() => _draftApiAppId = value),
           ),
           _apiField(
@@ -921,6 +947,96 @@ class _SelectionSettingsPanelState extends State<SelectionSettingsPanel> {
                 ),
               ],
             ),
+          ),
+        ),
+      if (_settings.ocrModel == 'api')
+        Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            _apiField(
+              L.pick(context, 'OCR API 地址', 'OCR API endpoint'),
+              _settings.ocrApiEndpoint,
+              L.pick(
+                context,
+                '留空则复用翻译 API 地址',
+                'Leave blank to reuse the translation endpoint',
+              ),
+              (v) => _apply(_settings.copyWith(ocrApiEndpoint: v)),
+            ),
+            _apiField(
+              L.pick(context, 'OCR API 密钥', 'OCR API key'),
+              _settings.ocrApiKey,
+              L.pick(
+                context,
+                '留空则复用翻译 API 密钥',
+                'Leave blank to reuse the translation key',
+              ),
+              (v) => _apply(_settings.copyWith(ocrApiKey: v)),
+              obscure: true,
+            ),
+            _apiField(
+              L.pick(context, 'OCR 模型名', 'OCR model name'),
+              _settings.ocrApiModel,
+              L.pick(
+                context,
+                '留空则复用翻译模型名（需支持图片输入）',
+                'Leave blank to reuse the translation model (must accept images)',
+              ),
+              (v) => _apply(_settings.copyWith(ocrApiModel: v)),
+            ),
+          ],
+        ),
+      if (_settings.ocrModel == 'local')
+        Padding(
+          padding: const EdgeInsets.only(top: 8),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                L.pick(context, '本地模型目录', 'Local model directory'),
+                style: const TextStyle(fontSize: 12),
+              ),
+              const SizedBox(height: 4),
+              Row(
+                children: [
+                  Expanded(
+                    child: Text(
+                      _settings.ocrLocalPath.trim().isEmpty
+                          ? L.pick(
+                              context,
+                              '未选择本地模型目录',
+                              'No local model folder chosen',
+                            )
+                          : _settings.ocrLocalPath.trim(),
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(
+                        fontSize: 11,
+                        color: Colors.white70,
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  Builder(
+                    builder: (BuildContext buttonContext) => OutlinedButton(
+                      onPressed: () => showPathChooserPopup(
+                        anchorContext: buttonContext,
+                        title: L.pick(
+                          context,
+                          '选择本地 OCR 模型目录',
+                          'Choose local OCR model folder',
+                        ),
+                        directoryMode: true,
+                        requiresOcrModels: true,
+                        initialDirectory: _ocrInitialDirectory(),
+                        onSelected: (path) =>
+                            _apply(_settings.copyWith(ocrLocalPath: path)),
+                      ),
+                      child: Text(L.pick(context, '选择目录', 'Choose folder')),
+                    ),
+                  ),
+                ],
+              ),
+            ],
           ),
         ),
       if (_ocrBusyKey.isNotEmpty)

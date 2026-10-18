@@ -159,7 +159,8 @@ final class DenialScreenshotLongCaptureAction implements ShellAction {
   String get provider => 'Screenshot Tool';
 
   @override
-  String label(BuildContext context) => L.pick(context, '长截图', 'Scrolling capture');
+  String label(BuildContext context) =>
+      L.pick(context, '长截图', 'Scrolling capture');
 
   @override
   String description(BuildContext context) => L.pick(

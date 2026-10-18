@@ -88,7 +88,7 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
   double eraserSize = 24;
 
   /// 文字工具独立字号。
-  double textFontSize = 16;
+  double textFontSize = 8;
   String textFontFamily = '';
   final List<DrawCommand> history = [];
   final List<List<DrawCommand>> _undoSnapshots = [];
@@ -1296,7 +1296,11 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
                       isDense: true,
                       border: const OutlineInputBorder(),
                       hintText: _editingTextIndex == null
-                          ? L.pick(context, '输入文字，回车确认', 'Type text, Enter to confirm')
+                          ? L.pick(
+                              context,
+                              '输入文字，回车确认',
+                              'Type text, Enter to confirm',
+                            )
                           : L.pick(
                               context,
                               '修改文字，回车确认（清空即删除）',
@@ -1343,18 +1347,13 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
   }
 
   void _addText(String text) {
-    // 拖拽圈定的是 PPT 式文本框：内容按框宽换行、字号随框自适应、框内
-    // 水平垂直居中；点击创建的是自由单行文字。
+    // 拖拽圈定的是 PPT 式文本框：内容按框宽换行、超出时自动缩字号塞进框、
+    // 框内水平垂直居中；点击创建的是自由单行文字。两者都按工具栏设定字号起排。
     final box = _textBoxRect;
     final maxWidth = box == null
         ? double.infinity
         : math.max(12.0, box.width - 8);
     final origin = box?.topLeft ?? _textDialogPosition;
-    // 拖框创建时默认字号按框自适应（选能塞进框的最大档），点击创建的自由
-    // 文字仍沿用工具栏设定字号。
-    final initialFontSize = box == null
-        ? textFontSize
-        : _fitFontSizeForBox(text, box, maxWidth);
     Rect rect;
     if (box != null) {
       rect = box;
@@ -1364,7 +1363,7 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
           text: text,
           style: TextStyle(
             color: currentColor,
-            fontSize: initialFontSize,
+            fontSize: textFontSize,
             fontFamily: textFontFamily.isEmpty ? null : textFontFamily,
             fontWeight: FontWeight.bold,
           ),
@@ -1387,7 +1386,7 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
       text: text,
       rect: rect,
       color: currentColor,
-      strokeWidth: initialFontSize,
+      strokeWidth: textFontSize,
       textMaxWidth: maxWidth,
       textBox: box,
       fontFamily: textFontFamily,
@@ -1395,39 +1394,6 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
     _textBoxRect = null;
 
     setState(() => _pushCommand(command));
-  }
-
-  /// 为拖框文本框挑一个默认字号：从框高起估，逐级降到换行后仍能塞进框高的
-  /// Excel 档；框很大时最多到 72 档。避免大框恒配 16px 显得过小。
-  double _fitFontSizeForBox(String text, Rect box, double maxWidth) {
-    final usableHeight = math.max(12.0, box.height - 8);
-    TextPainter layout(double size) => TextPainter(
-      text: TextSpan(
-        text: text,
-        style: TextStyle(
-          fontSize: size,
-          fontFamily: textFontFamily.isEmpty ? null : textFontFamily,
-          fontWeight: FontWeight.bold,
-        ),
-      ),
-      textDirection: TextDirection.ltr,
-    )..layout(maxWidth: maxWidth);
-
-    var fontSize = _excelFontSizes.lastWhere(
-      (size) => size <= usableHeight,
-      orElse: () => _excelFontSizes.first,
-    );
-    var painter = layout(fontSize);
-    while (painter.height > usableHeight) {
-      final next = _excelFontSizes.lastWhere(
-        (size) => size < fontSize,
-        orElse: () => _excelFontSizes.first,
-      );
-      if (next == fontSize) break;
-      fontSize = next;
-      painter = layout(fontSize);
-    }
-    return fontSize;
   }
 
   void _pushCommand(DrawCommand command) {
@@ -1540,12 +1506,7 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
       (ScreenshotToolType.line, Icons.straighten, '直线', 'Line'),
       (ScreenshotToolType.arrow, Icons.arrow_forward, '箭头', 'Arrow'),
       (ScreenshotToolType.rect, Icons.crop_square, '矩形', 'Rectangle'),
-      (
-        ScreenshotToolType.circle,
-        Icons.circle_outlined,
-        '椭圆',
-        'Ellipse',
-      ),
+      (ScreenshotToolType.circle, Icons.circle_outlined, '椭圆', 'Ellipse'),
       (ScreenshotToolType.mask, Icons.rectangle, '蒙版', 'Mask'),
     ];
 
@@ -2575,32 +2536,108 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
           const SizedBox(height: 8),
           _buildShortcutRow(context, L.pick(context, '保存', 'Save'), 'Enter'),
           _buildShortcutRow(context, L.pick(context, '复制', 'Copy'), 'Ctrl+C'),
-          _buildShortcutRow(context, L.pick(context, '撤销', 'Undo'), _prettyBinding('undo')),
-          _buildShortcutRow(context, L.pick(context, '重做', 'Redo'), _prettyBinding('redo')),
-          _buildShortcutRow(context, L.pick(context, '取消编辑（不复制）', 'Cancel edit (no copy)'), _prettyBinding('close')),
-          _buildShortcutRow(context, L.pick(context, '工具栏', 'Toolbar'), _prettyBinding('dock')),
-          _buildShortcutRow(context, L.pick(context, '光标', 'Cursor'), _prettyBinding('tool.select')),
-          _buildShortcutRow(context, L.pick(context, '画笔', 'Brush'), _prettyBinding('tool.brush')),
-          _buildShortcutRow(context, L.pick(context, '直线', 'Line'), _prettyBinding('tool.line')),
-          _buildShortcutRow(context, L.pick(context, '箭头', 'Arrow'), _prettyBinding('tool.arrow')),
-          _buildShortcutRow(context, L.pick(context, '矩形', 'Rectangle'), _prettyBinding('tool.rect')),
-          _buildShortcutRow(context, L.pick(context, '圆形', 'Ellipse'), _prettyBinding('tool.circle')),
-          _buildShortcutRow(context, L.pick(context, '文字', 'Text'), _prettyBinding('tool.text')),
-          _buildShortcutRow(context, L.pick(context, '蒙版', 'Mask'), _prettyBinding('tool.mask')),
-          _buildShortcutRow(context, L.pick(context, '橡皮', 'Eraser'), _prettyBinding('tool.eraser')),
-          _buildShortcutRow(context, L.pick(context, '长截图', 'Scroll capture'), _prettyBinding('scrollCapture')),
+          _buildShortcutRow(
+            context,
+            L.pick(context, '撤销', 'Undo'),
+            _prettyBinding('undo'),
+          ),
+          _buildShortcutRow(
+            context,
+            L.pick(context, '重做', 'Redo'),
+            _prettyBinding('redo'),
+          ),
+          _buildShortcutRow(
+            context,
+            L.pick(context, '取消编辑（不复制）', 'Cancel edit (no copy)'),
+            _prettyBinding('close'),
+          ),
+          _buildShortcutRow(
+            context,
+            L.pick(context, '工具栏', 'Toolbar'),
+            _prettyBinding('dock'),
+          ),
+          _buildShortcutRow(
+            context,
+            L.pick(context, '光标', 'Cursor'),
+            _prettyBinding('tool.select'),
+          ),
+          _buildShortcutRow(
+            context,
+            L.pick(context, '画笔', 'Brush'),
+            _prettyBinding('tool.brush'),
+          ),
+          _buildShortcutRow(
+            context,
+            L.pick(context, '直线', 'Line'),
+            _prettyBinding('tool.line'),
+          ),
+          _buildShortcutRow(
+            context,
+            L.pick(context, '箭头', 'Arrow'),
+            _prettyBinding('tool.arrow'),
+          ),
+          _buildShortcutRow(
+            context,
+            L.pick(context, '矩形', 'Rectangle'),
+            _prettyBinding('tool.rect'),
+          ),
+          _buildShortcutRow(
+            context,
+            L.pick(context, '圆形', 'Ellipse'),
+            _prettyBinding('tool.circle'),
+          ),
+          _buildShortcutRow(
+            context,
+            L.pick(context, '文字', 'Text'),
+            _prettyBinding('tool.text'),
+          ),
+          _buildShortcutRow(
+            context,
+            L.pick(context, '蒙版', 'Mask'),
+            _prettyBinding('tool.mask'),
+          ),
+          _buildShortcutRow(
+            context,
+            L.pick(context, '橡皮', 'Eraser'),
+            _prettyBinding('tool.eraser'),
+          ),
+          _buildShortcutRow(
+            context,
+            L.pick(context, '长截图', 'Scroll capture'),
+            _prettyBinding('scrollCapture'),
+          ),
           _buildShortcutRow(context, L.pick(context, '粗细减小', 'Thinner'), '['),
           _buildShortcutRow(context, L.pick(context, '粗细增大', 'Thicker'), ']'),
           const Divider(height: 12, color: Colors.white24),
-          _buildShortcutRow(context, L.pick(context, '缩放画布', 'Zoom canvas'), L.pick(context, 'Alt+滚轮', 'Alt+scroll')),
-          _buildShortcutRow(context, L.pick(context, '平移视角', 'Pan view'), L.pick(context, '方向键 / Shift·Ctrl+滚轮', 'Arrows / Shift·Ctrl+scroll')),
-          _buildShortcutRow(context, L.pick(context, '钉住剪贴板（全局）', 'Pin clipboard (global)'), 'Super+S'),
+          _buildShortcutRow(
+            context,
+            L.pick(context, '缩放画布', 'Zoom canvas'),
+            L.pick(context, 'Alt+滚轮', 'Alt+scroll'),
+          ),
+          _buildShortcutRow(
+            context,
+            L.pick(context, '平移视角', 'Pan view'),
+            L.pick(
+              context,
+              '方向键 / Shift·Ctrl+滚轮',
+              'Arrows / Shift·Ctrl+scroll',
+            ),
+          ),
+          _buildShortcutRow(
+            context,
+            L.pick(context, '钉住剪贴板（全局）', 'Pin clipboard (global)'),
+            'Super+S',
+          ),
         ],
       ),
     );
   }
 
-  Widget _buildShortcutRow(BuildContext context, String label, String shortcut) {
+  Widget _buildShortcutRow(
+    BuildContext context,
+    String label,
+    String shortcut,
+  ) {
     return Padding(
       padding: const EdgeInsets.symmetric(vertical: 2),
       child: Row(
@@ -2769,7 +2806,22 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
   /// Excel 字号档表：文本模式的 +/- 与 [ ] 按表步进，小字号细步、大字号粗步；
   /// 当前值不在表上时向外吸附到相邻档（与 Excel 字号框手感一致）。
   static const _excelFontSizes = <double>[
-    8, 9, 10, 11, 12, 14, 16, 18, 20, 22, 24, 26, 28, 36, 48, 72,
+    8,
+    9,
+    10,
+    11,
+    12,
+    14,
+    16,
+    18,
+    20,
+    22,
+    24,
+    26,
+    28,
+    36,
+    48,
+    72,
   ];
 
   void _stepFontSize(int direction) {
@@ -2953,7 +3005,9 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
     } on Object catch (error) {
       if (mounted) {
         setState(() => _modelBusy.remove(pair));
-        _showMessage('${wasInstalled ? L.s('删除', 'Delete') : L.s('下载', 'Download')} $from→$to${L.s(' 失败：', ' failed: ')}$error');
+        _showMessage(
+          '${wasInstalled ? L.s('删除', 'Delete') : L.s('下载', 'Download')} $from→$to${L.s(' 失败：', ' failed: ')}$error',
+        );
       }
     }
   }
@@ -3176,14 +3230,22 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
         mainAxisSize: MainAxisSize.min,
         children: [
           Text(
-            L.pick(context, '当前接口：${details.join(' · ')}', 'Current API: ${details.join(' · ')}'),
+            L.pick(
+              context,
+              '当前接口：${details.join(' · ')}',
+              'Current API: ${details.join(' · ')}',
+            ),
             style: const TextStyle(fontSize: 12, color: Colors.white70),
           ),
           if (_apiTestResult.isNotEmpty)
             Padding(
               padding: const EdgeInsets.only(top: 2),
               child: Text(
-                L.pick(context, '上次测试：$_apiTestResult', 'Last test: $_apiTestResult'),
+                L.pick(
+                  context,
+                  '上次测试：$_apiTestResult',
+                  'Last test: $_apiTestResult',
+                ),
                 style: const TextStyle(fontSize: 12),
                 maxLines: 2,
                 overflow: TextOverflow.ellipsis,
@@ -3378,15 +3440,17 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
                         L.pick(context, '翻译协议', 'API type'),
                         _apiTypeV,
                         const [
-                        (
-                          'openai',
-                          'OpenAI 兼容（DeepSeek / OpenAI / Ollama…）',
-                          'OpenAI-compatible (DeepSeek / OpenAI / Ollama…)',
-                        ),
-                        ('baidu', '百度翻译', 'Baidu Translate'),
-                        ('deepl', 'DeepL', 'DeepL'),
-                        ('libre', 'LibreTranslate', 'LibreTranslate'),
-                      ], (value) => setState(() => _draftApiType = value)),
+                          (
+                            'openai',
+                            'OpenAI 兼容（DeepSeek / OpenAI / Ollama…）',
+                            'OpenAI-compatible (DeepSeek / OpenAI / Ollama…)',
+                          ),
+                          ('baidu', '百度翻译', 'Baidu Translate'),
+                          ('deepl', 'DeepL', 'DeepL'),
+                          ('libre', 'LibreTranslate', 'LibreTranslate'),
+                        ],
+                        (value) => setState(() => _draftApiType = value),
+                      ),
                       if (_apiTypeV == 'openai') ...[
                         _settingsApiField(
                           L.pick(context, 'API 地址', 'API endpoint'),
@@ -3647,6 +3711,17 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
   Map<String, bool> _ocrInstalled = const {};
   String _ocrBusyKey = '';
   String _ocrBusyMessage = '';
+
+  /// 本地模型目录选择器的起始目录：已选优先，否则落到 OCR 模型根目录
+  /// （含已下载的子目录），再退回主目录。
+  String _ocrInitialDirectory() {
+    final chosen = _settings.ocrLocalPath.trim();
+    if (chosen.isNotEmpty) return chosen;
+    if (Directory(TranslateService.ocrModelsRoot).existsSync()) {
+      return TranslateService.ocrModelsRoot;
+    }
+    return Platform.environment['HOME'] ?? '/';
+  }
 
   bool _m2mInstalled = false;
   bool _m2mBusy = false;
@@ -4017,6 +4092,7 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
     if (event is! KeyDownEvent) return KeyEventResult.ignored;
     final capturing = _settingsCapturingAction.isNotEmpty;
     if (event.logicalKey == LogicalKeyboardKey.escape) {
+      if (closePathChooserPopup()) return KeyEventResult.handled;
       if (capturing) {
         setState(() => _settingsCapturingAction = '');
       } else {
@@ -4098,10 +4174,7 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
                   child: Row(
                     children: [
                       for (final (key, zh, en) in tabs)
-                        _settingsTabButton(
-                          key,
-                          L.pick(context, zh, en),
-                        ),
+                        _settingsTabButton(key, L.pick(context, zh, en)),
                       const Spacer(),
                       Tooltip(
                         message: L.pick(context, '关闭设置', 'Close settings'),
@@ -4166,16 +4239,18 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
       L.pick(context, '工具栏位置', 'Toolbar position'),
       _settings.dockPosition,
       const [
-      (
-        'auto',
-        '自动（空间不足时给工具栏预留位置）',
-        'Auto (reserve space when room is tight)',
-      ),
-      ('left', '左侧', 'Left'),
-      ('right', '右侧', 'Right'),
-      ('top', '顶部', 'Top'),
-      ('bottom', '底部', 'Bottom'),
-    ], (value) => _applySettings(_settings.copyWith(dockPosition: value)));
+        (
+          'auto',
+          '自动（空间不足时给工具栏预留位置）',
+          'Auto (reserve space when room is tight)',
+        ),
+        ('left', '左侧', 'Left'),
+        ('right', '右侧', 'Right'),
+        ('top', '顶部', 'Top'),
+        ('bottom', '底部', 'Bottom'),
+      ],
+      (value) => _applySettings(_settings.copyWith(dockPosition: value)),
+    );
   }
 
   Widget _buildSettingsKeysTab() {
@@ -4202,9 +4277,9 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
             L.pick(
               context,
               '固定键：Enter 保存 · Ctrl+C 仅复制 · Esc 取消编辑（不复制）· '
-              'Alt+S 钉住剪贴板（系统快捷键里改）',
+                  'Alt+S 钉住剪贴板（系统快捷键里改）',
               'Fixed keys: Enter save · Ctrl+C copy only · Esc cancel edit (no copy) · '
-              'Alt+S pin clipboard (change in system shortcuts)',
+                  'Alt+S pin clipboard (change in system shortcuts)',
             ),
             style: const TextStyle(fontSize: 12, color: Colors.white60),
           ),
@@ -4215,9 +4290,9 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
             L.pick(
               context,
               '视角：Alt+滚轮缩放 · 滚轮上下平移 · Shift/Ctrl+滚轮左右平移 · '
-              '方向键平移（Shift 加速）',
+                  '方向键平移（Shift 加速）',
               'View: Alt+scroll zoom · scroll pan vertically · Shift/Ctrl+scroll pan '
-              'horizontally · arrows pan (Shift faster)',
+                  'horizontally · arrows pan (Shift faster)',
             ),
             style: const TextStyle(fontSize: 12, color: Colors.white60),
           ),
@@ -4314,11 +4389,7 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
           L.pick(context, '文字颜色模式', 'Text color mode'),
           _settings.translateTextColorMode,
           const [
-            (
-              'auto',
-              '提取图片里的文字颜色',
-              'Extract text color from image',
-            ),
+            ('auto', '提取图片里的文字颜色', 'Extract text color from image'),
             ('fixed', '固定颜色', 'Solid color'),
           ],
           (value) =>
@@ -4366,7 +4437,11 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
                   visualDensity: VisualDensity.compact,
                   contentPadding: EdgeInsets.zero,
                   title: Text(
-                    L.pick(context, 'Argos 语言包（默认）', 'Argos language packs (default)'),
+                    L.pick(
+                      context,
+                      'Argos 语言包（默认）',
+                      'Argos language packs (default)',
+                    ),
                     style: const TextStyle(fontSize: 13),
                   ),
                   subtitle: Text(
@@ -4384,18 +4459,22 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
                   visualDensity: VisualDensity.compact,
                   contentPadding: EdgeInsets.zero,
                   title: Text(
-                    L.pick(context, 'M2M-100 多语言单模型', 'M2M-100 single multilingual model'),
+                    L.pick(
+                      context,
+                      'M2M-100 多语言单模型',
+                      'M2M-100 single multilingual model',
+                    ),
                     style: const TextStyle(fontSize: 13),
                   ),
                   subtitle: Text(
                     L.pick(
                       context,
                       '源语言未知/混杂也能译（12 受监督语种）· '
-                      '${_m2mInstalled ? '已下载' : '未下载，约 490MB'} · '
-                      '英→中偏弱、CPU 每句更慢',
+                          '${_m2mInstalled ? '已下载' : '未下载，约 490MB'} · '
+                          '英→中偏弱、CPU 每句更慢',
                       'Handles unknown/mixed source (12 supervised langs) · '
-                      '${_m2mInstalled ? 'downloaded' : 'not downloaded, ~490MB'} · '
-                      'weak en→zh, slower per sentence on CPU',
+                          '${_m2mInstalled ? 'downloaded' : 'not downloaded, ~490MB'} · '
+                          'weak en→zh, slower per sentence on CPU',
                     ),
                     style: const TextStyle(fontSize: 11, color: Colors.white60),
                   ),
@@ -4531,6 +4610,102 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
               ),
             ),
           ),
+        if (_settings.ocrModel == 'api')
+          Padding(
+            padding: const EdgeInsets.only(top: 8),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                _settingsApiField(
+                  L.pick(context, 'OCR API 地址', 'OCR API endpoint'),
+                  _settings.ocrApiEndpoint,
+                  L.pick(
+                    context,
+                    '留空则复用翻译 API 地址',
+                    'Leave blank to reuse the translation endpoint',
+                  ),
+                  (v) => _applySettings(_settings.copyWith(ocrApiEndpoint: v)),
+                ),
+                const SizedBox(height: 6),
+                _settingsApiField(
+                  L.pick(context, 'OCR API 密钥', 'OCR API key'),
+                  _settings.ocrApiKey,
+                  L.pick(
+                    context,
+                    '留空则复用翻译 API 密钥',
+                    'Leave blank to reuse the translation key',
+                  ),
+                  (v) => _applySettings(_settings.copyWith(ocrApiKey: v)),
+                  obscure: true,
+                ),
+                const SizedBox(height: 6),
+                _settingsApiField(
+                  L.pick(context, 'OCR 模型名', 'OCR model name'),
+                  _settings.ocrApiModel,
+                  L.pick(
+                    context,
+                    '留空则复用翻译模型名（需支持图片输入）',
+                    'Leave blank to reuse the translation model (must accept images)',
+                  ),
+                  (v) => _applySettings(_settings.copyWith(ocrApiModel: v)),
+                ),
+              ],
+            ),
+          ),
+        if (_settings.ocrModel == 'local')
+          Padding(
+            padding: const EdgeInsets.only(top: 8),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  L.pick(context, '本地模型目录', 'Local model directory'),
+                  style: const TextStyle(fontSize: 12),
+                ),
+                const SizedBox(height: 4),
+                Row(
+                  children: [
+                    Expanded(
+                      child: Text(
+                        _settings.ocrLocalPath.trim().isEmpty
+                            ? L.pick(
+                                context,
+                                '未选择本地模型目录',
+                                'No local model folder chosen',
+                              )
+                            : _settings.ocrLocalPath.trim(),
+                        overflow: TextOverflow.ellipsis,
+                        style: const TextStyle(
+                          fontSize: 11,
+                          color: Colors.white70,
+                        ),
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                    Builder(
+                      builder: (BuildContext buttonContext) => OutlinedButton(
+                        onPressed: () => showPathChooserPopup(
+                          anchorContext: buttonContext,
+                          title: L.pick(
+                            context,
+                            '选择本地 OCR 模型目录',
+                            'Choose local OCR model folder',
+                          ),
+                          directoryMode: true,
+                          requiresOcrModels: true,
+                          initialDirectory: _ocrInitialDirectory(),
+                          onSelected: (path) => _applySettings(
+                            _settings.copyWith(ocrLocalPath: path),
+                          ),
+                        ),
+                        child: Text(L.pick(context, '选择目录', 'Choose folder')),
+                      ),
+                    ),
+                  ],
+                ),
+              ],
+            ),
+          ),
         if (_ocrBusyKey.isNotEmpty)
           Padding(
             padding: const EdgeInsets.symmetric(vertical: 6),
@@ -4574,22 +4749,22 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
             L.pick(
               context,
               '默认 PP-OCRv3 自带离线、中英识别稳。v4/v5 有移动/服务端两档，需下载；'
-              'v5 起覆盖简繁中英等多语种，server 档精度更高但 CPU 明显更慢。'
-              'v6（builtin 即 small）自带 51 语种多语言，tiny 更快少日文、medium 最准最慢。'
-              '选中标了体积的模型需先下载，完成后下次识字即生效。'
-              '「在线（视觉大模型）」复用翻译 API 的 OpenAI 兼容端点做识字，需在设置里填好'
-              ' API 地址、密钥和一个支持图片输入的模型名；它能读出文字，但框定位常不准，'
-              '要逐行精确盖字建议用本地 PP-OCR。',
+                  'v5 起覆盖简繁中英等多语种，server 档精度更高但 CPU 明显更慢。'
+                  'v6（builtin 即 small）自带 51 语种多语言，tiny 更快少日文、medium 最准最慢。'
+                  '选中标了体积的模型需先下载，完成后下次识字即生效。'
+                  '「在线（视觉大模型）」复用翻译 API 的 OpenAI 兼容端点做识字，需在设置里填好'
+                  ' API 地址、密钥和一个支持图片输入的模型名；它能读出文字，但框定位常不准，'
+                  '要逐行精确盖字建议用本地 PP-OCR。',
               'Default PP-OCRv3 is offline with steady zh/en recognition. v4/v5 have '
-              'mobile/server tiers (download needed); v5+ covers simplified/traditional '
-              'Chinese, English and more, server is more accurate but clearly slower on '
-              'CPU. v6 (builtin = small) ships 51 languages; tiny is faster but drops '
-              'Japanese, medium is most accurate and slowest. Models marked with a size '
-              'must be downloaded first and take effect on the next OCR. "Online '
-              '(vision LLM)" reuses the translation API\'s OpenAI-compatible endpoint for '
-              'OCR; fill in the endpoint, key and an image-capable model name in '
-              'settings — it reads text but box positions are often off, so use local '
-              'PP-OCR for precise per-line overlay.',
+                  'mobile/server tiers (download needed); v5+ covers simplified/traditional '
+                  'Chinese, English and more, server is more accurate but clearly slower on '
+                  'CPU. v6 (builtin = small) ships 51 languages; tiny is faster but drops '
+                  'Japanese, medium is most accurate and slowest. Models marked with a size '
+                  'must be downloaded first and take effect on the next OCR. "Online '
+                  '(vision LLM)" reuses the translation API\'s OpenAI-compatible endpoint for '
+                  'OCR; fill in the endpoint, key and an image-capable model name in '
+                  'settings — it reads text but box positions are often off, so use local '
+                  'PP-OCR for precise per-line overlay.',
             ),
             style: const TextStyle(fontSize: 11, color: Colors.white60),
           ),
@@ -5079,6 +5254,11 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
     if (_settings.ocrModel == 'api') {
       return _runBackgroundApiOcr(generation);
     }
+    // 本地自选目录：还没选目录就静默跳过（和离线未就绪时表现一致）。
+    if (_settings.ocrModel == 'local' &&
+        _settings.ocrLocalPath.trim().isEmpty) {
+      return const [];
+    }
     if (!await _translateService.isReady()) return const [];
     _startRecognizeElapsed();
     try {
@@ -5090,7 +5270,7 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
         imagePath: file.path,
         target: _resolveTranslateTarget(),
         mode: 'ocr',
-        ocrModel: _settings.ocrModel,
+        ocrModel: _settings.ocrModelForSidecar,
       )) {
         if (!mounted || generation != _ocrGeneration) return const [];
         if (event.type == 'region') {
@@ -5118,10 +5298,15 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
   /// 否则点上去像没反应。空结果最常见的原因是填了不支持图片输入的纯文本模型
   /// （如 glm-4-flash），这里直接提示换成带视觉的模型。
   Future<List<TranslateRegion>> _runBackgroundApiOcr(int generation) async {
-    if (_settings.apiEndpoint.trim().isEmpty ||
-        _settings.apiModel.trim().isEmpty) {
+    if (_settings.effectiveOcrApiEndpoint.trim().isEmpty ||
+        _settings.effectiveOcrApiModel.trim().isEmpty) {
       if (mounted && generation == _ocrGeneration) {
-        _showMessage(L.s('在线识字未配置：请在设置里填写 API 地址和支持图片的模型名', 'Online OCR not configured: fill in the API endpoint and an image-capable model name in settings'));
+        _showMessage(
+          L.s(
+            '在线识字未配置：请在设置里填写 API 地址和支持图片的模型名',
+            'Online OCR not configured: fill in the API endpoint and an image-capable model name in settings',
+          ),
+        );
       }
       return const [];
     }
@@ -5133,9 +5318,9 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
         imageBytes: _currentImageBytes,
         width: decoded.width,
         height: decoded.height,
-        endpoint: _settings.apiEndpoint,
-        apiKey: _settings.apiKey,
-        model: _settings.apiModel,
+        endpoint: _settings.effectiveOcrApiEndpoint,
+        apiKey: _settings.effectiveOcrApiKey,
+        model: _settings.effectiveOcrApiModel,
         onRetry: (note) {
           if (mounted && generation == _ocrGeneration) {
             _ocrBaseStatus = note;
@@ -5149,10 +5334,10 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
       if (regions.isEmpty) {
         _showMessage(
           L.s(
-            '在线识字没拿到文字：模型「${_settings.apiModel.trim()}」可能不支持图片'
-            '输入，请改用带视觉的模型（如 glm-4v-flash）',
-            'Online OCR got no text: model "${_settings.apiModel.trim()}" may not '
-            'accept image input; use a vision model (e.g. glm-4v-flash)',
+            '在线识字没拿到文字：模型「${_settings.effectiveOcrApiModel.trim()}」可能不支持图片'
+                '输入，请改用带视觉的模型（如 glm-4v-flash）',
+            'Online OCR got no text: model "${_settings.effectiveOcrApiModel.trim()}" may not '
+                'accept image input; use a vision model (e.g. glm-4v-flash)',
           ),
         );
       }
@@ -5427,12 +5612,12 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
             child: Text(
               L.s(
                 '当前翻译引擎缺少目标语言的本地模型，无法离线翻译。\n'
-                '请到「设置 → 翻译」下载对应语言包，'
-                '或下载 M2M-100 多语言模型（可译中↔日等任意语对）。',
+                    '请到「设置 → 翻译」下载对应语言包，'
+                    '或下载 M2M-100 多语言模型（可译中↔日等任意语对）。',
                 'The current engine lacks a local model for the target language, '
-                'so offline translation is unavailable.\n'
-                'Download the matching language pack in Settings → Translate, '
-                'or get the M2M-100 multilingual model (any pair, e.g. zh↔ja).',
+                    'so offline translation is unavailable.\n'
+                    'Download the matching language pack in Settings → Translate, '
+                    'or get the M2M-100 multilingual model (any pair, e.g. zh↔ja).',
               ),
               style: const TextStyle(fontSize: 13),
             ),
@@ -5472,7 +5657,20 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
       if ((useApi || _settings.ocrModel == 'api') &&
           _settings.apiEndpoint.trim().isEmpty) {
         // LLM/API 不默认开启：没配置就引导用户去设置。
-        _showMessage(L.s('请先在设置中配置 API', 'Configure the API in settings first'));
+        _showMessage(
+          L.s('请先在设置中配置 API', 'Configure the API in settings first'),
+        );
+        await _openSettings();
+        return;
+      }
+      if (_settings.ocrModel == 'local' &&
+          _settings.ocrLocalPath.trim().isEmpty) {
+        _showMessage(
+          L.s(
+            '请先在设置中选择本地模型目录',
+            'Choose a local model folder in settings first',
+          ),
+        );
         await _openSettings();
         return;
       }
@@ -5517,7 +5715,12 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
         _setTranslateStatus(L.s('调用在线识字 API…', 'Calling online OCR API…'));
         final size = await _pngSizeOf(png);
         if (size == null) {
-          _showMessage(L.s('快照解析失败，无法在线识字', 'Snapshot decode failed, cannot do online OCR'));
+          _showMessage(
+            L.s(
+              '快照解析失败，无法在线识字',
+              'Snapshot decode failed, cannot do online OCR',
+            ),
+          );
           return;
         }
         final List<TranslateRegion> regions;
@@ -5526,9 +5729,9 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
             imageBytes: png,
             width: size.$1,
             height: size.$2,
-            endpoint: _settings.apiEndpoint,
-            apiKey: _settings.apiKey,
-            model: _settings.apiModel,
+            endpoint: _settings.effectiveOcrApiEndpoint,
+            apiKey: _settings.effectiveOcrApiKey,
+            model: _settings.effectiveOcrApiModel,
             onRetry: _setTranslateStatus,
           );
         } on Object catch (error) {
@@ -5552,7 +5755,7 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
       await for (final event in _translateService.run(
         imagePath: inputFile.path,
         target: target,
-        ocrModel: _settings.ocrModel,
+        ocrModel: _settings.ocrModelForSidecar,
         engine: _settings.translateEngine,
       )) {
         if (!mounted) return;
@@ -5567,15 +5770,23 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
               );
               await _applyTranslateRegion(event.region!);
               translatedCount++;
-              _setTranslateStatus('${L.s('已翻译 ', 'Translated ')}$translatedCount${L.s(' 块…', ' blocks…')}');
+              _setTranslateStatus(
+                '${L.s('已翻译 ', 'Translated ')}$translatedCount${L.s(' 块…', ' blocks…')}',
+              );
             }
           case 'done':
             final count = event.regions.length;
             debugPrint('[translate] done: $count regions');
-            _showMessage(count > 0 ? '${L.s('翻译完成：', 'Translated ')}$count${L.s(' 个文字块', ' text blocks')}' : L.s('未识别到文字', 'No text recognized'));
+            _showMessage(
+              count > 0
+                  ? '${L.s('翻译完成：', 'Translated ')}$count${L.s(' 个文字块', ' text blocks')}'
+                  : L.s('未识别到文字', 'No text recognized'),
+            );
           case 'error':
             debugPrint('[translate] error: ${event.message}');
-            _showMessage('${L.s('翻译失败：', 'Translation failed: ')}${event.message ?? ''}');
+            _showMessage(
+              '${L.s('翻译失败：', 'Translation failed: ')}${event.message ?? ''}',
+            );
         }
       }
     } on Object catch (error) {
@@ -5645,10 +5856,16 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
         ),
       );
       applied++;
-      _setTranslateStatus('${L.s('已翻译 ', 'Translated ')}$applied${L.s(' 块…', ' blocks…')}');
+      _setTranslateStatus(
+        '${L.s('已翻译 ', 'Translated ')}$applied${L.s(' 块…', ' blocks…')}',
+      );
     }
     debugPrint('[translate] reused ocr: $applied/${regions.length} applied');
-    _showMessage(applied > 0 ? '${L.s('翻译完成：', 'Translated ')}$applied${L.s(' 个文字块', ' text blocks')}' : L.s('没有需要翻译的文字', 'Nothing to translate'));
+    _showMessage(
+      applied > 0
+          ? '${L.s('翻译完成：', 'Translated ')}$applied${L.s(' 个文字块', ' text blocks')}'
+          : L.s('没有需要翻译的文字', 'Nothing to translate'),
+    );
   }
 
   /// 侧车返回的坐标基于裁剪后的显示图像，换算回画布坐标并落两条命令：
@@ -5661,7 +5878,12 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
       debugPrint(
         '[translate] apply skipped: hasBox=${box?.hasSize} hasImage=${decoded != null}',
       );
-      _showMessage(L.s('译文无法落回画布：画布尚未就绪，请重试', 'Cannot apply translation: canvas not ready, retry'));
+      _showMessage(
+        L.s(
+          '译文无法落回画布：画布尚未就绪，请重试',
+          'Cannot apply translation: canvas not ready, retry',
+        ),
+      );
       return;
     }
     final imageRect = displayedImageRect(
@@ -5884,9 +6106,9 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
                       Text(
                         L.s(
                           '首次安装需要联网下载 OCR 与翻译模型'
-                          '（约 150MB，走国内镜像），之后完全离线运行。',
+                              '（约 150MB，走国内镜像），之后完全离线运行。',
                           'First install downloads OCR and translation models online '
-                          '(~150MB via a domestic mirror); it runs fully offline after.',
+                              '(~150MB via a domestic mirror); it runs fully offline after.',
                         ),
                         style: const TextStyle(
                           fontSize: 11,
@@ -5926,7 +6148,7 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
       imagePath: inputFile.path,
       target: target,
       mode: 'ocr',
-      ocrModel: _settings.ocrModel,
+      ocrModel: _settings.ocrModelForSidecar,
     )) {
       if (!mounted) return;
       switch (event.type) {
@@ -5937,7 +6159,9 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
         case 'done':
           break;
         case 'error':
-          _showMessage('${L.s('识别失败：', 'Recognition failed: ')}${event.message ?? ''}');
+          _showMessage(
+            '${L.s('识别失败：', 'Recognition failed: ')}${event.message ?? ''}',
+          );
           return;
       }
     }
@@ -5946,7 +6170,9 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
       return;
     }
 
-    _setTranslateStatus("${L.s('调用翻译 API（', 'Calling translate API (')}${regions.length}${L.s(' 块）…', ' blocks)…')}");
+    _setTranslateStatus(
+      "${L.s('调用翻译 API（', 'Calling translate API (')}${regions.length}${L.s(' 块）…', ' blocks)…')}",
+    );
     _startApiElapsed(regions.length);
     final List<String> translated;
     try {
@@ -5989,9 +6215,9 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
       unchanged == regions.length
           ? L.s(
               '翻译完成：${regions.length} 块，但译文与原文一致'
-              '（模型可能没按「1. 」编号返回，换模型或检查返回格式）',
+                  '（模型可能没按「1. 」编号返回，换模型或检查返回格式）',
               'Done: ${regions.length} blocks, but translation equals source '
-              '(the model may not have returned "1. " numbering; switch model or check format)',
+                  '(the model may not have returned "1. " numbering; switch model or check format)',
             )
           : '${L.s('翻译完成：', 'Translated ')}${regions.length}${L.s(' 个文字块', ' text blocks')}',
     );
@@ -6175,7 +6401,9 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
     if (png == null) {
       recordClipboardNote('render returned null');
       if (updateButtonState) _setCopyState(_CopyState.failed);
-      _showMessage(L.s('复制失败：画布还没渲染出来', 'Copy failed: canvas not rendered yet'));
+      _showMessage(
+        L.s('复制失败：画布还没渲染出来', 'Copy failed: canvas not rendered yet'),
+      );
       return;
     }
     if (!await copyPngToClipboard(png)) {
@@ -6186,7 +6414,12 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
     _ffi.copy();
     if (updateButtonState)
       _setCopyState(_CopyState.done, holdUntilClose: closeAfterCopy);
-    _showMessage(closeAfterCopy ? L.s('已复制到剪贴板，正在关闭…', 'Copied to clipboard, closing…') : L.s('PNG 已复制到剪贴板', 'PNG copied to clipboard'), seconds: 2);
+    _showMessage(
+      closeAfterCopy
+          ? L.s('已复制到剪贴板，正在关闭…', 'Copied to clipboard, closing…')
+          : L.s('PNG 已复制到剪贴板', 'PNG copied to clipboard'),
+      seconds: 2,
+    );
     if (closeAfterCopy) {
       // 让”已复制”的绿勾先亮一下再退出，否则点了像没反应。
       _copyResetTimer?.cancel();
@@ -6495,7 +6728,12 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
     final index = findManipulableCommandIndex(history, position);
     if (index == null) return;
     if (history[index].type != ScreenshotToolType.text) {
-      _showMessage(L.s('这个对象不能改文字：拖动可移动，Delete 可删除', 'This object has no editable text: drag to move, Delete to remove'));
+      _showMessage(
+        L.s(
+          '这个对象不能改文字：拖动可移动，Delete 可删除',
+          'This object has no editable text: drag to move, Delete to remove',
+        ),
+      );
       return;
     }
     _beginTextEdit(index);

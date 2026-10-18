@@ -135,7 +135,9 @@ final class ScrollCaptureManager {
     _stopRequested = false;
     _finalizing = false;
     _autoMode = injector != null;
-    _autoSettle = (_autoMode && autoDelay != null) ? autoDelay : _autoSettleDefault;
+    _autoSettle = (_autoMode && autoDelay != null)
+        ? autoDelay
+        : _autoSettleDefault;
     _disposePreview();
     active.value = true;
     autoScrolling.value = _autoMode;
@@ -225,7 +227,10 @@ final class ScrollCaptureManager {
     final frameCount = _captured;
     if (stitcher == null || frameCount < 2) {
       PinCardBus.instance.showToast(
-        L.s('长截图失败：当前界面不能滚动/翻页', "Scroll capture failed: this view can't scroll or page"),
+        L.s(
+          '长截图失败：当前界面不能滚动/翻页',
+          "Scroll capture failed: this view can't scroll or page",
+        ),
       );
       return;
     }
@@ -233,7 +238,10 @@ final class ScrollCaptureManager {
     if (result == null ||
         result.rgba.length != result.width * result.height * 4) {
       PinCardBus.instance.showToast(
-        L.s('长截图失败：帧没有可对齐的重叠', 'Scroll capture failed: no overlapping frames to align'),
+        L.s(
+          '长截图失败：帧没有可对齐的重叠',
+          'Scroll capture failed: no overlapping frames to align',
+        ),
       );
       return;
     }
@@ -241,21 +249,30 @@ final class ScrollCaptureManager {
     // 这种“异常退出”别写文件也别进编辑器，直接告诉用户界面不能滚动。
     if (result.height <= _firstFrameHeight) {
       PinCardBus.instance.showToast(
-        L.s('当前界面不能滚动/翻页，长截图失败', "This view can't scroll or page; scroll capture failed"),
+        L.s(
+          '当前界面不能滚动/翻页，长截图失败',
+          "This view can't scroll or page; scroll capture failed",
+        ),
       );
       return;
     }
     final png = await _encodePng(result.rgba, result.width, result.height);
     if (png == null) {
       PinCardBus.instance.showToast(
-        L.s('长截图失败：帧没有可对齐的重叠', 'Scroll capture failed: no overlapping frames to align'),
+        L.s(
+          '长截图失败：帧没有可对齐的重叠',
+          'Scroll capture failed: no overlapping frames to align',
+        ),
       );
       return;
     }
     final dir = _store.directory;
     if (dir == null) {
       PinCardBus.instance.showToast(
-        L.s('找不到截图目录，长图未保存', 'Screenshot folder not found; long image not saved'),
+        L.s(
+          '找不到截图目录，长图未保存',
+          'Screenshot folder not found; long image not saved',
+        ),
       );
       return;
     }
@@ -264,7 +281,9 @@ final class ScrollCaptureManager {
     try {
       await File(path).writeAsBytes(png, flush: true);
     } on Object {
-      PinCardBus.instance.showToast(L.s('长图保存失败', 'Failed to save the long image'));
+      PinCardBus.instance.showToast(
+        L.s('长图保存失败', 'Failed to save the long image'),
+      );
       return;
     }
     PinCardBus.instance.showToast(

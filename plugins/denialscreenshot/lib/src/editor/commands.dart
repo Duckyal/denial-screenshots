@@ -128,10 +128,22 @@ class DrawCommand {
       ),
       textDirection: TextDirection.ltr,
     )..layout(maxWidth: inner?.width ?? textMaxWidth);
-    // 字号优先：文本框只当换行宽度，字号一律按用户设定值渲染，不再随框
-    // 自适应缩小（装不下就溢出），避免"字号调大到某点反而变小"。
-    return build(baseFontSize);
+    // 自由文字（无文本框）：字号优先，按用户设定值渲染，不缩放。
+    if (inner == null) return build(baseFontSize);
+    // 文本框：换行后仍塞不下（高或宽超出内框）就逐级缩小字号，直到完整放进
+    // 框内；缩到下限仍放不下则停在最小字号、允许溢出。
+    var fontSize = baseFontSize;
+    var painter = build(fontSize);
+    while ((painter.height > inner.height || painter.width > inner.width) &&
+        fontSize > _minBoxFontSize) {
+      fontSize = math.max(_minBoxFontSize, fontSize * 0.9);
+      painter = build(fontSize);
+    }
+    return painter;
   }
+
+  /// 文本框自适应缩小的字号下限（渲染像素），低于此值基本不可读。
+  static const double _minBoxFontSize = 6;
 
   DrawCommand({
     required this.type,

@@ -14,6 +14,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import 'capture_flow_bus.dart';
 import 'clipboard.dart';
+import 'editor/file_picker.dart';
 import 'editor/settings.dart';
 import 'editor/translate_service.dart';
 import 'editor_bus.dart';
@@ -173,6 +174,8 @@ class _CaptureFlowHostState extends ConsumerState<CaptureFlowHost> {
           if (event is KeyDownEvent &&
               event.logicalKey == LogicalKeyboardKey.escape) {
             if (!_visible || _capturing) return KeyEventResult.handled;
+            // 目录悬浮菜单是子菜单层：Esc 先收它，再轮到设置面板、结果窗、退出。
+            if (closePathChooserPopup()) return KeyEventResult.handled;
             if (_settingsOpen && (_settingsNav.canGoBack?.call() ?? false)) {
               _settingsNav.goBack?.call();
               return KeyEventResult.handled;
@@ -440,7 +443,11 @@ class _CaptureFlowHostState extends ConsumerState<CaptureFlowHost> {
           top: toolbar.top,
           onToolbarHitChanged: (hit) => _toolbarHit = hit,
           children: [
-            _toolItem(Icons.text_fields, L.pick(context, '识字', 'OCR'), () => _runText('ocr')),
+            _toolItem(
+              Icons.text_fields,
+              L.pick(context, '识字', 'OCR'),
+              () => _runText('ocr'),
+            ),
             _toolItem(
               Icons.translate,
               L.pick(context, '翻译', 'Translate'),
@@ -453,7 +460,11 @@ class _CaptureFlowHostState extends ConsumerState<CaptureFlowHost> {
             ),
             _toolItem(Icons.edit, L.pick(context, '编辑', 'Edit'), _openEditor),
             _toolItem(Icons.copy, L.pick(context, '复制', 'Copy'), _copyImage),
-            _toolItem(Icons.save_alt, L.pick(context, '保存', 'Save'), _saveImage),
+            _toolItem(
+              Icons.save_alt,
+              L.pick(context, '保存', 'Save'),
+              _saveImage,
+            ),
             _toolItem(Icons.push_pin, L.pick(context, '置顶', 'Pin'), _pinImage),
             _toolItem(
               Icons.settings,
@@ -1179,13 +1190,17 @@ class _CaptureFlowHostState extends ConsumerState<CaptureFlowHost> {
       bytes = null;
     }
     if (bytes == null || bytes.isEmpty) {
-      PinCardBus.instance.showToast(L.s('截取失败，请重试', 'Capture failed, try again'));
+      PinCardBus.instance.showToast(
+        L.s('截取失败，请重试', 'Capture failed, try again'),
+      );
       if (mounted) setState(() => _captureHidden = false);
       return null;
     }
     final file = await _writeCapture(region, bytes);
     if (file == null) {
-      PinCardBus.instance.showToast(L.s('截取失败，请重试', 'Capture failed, try again'));
+      PinCardBus.instance.showToast(
+        L.s('截取失败，请重试', 'Capture failed, try again'),
+      );
       return null;
     }
     return (file: file, bytes: bytes);
@@ -1305,12 +1320,16 @@ class _CaptureFlowHostState extends ConsumerState<CaptureFlowHost> {
       });
     }
     if (bytes == null || bytes.isEmpty) {
-      PinCardBus.instance.showToast(L.s('截取失败，请重试', 'Capture failed, try again'));
+      PinCardBus.instance.showToast(
+        L.s('截取失败，请重试', 'Capture failed, try again'),
+      );
       return null;
     }
     final file = await _writeCapture(region, bytes);
     if (file == null) {
-      PinCardBus.instance.showToast(L.s('截取失败，请重试', 'Capture failed, try again'));
+      PinCardBus.instance.showToast(
+        L.s('截取失败，请重试', 'Capture failed, try again'),
+      );
       return null;
     }
     return (file: file, bytes: bytes);
@@ -1332,12 +1351,22 @@ class _CaptureFlowHostState extends ConsumerState<CaptureFlowHost> {
       await _runTextViaApi(mode, captured.bytes);
       return;
     }
+    if (_settings.ocrModel == 'local' &&
+        _settings.ocrLocalPath.trim().isEmpty) {
+      if (mounted) setState(() => _captureHidden = false);
+      PinCardBus.instance.showToast(
+        L.s('请先在设置里选择本地模型目录', 'Choose a local model folder in settings first'),
+      );
+      return;
+    }
     if (!await _translateService.isReady()) {
       if (mounted) setState(() => _captureHidden = false);
-      PinCardBus.instance.showToast(L.s(
-        '翻译组件未安装，请先在编辑器设置中安装',
-        'Translation component not installed; install it in the editor settings first',
-      ));
+      PinCardBus.instance.showToast(
+        L.s(
+          '翻译组件未安装，请先在编辑器设置中安装',
+          'Translation component not installed; install it in the editor settings first',
+        ),
+      );
       return;
     }
     setState(() {
@@ -1356,7 +1385,7 @@ class _CaptureFlowHostState extends ConsumerState<CaptureFlowHost> {
         imagePath: captured.file.path,
         target: _targetLanguage(),
         mode: mode,
-        ocrModel: _settings.ocrModel,
+        ocrModel: _settings.ocrModelForSidecar,
         engine: _settings.translateEngine,
       )) {
         if (!mounted) return;
@@ -1401,8 +1430,8 @@ class _CaptureFlowHostState extends ConsumerState<CaptureFlowHost> {
       _resultOpen = true;
       _resultWindowHeight = null;
     });
-    if (_settings.apiEndpoint.trim().isEmpty ||
-        _settings.apiModel.trim().isEmpty) {
+    if (_settings.effectiveOcrApiEndpoint.trim().isEmpty ||
+        _settings.effectiveOcrApiModel.trim().isEmpty) {
       setState(() {
         _resultBusy = false;
         _resultStatus = L.s(
@@ -1430,9 +1459,9 @@ class _CaptureFlowHostState extends ConsumerState<CaptureFlowHost> {
         imageBytes: bytes,
         width: size.$1,
         height: size.$2,
-        endpoint: _settings.apiEndpoint,
-        apiKey: _settings.apiKey,
-        model: _settings.apiModel,
+        endpoint: _settings.effectiveOcrApiEndpoint,
+        apiKey: _settings.effectiveOcrApiKey,
+        model: _settings.effectiveOcrApiModel,
         onRetry: (note) {
           if (mounted) setState(() => _resultStatus = note);
         },
@@ -1442,10 +1471,10 @@ class _CaptureFlowHostState extends ConsumerState<CaptureFlowHost> {
         setState(() {
           _resultBusy = false;
           _resultStatus = L.s(
-            '未识别到文字：模型「${_settings.apiModel.trim()}」可能不支持图片'
-            '输入，请改用带视觉的模型（如 glm-4v-flash）',
-            'No text recognized: model "${_settings.apiModel.trim()}" may not '
-            'accept image input; switch to a vision model (e.g. glm-4v-flash)',
+            '未识别到文字：模型「${_settings.effectiveOcrApiModel.trim()}」可能不支持图片'
+                '输入，请改用带视觉的模型（如 glm-4v-flash）',
+            'No text recognized: model "${_settings.effectiveOcrApiModel.trim()}" may not '
+                'accept image input; switch to a vision model (e.g. glm-4v-flash)',
           );
         });
         return;
@@ -1530,7 +1559,10 @@ class _CaptureFlowHostState extends ConsumerState<CaptureFlowHost> {
     PinCardBus.instance.showToast(
       ok
           ? L.s('已复制文字', 'Text copied')
-          : L.s('复制失败（缺 wl-copy / xclip）', 'Copy failed (missing wl-copy / xclip)'),
+          : L.s(
+              '复制失败（缺 wl-copy / xclip）',
+              'Copy failed (missing wl-copy / xclip)',
+            ),
     );
   }
 
@@ -1550,11 +1582,15 @@ class _CaptureFlowHostState extends ConsumerState<CaptureFlowHost> {
     final ok = await copyPngToClipboard(captured.bytes);
     if (!mounted) return;
     if (ok) {
-      PinCardBus.instance.showToast(L.s('已复制图片到剪贴板', 'Image copied to clipboard'));
+      PinCardBus.instance.showToast(
+        L.s('已复制图片到剪贴板', 'Image copied to clipboard'),
+      );
       _close();
     } else {
       setState(() => _captureHidden = false);
-      PinCardBus.instance.showToast(L.s('复制失败（缺 wl-copy / xclip）', 'Copy failed (missing wl-copy / xclip)'));
+      PinCardBus.instance.showToast(
+        L.s('复制失败（缺 wl-copy / xclip）', 'Copy failed (missing wl-copy / xclip)'),
+      );
     }
   }
 
