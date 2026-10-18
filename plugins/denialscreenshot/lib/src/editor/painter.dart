@@ -75,6 +75,19 @@ class ToolCursorPainter extends CustomPainter {
       return;
     }
 
+    // 荧光笔：光标圈填充用实际落笔色（半透明），与画出的高亮一致；再套
+    // 白环 + 黑边，任意底色都辨得出位置。
+    if (tool == ScreenshotToolType.highlighter) {
+      canvas.drawCircle(
+        position,
+        radius,
+        Paint()..color = color.withValues(alpha: 0.4),
+      );
+      ring(radius, 3.2, Colors.black.withValues(alpha: 0.9));
+      ring(radius, 1.6, Colors.white);
+      return;
+    }
+
     // 画笔：环体显示笔色，外面套白环 + 黑边，任意底色都辨得出位置。
     canvas.drawCircle(position, radius, Paint()..color = color);
     ring(radius, 3.2, Colors.black.withValues(alpha: 0.9));

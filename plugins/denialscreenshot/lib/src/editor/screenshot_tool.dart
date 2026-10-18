@@ -155,6 +155,10 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
   bool _nativePinned = false;
   Offset? _cursorPosition;
 
+  /// 悬停处的屏幕全局坐标：`_cursorPosition` 是画布局部（世界）坐标，用于
+  /// 图形对象/手柄命中；图片文字命中走 `_ocrIndexAt`，它要的是全局坐标。
+  Offset? _cursorGlobal;
+
   /// 指针移动只 bump 这两个通知：预览层与光标环各自重绘，不必重建整棵
   /// 编辑器树（工具栏、色板、快捷键面板都在那棵树上）。
   final ValueNotifier<int> _canvasTick = ValueNotifier<int>(0);
@@ -252,8 +256,9 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
     if (_showTextDialog) return MouseCursor.defer;
     switch (currentTool) {
       case ScreenshotToolType.text:
-      case ScreenshotToolType.select:
         return SystemMouseCursors.text;
+      case ScreenshotToolType.select:
+        return _selectModeCursor;
       case ScreenshotToolType.line:
       case ScreenshotToolType.arrow:
       case ScreenshotToolType.rect:
@@ -262,6 +267,54 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
         return SystemMouseCursors.precise;
       default:
         return MouseCursor.defer;
+    }
+  }
+
+  /// 光标模式的系统光标：只有鼠标下层是图片文字才用 I 型输入光标；选中
+  /// 对象的缩放手柄用对应方向光标；抓到截图对象或空处都用普通箭头光标。
+  /// 命中优先级与点选逻辑一致：手柄 > 图形对象 > 图片文字 > 空。
+  MouseCursor get _selectModeCursor {
+    final local = _cursorPosition;
+    if (local == null) return SystemMouseCursors.basic;
+    final selected = _selectedCommandIndex;
+    if (selected != null && selected < history.length) {
+      final handle = hitTestCommandHandle(
+        history[selected],
+        local,
+        _resizeHandleWorldSize,
+      );
+      if (handle != null) return _resizeCursorFor(handle);
+    }
+    // 图形对象在文字之上时按对象走（拖动它），不显示输入光标。
+    if (findManipulableCommandIndex(history, local) != null) {
+      return SystemMouseCursors.basic;
+    }
+    final global = _cursorGlobal;
+    if (global != null && _ocrIndexAt(global) != null) {
+      return SystemMouseCursors.text;
+    }
+    return SystemMouseCursors.basic;
+  }
+
+  /// 缩放手柄对应的方向光标：对角→斜向、上下边→竖向、左右边→横向、
+  /// 直线/箭头端点→移动。
+  MouseCursor _resizeCursorFor(ResizeHandle handle) {
+    switch (handle) {
+      case ResizeHandle.topLeft:
+      case ResizeHandle.bottomRight:
+        return SystemMouseCursors.resizeUpLeftDownRight;
+      case ResizeHandle.topRight:
+      case ResizeHandle.bottomLeft:
+        return SystemMouseCursors.resizeUpRightDownLeft;
+      case ResizeHandle.top:
+      case ResizeHandle.bottom:
+        return SystemMouseCursors.resizeUpDown;
+      case ResizeHandle.left:
+      case ResizeHandle.right:
+        return SystemMouseCursors.resizeLeftRight;
+      case ResizeHandle.lineStart:
+      case ResizeHandle.lineEnd:
+        return SystemMouseCursors.move;
     }
   }
 
@@ -1003,17 +1056,15 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
                                                   ),
                                                 ),
                                                 Positioned.fill(
-                                                  child: MouseRegion(
-                                                    onHover: (event) {
-                                                      _cursorPosition =
-                                                          event.localPosition;
-                                                      _canvasTick.value++;
-                                                    },
-                                                    onExit: (_) {
-                                                      _cursorPosition = null;
-                                                      _canvasTick.value++;
-                                                    },
-                                                    cursor: _canvasCursor,
+                                                  child: ValueListenableBuilder<int>(
+                                                    // 光标模式要按鼠标下的内容实时
+                                                    // 切换系统光标（手柄/文字/普通），
+                                                    // 而 MouseRegion 的 cursor 只在
+                                                    // 重建时重新求值，故让它跟随
+                                                    // _canvasTick 重建；子树用 child
+                                                    // 传入，保持不重建。
+                                                    valueListenable:
+                                                        _canvasTick,
                                                     child: Listener(
                                                       // 纯点击不会触发 pan 回调
                                                       // （pan 要先滑过位移阈值），
@@ -1074,6 +1125,29 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
                                                         ),
                                                       ),
                                                     ),
+                                                    builder:
+                                                        (
+                                                          context,
+                                                          _,
+                                                          child,
+                                                        ) => MouseRegion(
+                                                          onHover: (event) {
+                                                            _cursorPosition = event
+                                                                .localPosition;
+                                                            _cursorGlobal =
+                                                                event.position;
+                                                            _canvasTick.value++;
+                                                          },
+                                                          onExit: (_) {
+                                                            _cursorPosition =
+                                                                null;
+                                                            _cursorGlobal =
+                                                                null;
+                                                            _canvasTick.value++;
+                                                          },
+                                                          cursor: _canvasCursor,
+                                                          child: child,
+                                                        ),
                                                   ),
                                                 ),
                                               ],
@@ -1511,7 +1585,12 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
       (ScreenshotToolType.arrow, Icons.arrow_forward, '箭头', 'Arrow'),
       (ScreenshotToolType.rect, Icons.crop_square, '矩形', 'Rectangle'),
       (ScreenshotToolType.circle, Icons.circle_outlined, '椭圆', 'Ellipse'),
-      (ScreenshotToolType.highlighter, Icons.highlight, '荧光笔', 'Highlighter'),
+      (
+        ScreenshotToolType.highlighter,
+        Icons.border_color,
+        '荧光笔',
+        'Highlighter',
+      ),
       (ScreenshotToolType.mask, Icons.rectangle, '蒙版', 'Mask'),
     ];
 
