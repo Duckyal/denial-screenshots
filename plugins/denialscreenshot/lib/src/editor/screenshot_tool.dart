@@ -87,6 +87,9 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
   /// 大得多的量级才能快速擦除。
   double eraserSize = 24;
 
+  /// 荧光笔独立粗度：记号笔要够宽才能盖住一行文字，默认比画笔粗得多。
+  double highlighterSize = 18;
+
   /// 文字工具独立字号。
   double textFontSize = 8;
   String textFontFamily = '';
@@ -241,7 +244,8 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
   bool get _usesPointerRing =>
       !_showTextDialog &&
       (currentTool == ScreenshotToolType.brush ||
-          currentTool == ScreenshotToolType.eraser);
+          currentTool == ScreenshotToolType.eraser ||
+          currentTool == ScreenshotToolType.highlighter);
 
   MouseCursor get _canvasCursor {
     if (_usesPointerRing) return SystemMouseCursors.none;
@@ -1507,6 +1511,7 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
       (ScreenshotToolType.arrow, Icons.arrow_forward, '箭头', 'Arrow'),
       (ScreenshotToolType.rect, Icons.crop_square, '矩形', 'Rectangle'),
       (ScreenshotToolType.circle, Icons.circle_outlined, '椭圆', 'Ellipse'),
+      (ScreenshotToolType.highlighter, Icons.highlight, '荧光笔', 'Highlighter'),
       (ScreenshotToolType.mask, Icons.rectangle, '蒙版', 'Mask'),
     ];
 
@@ -2593,6 +2598,11 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
           ),
           _buildShortcutRow(
             context,
+            L.pick(context, '荧光笔', 'Highlighter'),
+            _prettyBinding('tool.highlighter'),
+          ),
+          _buildShortcutRow(
+            context,
             L.pick(context, '蒙版', 'Mask'),
             _prettyBinding('tool.mask'),
           ),
@@ -2753,19 +2763,33 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
       return history[_selectedCommandIndex!].strokeWidth;
     }
     if (currentTool == ScreenshotToolType.eraser) return eraserSize;
+    if (currentTool == ScreenshotToolType.highlighter) return highlighterSize;
     if (currentTool == ScreenshotToolType.text) return textFontSize;
     return strokeWidth;
   }
 
   double get _activeSizeMin {
     if (currentTool == ScreenshotToolType.eraser) return 8;
+    if (currentTool == ScreenshotToolType.highlighter) return 6;
     if (currentTool == ScreenshotToolType.text) return 8;
+    // 画笔与形状工具共用 strokeWidth，最细保证描边看得清，别细到 1。
+    if (_usesStrokeWidth) return 2;
     return 1;
   }
 
+  /// 画笔/直线/箭头/矩形/椭圆共用同一个 `strokeWidth` 字段，粗细范围一致。
+  bool get _usesStrokeWidth =>
+      currentTool == ScreenshotToolType.brush ||
+      currentTool == ScreenshotToolType.line ||
+      currentTool == ScreenshotToolType.arrow ||
+      currentTool == ScreenshotToolType.rect ||
+      currentTool == ScreenshotToolType.circle;
+
   double get _activeSizeMax {
     if (currentTool == ScreenshotToolType.eraser) return 80;
+    if (currentTool == ScreenshotToolType.highlighter) return 40;
     if (currentTool == ScreenshotToolType.text) return 72;
+    if (_usesStrokeWidth) return 10;
     return 20;
   }
 
@@ -2781,6 +2805,8 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
     setState(() {
       if (currentTool == ScreenshotToolType.eraser) {
         eraserSize = size.clamp(_activeSizeMin, _activeSizeMax);
+      } else if (currentTool == ScreenshotToolType.highlighter) {
+        highlighterSize = size.clamp(_activeSizeMin, _activeSizeMax);
       } else if (currentTool == ScreenshotToolType.text) {
         textFontSize = size.clamp(_activeSizeMin, _activeSizeMax);
       } else {
@@ -3597,6 +3623,7 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
     ('tool.rect', '矩形', 'Rectangle'),
     ('tool.circle', '椭圆', 'Ellipse'),
     ('tool.text', '文字', 'Text'),
+    ('tool.highlighter', '荧光笔', 'Highlighter'),
     ('tool.mask', '蒙版', 'Mask'),
     ('tool.eraser', '橡皮', 'Eraser'),
   ];
@@ -6901,6 +6928,8 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
       color: currentColor,
       strokeWidth: currentTool == ScreenshotToolType.eraser
           ? eraserSize
+          : currentTool == ScreenshotToolType.highlighter
+          ? highlighterSize
           : strokeWidth,
       fillColor: maskColor,
       maskStyle: currentTool == ScreenshotToolType.mask
@@ -7232,15 +7261,18 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
         path: path,
         rect: rect,
         color: currentColor,
-        // 橡皮痕迹的宽度 = 橡皮粗细（像素擦除的扫宽）。
+        // 橡皮痕迹的宽度 = 橡皮粗细（像素擦除的扫宽）；荧光笔用自己的粗度。
         strokeWidth: currentTool == ScreenshotToolType.eraser
             ? eraserSize
+            : currentTool == ScreenshotToolType.highlighter
+            ? highlighterSize
             : strokeWidth,
         fillColor: fillColor,
         maskStyle: maskStyle,
       );
       if (currentTool != ScreenshotToolType.brush &&
           currentTool != ScreenshotToolType.eraser &&
+          currentTool != ScreenshotToolType.highlighter &&
           (rect.width == 0 || rect.height == 0)) {
         setState(() {
           _dragStart = null;

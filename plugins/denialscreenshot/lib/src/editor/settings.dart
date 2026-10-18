@@ -101,6 +101,7 @@ class ScreenshotSettings {
     'tool.rect': 'r',
     'tool.circle': 'c',
     'tool.text': 't',
+    'tool.highlighter': 'h',
     'tool.mask': 'm',
     'tool.eraser': 'e',
     'scrollCapture': 'super+r',

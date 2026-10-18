@@ -6,6 +6,7 @@ enum ScreenshotToolType {
   rect,
   circle,
   text,
+  highlighter,
   mask,
   eraser,
 }

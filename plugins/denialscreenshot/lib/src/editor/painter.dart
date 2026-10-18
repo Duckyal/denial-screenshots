@@ -272,6 +272,17 @@ void drawCommand(
             : BlendMode.srcOver;
       canvas.drawPath(command.path, paint);
       break;
+    case ScreenshotToolType.highlighter:
+      // 荧光笔：像直线那样从起点画到终点（一条粗线，盖住一行文字），
+      // 但强制半透明 + 圆头，叠在内容上像记号笔。用 srcOver 而非 multiply
+      // ——注释层是透明位图，栅格化后再叠到截图上，multiply 无背景可乘会失真。
+      final paint = Paint()
+        ..color = command.color.withValues(alpha: 0.4)
+        ..strokeWidth = command.strokeWidth
+        ..strokeCap = StrokeCap.round
+        ..blendMode = BlendMode.srcOver;
+      canvas.drawLine(command.start, command.end, paint);
+      break;
     case ScreenshotToolType.line:
       final paint = Paint()
         ..color = command.color
