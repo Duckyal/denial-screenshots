@@ -39,6 +39,7 @@ from PIL import Image
 
 MODELS_DIR = os.path.expanduser(
     "~/.local/share/denial-screenshots/models")
+DEFAULT_MODELS_DIR = MODELS_DIR
 
 
 def emit(obj):
@@ -117,22 +118,38 @@ _M2M_LANGS = {
 _M2M_CACHE = {}
 
 
+def _m2m_base():
+    """解析 M2M 模型目录，兼容两种布局：
+    - `MODELS_DIR/mt/m2m100`（选到含 `mt/` 的上级，如默认下载目录）
+    - `MODELS_DIR/m2m100`（直接选到 `mt` 这一层）
+    返回第一个含 `model.bin` 的；都没有返回 None。load_m2m 与 discover_dir
+    共用它，保证「校验」和「加载」认同一套布局。"""
+    for base in (os.path.join(MODELS_DIR, "mt", "m2m100"),
+                 os.path.join(MODELS_DIR, "m2m100")):
+        if os.path.exists(os.path.join(base, "model.bin")):
+            return base
+    return None
+
+
 def load_m2m():
-    """加载 models/mt/m2m100/ 下的 M2M 模型，进程内复用。没下载好返回 None。"""
-    if "m2m100" in _M2M_CACHE:
-        return _M2M_CACHE["m2m100"]
-    base = os.path.join(MODELS_DIR, "mt", "m2m100")
-    if not os.path.exists(os.path.join(base, "model.bin")):
-        _M2M_CACHE["m2m100"] = None
+    """加载 M2M 模型（见 _m2m_base 的两种布局），进程内复用。没就绪返回 None。
+
+    缓存 key 用解析后的 base 目录：自选本地模型目录会重设 MODELS_DIR，
+    若只按 "m2m100" 缓存，切目录后仍会复用上一个目录的模型。
+    """
+    base = _m2m_base()
+    if base is None:
         return None
+    if base in _M2M_CACHE:
+        return _M2M_CACHE[base]
     import ctranslate2
     import sentencepiece as spm
 
     translator = ctranslate2.Translator(base, device="cpu")
     sp = spm.SentencePieceProcessor(
         model_file=os.path.join(base, "sentencepiece.bpe.model"))
-    _M2M_CACHE["m2m100"] = (translator, sp)
-    return _M2M_CACHE["m2m100"]
+    _M2M_CACHE[base] = (translator, sp)
+    return _M2M_CACHE[base]
 
 
 def m2m_translate(translator, sp, text, target):
@@ -152,6 +169,38 @@ def m2m_translate(translator, sp, text, target):
     hyp = [t for t in hypotheses[0]
            if not (t.startswith("__") and t.endswith("__"))]
     return sp.decode(hyp).replace("▁", " ").strip()
+
+
+def discover_dir():
+    """只扫描、不加载权重：统计当前 MODELS_DIR 下可用的 Argos 语言包数与
+    M2M 是否就绪。判据与 load_packs / load_m2m 的发现路径完全一致，目录选择器
+    用它当场校验——校验和加载共用同一套发现逻辑，绝不会「校验过、运行挂」。
+
+    Argos 包要凑齐 metadata.json + model/model.bin + sentencepiece.model 才算
+    可用（缺任一，PackTranslator 构造即失败）；M2M 要 model.bin +
+    sentencepiece.bpe.model（缺 sp，m2m 翻译会崩）。
+    """
+    argos = 0
+    candidates = glob.glob(os.path.join(MODELS_DIR, "*"))
+    candidates += glob.glob(os.path.join(MODELS_DIR, "*", "*"))
+    for package_dir in candidates:
+        if not os.path.isdir(package_dir):
+            continue
+        if not os.path.exists(
+                os.path.join(package_dir, "metadata.json")):
+            continue
+        if not os.path.exists(
+                os.path.join(package_dir, "model", "model.bin")):
+            continue
+        if not os.path.exists(
+                os.path.join(package_dir, "sentencepiece.model")):
+            continue
+        argos += 1
+    m2m_base = _m2m_base()
+    m2m = (m2m_base is not None and
+           os.path.exists(
+               os.path.join(m2m_base, "sentencepiece.bpe.model")))
+    return argos, m2m
 
 
 def load_packs():
@@ -317,6 +366,13 @@ def main():
 
 
 def handle(request):
+    global MODELS_DIR
+    # 自选本地模型目录：每条请求按需重设 MODELS_DIR（load_packs/load_m2m 在
+    # 调用时读它）。空则回退内置下载目录，保证常驻进程切回默认时不残留旧目录。
+    models_dir = (request.get("models_dir") or "").strip()
+    MODELS_DIR = os.path.expanduser(models_dir) if models_dir \
+        else DEFAULT_MODELS_DIR
+
     target = request.get("target", "zh")
     min_height = int(request.get("min_height", 8))
     # mode=ocr：只识别不翻译；mode=texts：只翻译给定文本（OCR 结果由
@@ -325,6 +381,16 @@ def handle(request):
     # engine=argos（默认，逐语对语言包，中英最稳最快）| m2m100（单模型多
     # 语言，适合源语言未知/混杂的截图，但英→中偏弱）。
     engine = request.get("engine", "argos")
+
+    # mode=validate_dir：只发现、不加载，供目录选择器当场校验本地翻译模型目录。
+    if mode == "validate_dir":
+        argos, m2m_ready = discover_dir()
+        emit({
+            "event": "done",
+            "argos_packs": argos,
+            "m2m": m2m_ready,
+        })
+        return 0
 
     m2m = None
     if engine == "m2m100" and mode != "ocr":

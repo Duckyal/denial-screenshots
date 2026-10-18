@@ -39,8 +39,16 @@ class SelectionSettingsPanel extends StatefulWidget {
 class _SelectionSettingsPanelState extends State<SelectionSettingsPanel> {
   late ScreenshotSettings _settings = widget.settings;
 
+  /// 面板根容器 key：贴边悬浮菜单据此边对边贴在面板外侧。
+  final GlobalKey _panelKey = GlobalKey();
+
+  /// 面板底色：悬浮菜单弹层复用同一色，保证和面板风格一致。
+  static const Color _panelBg = Color(0xE60F1419);
+
   bool _apiOpen = false;
-  bool _modelsOpen = false;
+
+  /// 临时：选了「选择本地模型目录」但还没挑目录时，让该项保持选中并展开目录行。
+  bool _localPicked = false;
 
   Map<(String, String), bool> _packInstalled = const {};
   (String, String) _packBusy = const ('', '');
@@ -90,10 +98,10 @@ class _SelectionSettingsPanelState extends State<SelectionSettingsPanel> {
     unawaited(_refreshOcr());
     unawaited(_refreshTools());
     unawaited(_refreshM2m());
-    widget.nav?.canGoBack = () => _apiOpen || _modelsOpen;
+    widget.nav?.canGoBack = () => _apiOpen || _localPicked;
     widget.nav?.goBack = () => setState(() {
       _apiOpen = false;
-      _modelsOpen = false;
+      _localPicked = false;
     });
   }
 
@@ -138,6 +146,22 @@ class _SelectionSettingsPanelState extends State<SelectionSettingsPanel> {
       return TranslateService.ocrModelsRoot;
     }
     return Platform.environment['HOME'] ?? '/';
+  }
+
+  /// 翻译模型目录选择器的起始目录：已选的目录 > 内置 models 根 > 主目录。
+  String _translateInitialDirectory() {
+    final chosen = _settings.translateModelsDir.trim();
+    if (chosen.isNotEmpty) return chosen;
+    final root = '${TranslateService.dataDir}/models';
+    if (Directory(root).existsSync()) return root;
+    return Platform.environment['HOME'] ?? '/';
+  }
+
+  /// 面板全局矩形：悬浮菜单据此边对边贴在面板外侧，不压在面板上。
+  Rect? _panelRect() {
+    final box = _panelKey.currentContext?.findRenderObject();
+    if (box is! RenderBox || !box.hasSize) return null;
+    return box.localToGlobal(Offset.zero) & box.size;
   }
 
   Future<void> _refreshPacks() async {
@@ -341,10 +365,11 @@ class _SelectionSettingsPanelState extends State<SelectionSettingsPanel> {
       child: DefaultTextStyle.merge(
         style: const TextStyle(color: Colors.white),
         child: Container(
+          key: _panelKey,
           width: 380,
           constraints: const BoxConstraints(maxHeight: 520),
           decoration: BoxDecoration(
-            color: const Color(0xE60F1419),
+            color: _panelBg,
             borderRadius: BorderRadius.circular(12),
             boxShadow: const [
               BoxShadow(
@@ -413,13 +438,12 @@ class _SelectionSettingsPanelState extends State<SelectionSettingsPanel> {
         ],
         (value) {
           if (value == 'local') _apiOpen = false;
-          if (value == 'api') _modelsOpen = false;
+          if (value == 'api') _localPicked = false;
           _apply(_settings.copyWith(translateBackend: value));
         },
       ),
       if (_settings.translateBackend == 'api') ..._apiSection(),
-      if (_settings.translateBackend == 'local') ..._engineSection(),
-      if (_settings.translateBackend == 'local') ..._localModelsSection(),
+      if (_settings.translateBackend == 'local') ..._localTranslateSection(),
       _group(
         L.pick(context, '翻译为', 'Translate to'),
         _settings.translateTarget,
@@ -441,55 +465,185 @@ class _SelectionSettingsPanelState extends State<SelectionSettingsPanel> {
     ];
   }
 
-  /// 本地翻译引擎选择：Argos 逐语对（默认）/ M2M-100 单模型任意互译。
-  List<Widget> _engineSection() {
+  /// 本地翻译来源：与「识字模型」同款 RadioListTile 纵向列表。三选一
+  /// （Argos 逐语对 / M2M-100 单模型 / 选择本地模型目录），选中哪项就在其
+  /// 下方直接展开该项的模型管理，不再套一层展开按钮。
+  List<Widget> _localTranslateSection() {
+    final dir = _settings.translateModelsDir.trim();
+    final source = dir.isNotEmpty || _localPicked
+        ? 'local'
+        : _settings.translateEngine;
     return [
-      _group(
-        L.pick(context, '翻译引擎', 'Translation engine'),
-        _settings.translateEngine,
-        const [
-          ('argos', 'Argos 语言包（默认）', 'Argos dictionaries (default)'),
-          ('m2m100', 'M2M-100 多语言单模型', 'M2M-100 multilingual model'),
-        ],
-        (value) => _apply(_settings.copyWith(translateEngine: value)),
+      Padding(
+        padding: const EdgeInsets.only(top: 8, bottom: 2),
+        child: Text(
+          L.pick(context, '翻译模型来源', 'Translation model source'),
+          style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600),
+        ),
       ),
-      if (_settings.translateEngine == 'm2m100')
-        if (_m2mBusy)
-          Padding(
-            padding: const EdgeInsets.only(top: 6),
-            child: Row(
-              children: [
-                const SizedBox(
-                  width: 14,
-                  height: 14,
-                  child: CircularProgressIndicator(strokeWidth: 2),
+      RadioGroup<String>(
+        groupValue: source,
+        onChanged: (next) {
+          if (next == null) return;
+          if (next == 'local') {
+            setState(() => _localPicked = true);
+            return;
+          }
+          setState(() => _localPicked = false);
+          _apply(
+            _settings.copyWith(translateEngine: next, translateModelsDir: ''),
+          );
+        },
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            RadioListTile<String>(
+              dense: true,
+              visualDensity: VisualDensity.compact,
+              contentPadding: EdgeInsets.zero,
+              value: 'argos',
+              title: Text(
+                L.pick(
+                  context,
+                  'Argos 语言包（默认）',
+                  'Argos dictionaries (default)',
                 ),
-                const SizedBox(width: 10),
-                Expanded(
+                style: const TextStyle(fontSize: 13),
+              ),
+              subtitle: Text(
+                L.pick(
+                  context,
+                  '逐语对下载，无直连对时经英语中继',
+                  'Per-language pairs; relays via English without a direct pair',
+                ),
+                style: const TextStyle(fontSize: 11, color: Colors.white60),
+              ),
+            ),
+            RadioListTile<String>(
+              dense: true,
+              visualDensity: VisualDensity.compact,
+              contentPadding: EdgeInsets.zero,
+              value: 'm2m100',
+              title: Text(
+                L.pick(context, 'M2M-100 多语言单模型', 'M2M-100 multilingual model'),
+                style: const TextStyle(fontSize: 13),
+              ),
+              subtitle: Text(
+                '${L.pick(context, '一个模型覆盖 12 语种互译', 'One model covers 12 languages')} · '
+                '${_m2mInstalled ? L.pick(context, '已下载', 'Downloaded') : L.pick(context, '未下载（约 490MB）', 'Not downloaded (~490MB)')}',
+                style: const TextStyle(fontSize: 11, color: Colors.white60),
+              ),
+            ),
+            RadioListTile<String>(
+              dense: true,
+              visualDensity: VisualDensity.compact,
+              contentPadding: EdgeInsets.zero,
+              value: 'local',
+              title: Text(
+                L.pick(context, '选择本地模型目录', 'Choose local model folder'),
+                style: const TextStyle(fontSize: 13),
+              ),
+              subtitle: Text(
+                dir.isEmpty
+                    ? L.pick(
+                        context,
+                        '指向自己的翻译模型目录（覆盖默认）',
+                        'Point at your own model folder (overrides default)',
+                      )
+                    : dir,
+                overflow: TextOverflow.ellipsis,
+                style: const TextStyle(fontSize: 11, color: Colors.white60),
+              ),
+            ),
+          ],
+        ),
+      ),
+      if (source == 'argos') ..._argosModels(),
+      if (source == 'm2m100') ..._m2mModels(),
+      if (source == 'local') _translateDirOverride(),
+    ];
+  }
+
+  /// Argos 选中时直接展开：逐语对语言包下载/删除列表。
+  List<Widget> _argosModels() {
+    return [
+      if (_packBusy != const ('', ''))
+        Padding(
+          padding: const EdgeInsets.only(top: 6),
+          child: Row(
+            children: [
+              const SizedBox(
+                width: 14,
+                height: 14,
+                child: CircularProgressIndicator(strokeWidth: 2),
+              ),
+              const SizedBox(width: 10),
+              Expanded(
+                child: Text(_packMessage, style: const TextStyle(fontSize: 12)),
+              ),
+            ],
+          ),
+        ),
+      for (final (from, to, label) in TranslateService.packCatalog)
+        ListTile(
+          dense: true,
+          visualDensity: VisualDensity.compact,
+          contentPadding: EdgeInsets.zero,
+          title: Text(
+            L.pick(context, label.zh, label.en),
+            style: const TextStyle(fontSize: 13),
+          ),
+          trailing: _packBusy == (from, to)
+              ? const SizedBox(
+                  width: 16,
+                  height: 16,
+                  child: CircularProgressIndicator(strokeWidth: 2),
+                )
+              : TextButton(
+                  onPressed: () => _togglePack(from, to),
                   child: Text(
-                    _m2mMessage,
+                    (_packInstalled[(from, to)] ?? false)
+                        ? L.pick(context, '删除', 'Delete')
+                        : L.pick(context, '下载', 'Download'),
                     style: const TextStyle(fontSize: 12),
                   ),
                 ),
-              ],
-            ),
-          )
-        else
-          Padding(
-            padding: const EdgeInsets.only(top: 6),
-            child: OutlinedButton(
-              onPressed: _toggleM2m,
-              child: Text(
-                _m2mInstalled
-                    ? L.pick(context, '删除 M2M 模型', 'Delete M2M model')
-                    : L.pick(
-                        context,
-                        '下载 M2M 模型（约 490MB）',
-                        'Download M2M model (~490MB)',
-                      ),
+        ),
+    ];
+  }
+
+  /// M2M 选中时直接展开：单个模型的下载/删除按钮（与 OCR 同款）。
+  List<Widget> _m2mModels() {
+    return [
+      if (_m2mBusy)
+        Padding(
+          padding: const EdgeInsets.symmetric(vertical: 6),
+          child: Row(
+            children: [
+              const SizedBox(
+                width: 14,
+                height: 14,
+                child: CircularProgressIndicator(strokeWidth: 2),
               ),
+              const SizedBox(width: 10),
+              Expanded(
+                child: Text(_m2mMessage, style: const TextStyle(fontSize: 12)),
+              ),
+            ],
+          ),
+        )
+      else
+        Padding(
+          padding: const EdgeInsets.only(top: 4),
+          child: OutlinedButton(
+            onPressed: _toggleM2m,
+            child: Text(
+              _m2mInstalled
+                  ? L.pick(context, '删除模型', 'Delete model')
+                  : L.pick(context, '下载模型（约 490MB）', 'Download model (~490MB)'),
             ),
           ),
+        ),
     ];
   }
 
@@ -799,71 +953,101 @@ class _SelectionSettingsPanelState extends State<SelectionSettingsPanel> {
     ];
   }
 
-  List<Widget> _localModelsSection() {
-    return [
-      Padding(
-        padding: const EdgeInsets.only(top: 6),
-        child: OutlinedButton(
-          onPressed: () => setState(() => _modelsOpen = !_modelsOpen),
-          child: Text(
-            _modelsOpen
-                ? L.pick(context, '收起模型列表', 'Hide model list')
-                : L.pick(
-                    context,
-                    '管理本地翻译模型（下载/删除）',
-                    'Manage local translation models (download/delete)',
-                  ),
+  /// 本地翻译模型目录覆盖（「选择本地模型目录」项选中时直接展开）：默认用内置
+  /// 下载目录，可指向用户自己的目录。选目录走贴边悬浮菜单，点「选择此文件夹」时
+  /// 校验目录可用（Argos 语言包或 mt/m2m100），清除后回退默认。
+  Widget _translateDirOverride() {
+    final chosen = _settings.translateModelsDir.trim();
+    return Padding(
+      padding: const EdgeInsets.only(top: 8),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            L.pick(context, '本地模型目录', 'Local model folder'),
+            style: const TextStyle(fontSize: 12),
           ),
-        ),
-      ),
-      if (_modelsOpen) ...[
-        if (_packBusy != const ('', ''))
-          Padding(
-            padding: const EdgeInsets.only(top: 6),
-            child: Row(
-              children: [
-                const SizedBox(
-                  width: 14,
-                  height: 14,
-                  child: CircularProgressIndicator(strokeWidth: 2),
+          const SizedBox(height: 4),
+          Row(
+            children: [
+              Expanded(
+                child: Text(
+                  chosen.isEmpty
+                      ? L.pick(
+                          context,
+                          '未选择（用默认下载目录）',
+                          'None (using default folder)',
+                        )
+                      : chosen,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(fontSize: 11, color: Colors.white70),
                 ),
-                const SizedBox(width: 10),
-                Expanded(
-                  child: Text(
-                    _packMessage,
-                    style: const TextStyle(fontSize: 12),
-                  ),
+              ),
+              const SizedBox(width: 8),
+              if (chosen.isNotEmpty)
+                TextButton(
+                  onPressed: () =>
+                      _apply(_settings.copyWith(translateModelsDir: '')),
+                  child: Text(L.pick(context, '清除', 'Clear')),
                 ),
-              ],
-            ),
-          ),
-        for (final (from, to, label) in TranslateService.packCatalog)
-          ListTile(
-            dense: true,
-            visualDensity: VisualDensity.compact,
-            contentPadding: EdgeInsets.zero,
-            title: Text(
-              L.pick(context, label.zh, label.en),
-              style: const TextStyle(fontSize: 13),
-            ),
-            trailing: _packBusy == (from, to)
-                ? const SizedBox(
-                    width: 16,
-                    height: 16,
-                    child: CircularProgressIndicator(strokeWidth: 2),
-                  )
-                : TextButton(
-                    onPressed: () => _togglePack(from, to),
-                    child: Text(
-                      (_packInstalled[(from, to)] ?? false)
-                          ? L.pick(context, '删除', 'Delete')
-                          : L.pick(context, '下载', 'Download'),
-                      style: const TextStyle(fontSize: 12),
+              Builder(
+                builder: (BuildContext buttonContext) => OutlinedButton(
+                  onPressed: () => showPathChooserPopup(
+                    anchorContext: buttonContext,
+                    title: L.pick(
+                      context,
+                      '选择本地翻译模型目录',
+                      'Choose local translation model folder',
                     ),
+                    directoryMode: true,
+                    requiresTranslateModels: true,
+                    translateValidator: (path) async {
+                      try {
+                        final result = await widget.translateService
+                            .validateTranslateModelsDir(path);
+                        if (result.argosPacks > 0 || result.m2m) return null;
+                        return L.pick(
+                          context,
+                          '这个目录里没有可用的翻译模型（需 Argos 语言包或 mt/m2m100）',
+                          'No usable translation model here '
+                              '(needs an Argos pack or mt/m2m100)',
+                        );
+                      } on Object catch (error) {
+                        return '$error'.replaceFirst('Exception: ', '');
+                      }
+                    },
+                    anchorRect: _panelRect(),
+                    background: _panelBg,
+                    initialDirectory: _translateInitialDirectory(),
+                    onSelected: (path) async {
+                      // 选本地目录时把引擎一起定对：目录里有 Argos 语言包就用
+                      // argos，否则（只有 mt/m2m100）用 m2m100。否则引擎会停在
+                      // 默认 argos，导致「校验命中 M2M、翻译却找不到语言包」。
+                      var engine = 'argos';
+                      try {
+                        final result = await widget.translateService
+                            .validateTranslateModelsDir(path);
+                        engine = result.argosPacks > 0 ? 'argos' : 'm2m100';
+                      } on Object {
+                        // 校验器刚放行过，这里异常只可能是竞态；退回 argos。
+                      }
+                      if (!mounted) return;
+                      _apply(
+                        _settings.copyWith(
+                          translateModelsDir: path,
+                          translateEngine: engine,
+                        ),
+                      );
+                    },
                   ),
+                  child: Text(L.pick(context, '选择目录', 'Choose folder')),
+                ),
+              ),
+            ],
           ),
-      ],
-    ];
+        ],
+      ),
+    );
   }
 
   List<Widget> _ocrSection() {
@@ -1027,6 +1211,8 @@ class _SelectionSettingsPanelState extends State<SelectionSettingsPanel> {
                         ),
                         directoryMode: true,
                         requiresOcrModels: true,
+                        anchorRect: _panelRect(),
+                        background: _panelBg,
                         initialDirectory: _ocrInitialDirectory(),
                         onSelected: (path) =>
                             _apply(_settings.copyWith(ocrLocalPath: path)),

@@ -1387,6 +1387,7 @@ class _CaptureFlowHostState extends ConsumerState<CaptureFlowHost> {
         mode: mode,
         ocrModel: _settings.ocrModelForSidecar,
         engine: _settings.translateEngine,
+        modelsDir: _settings.translateModelsDir.trim(),
       )) {
         if (!mounted) return;
         switch (event.type) {

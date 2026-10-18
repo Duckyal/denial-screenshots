@@ -80,6 +80,10 @@ void showPathChooserPopup({
   required bool directoryMode,
   required String initialDirectory,
   bool requiresOcrModels = false,
+  bool requiresTranslateModels = false,
+  Future<String?> Function(String path)? translateValidator,
+  Rect? anchorRect,
+  Color background = const Color(0xD1000000),
   String initialFileName = '',
   List<String> patterns = const <String>[],
   required void Function(String path) onSelected,
@@ -93,11 +97,20 @@ void showPathChooserPopup({
   const panelWidth = 340.0;
   const panelHeight = 380.0;
   const margin = 8.0;
+  const gap = 2.0;
 
-  // 贴边：优先放按钮右侧，放不下就放左侧；垂直与按钮对齐并按屏幕夹取。
-  var left = button.right + 4;
+  // 贴边：以整块面板（[anchorRect]，如设置面板）的外沿为准，尽量边对边贴着
+  // 放，而不是压在按钮/面板上。优先放右侧，右侧放不下放左侧；两侧都放不下
+  // （空间不足的特殊情况）就夹回屏幕边缘、允许少量重叠。垂直与按钮对齐并夹取。
+  final panel = anchorRect ?? button;
+  var left = panel.right + gap;
   if (left + panelWidth > screen.width - margin) {
-    left = (button.left - panelWidth - 4).clamp(margin, screen.width - margin);
+    left = panel.left - panelWidth - gap;
+  }
+  if (left < margin) {
+    left = (screen.width - panelWidth - margin) > margin
+        ? margin
+        : (screen.width - panelWidth - margin);
   }
   final top = (button.top - 8).clamp(
     margin,
@@ -126,53 +139,61 @@ void showPathChooserPopup({
             onTap: () {},
             child: Theme(
               data: ThemeData.dark(useMaterial3: true),
-              child: Material(
-                color: Colors.transparent,
-                child: Container(
-                  width: panelWidth,
-                  padding: const EdgeInsets.all(10),
-                  decoration: BoxDecoration(
-                    color: Colors.black.withValues(alpha: 0.82),
-                    borderRadius: BorderRadius.circular(12),
-                    boxShadow: const [
-                      BoxShadow(
-                        color: Colors.black38,
-                        blurRadius: 10,
-                        offset: Offset(0, 2),
-                      ),
-                    ],
-                  ),
-                  child: Column(
-                    mainAxisSize: MainAxisSize.min,
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: <Widget>[
-                      Padding(
-                        padding: const EdgeInsets.only(bottom: 6),
-                        child: Text(
-                          title,
-                          style: const TextStyle(
-                            fontSize: 13,
-                            fontWeight: FontWeight.w600,
+              child: DefaultTextStyle.merge(
+                style: const TextStyle(color: Colors.white),
+                child: Material(
+                  color: Colors.transparent,
+                  child: Container(
+                    width: panelWidth,
+                    padding: const EdgeInsets.all(10),
+                    decoration: BoxDecoration(
+                      color: background,
+                      borderRadius: BorderRadius.circular(12),
+                      boxShadow: const [
+                        BoxShadow(
+                          color: Colors.black38,
+                          blurRadius: 10,
+                          offset: Offset(0, 2),
+                        ),
+                      ],
+                    ),
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: <Widget>[
+                        Padding(
+                          padding: const EdgeInsets.only(bottom: 6),
+                          child: Text(
+                            title,
+                            style: const TextStyle(
+                              fontSize: 13,
+                              fontWeight: FontWeight.w600,
+                            ),
                           ),
                         ),
-                      ),
-                      PathChooserPanel(
-                        title: title,
-                        save: false,
-                        directoryMode: directoryMode || requiresOcrModels,
-                        requiresOcrModels: requiresOcrModels,
-                        width: panelWidth - 20,
-                        height: panelHeight - 70,
-                        initialDirectory: initialDirectory,
-                        initialFileName: initialFileName,
-                        patterns: patterns,
-                        onSelected: (path) {
-                          close();
-                          onSelected(path);
-                        },
-                        onCancel: close,
-                      ),
-                    ],
+                        PathChooserPanel(
+                          title: title,
+                          save: false,
+                          directoryMode:
+                              directoryMode ||
+                              requiresOcrModels ||
+                              requiresTranslateModels,
+                          requiresOcrModels: requiresOcrModels,
+                          requiresTranslateModels: requiresTranslateModels,
+                          translateValidator: translateValidator,
+                          width: panelWidth - 20,
+                          height: panelHeight - 70,
+                          initialDirectory: initialDirectory,
+                          initialFileName: initialFileName,
+                          patterns: patterns,
+                          onSelected: (path) {
+                            close();
+                            onSelected(path);
+                          },
+                          onCancel: close,
+                        ),
+                      ],
+                    ),
                   ),
                 ),
               ),
@@ -337,6 +358,8 @@ class _PathChooserContent extends StatelessWidget {
     required this.save,
     this.directoryMode = false,
     this.showValidation = false,
+    this.validating = false,
+    this.dirHint,
     this.width = 460,
     this.height = 360,
     required this.onEnter,
@@ -353,6 +376,12 @@ class _PathChooserContent extends StatelessWidget {
 
   /// 目录校验模式：在底部按钮上方展示校验失败的红字提示（列表非空时也能看到）。
   final bool showValidation;
+
+  /// 翻译模型目录正在异步校验：底部「选择此文件夹」按钮转圈并禁用。
+  final bool validating;
+
+  /// 目录模式底部按钮左侧的提示文案（按 OCR / 翻译模型类型给不同说明）。
+  final String? dirHint;
   final double width;
   final double height;
   final void Function(Directory) onEnter;
@@ -442,17 +471,27 @@ class _PathChooserContent extends StatelessWidget {
               children: [
                 Expanded(
                   child: Text(
-                    L.pick(
-                      context,
-                      '进入含 det/rec .onnx 的目录后选择',
-                      'Enter the folder with det/rec .onnx files, then choose',
-                    ),
+                    dirHint ??
+                        L.pick(
+                          context,
+                          '进入目标目录后选择',
+                          'Enter the folder, then choose',
+                        ),
                     style: theme.textTheme.bodySmall,
                   ),
                 ),
                 FilledButton(
-                  onPressed: onConfirm,
-                  child: Text(L.pick(context, '选择此文件夹', 'Choose folder')),
+                  onPressed: validating ? null : onConfirm,
+                  child: validating
+                      ? const SizedBox(
+                          width: 16,
+                          height: 16,
+                          child: CircularProgressIndicator(
+                            strokeWidth: 2,
+                            color: Colors.white,
+                          ),
+                        )
+                      : Text(L.pick(context, '选择此文件夹', 'Choose folder')),
                 ),
               ],
             ),
@@ -485,6 +524,8 @@ class PathChooserPanel extends StatefulWidget {
     required this.onCancel,
     this.directoryMode = false,
     this.requiresOcrModels = false,
+    this.requiresTranslateModels = false,
+    this.translateValidator,
     this.width = 460,
     this.height = 360,
   });
@@ -504,6 +545,16 @@ class PathChooserPanel extends StatefulWidget {
   /// 点「选择此文件夹」时校验必须同时存在 det 和 rec 两个 .onnx，缺失则报红、
   /// 不放行——选错目录当场就能发现，不用等识别时才回退到内置模型。
   final bool requiresOcrModels;
+
+  /// 本地翻译模型目录模式：在目录模式基础上，点「选择此文件夹」时把目录交给
+  /// [translateValidator]（由调用方注入，走 sidecar 的发现逻辑）当场校验，
+  /// 返回错误信息则报红、不放行。校验判据与运行时加载共用同一套，绝不出现
+  /// 「选的时候过、翻译的时候挂」。
+  final bool requiresTranslateModels;
+
+  /// 翻译模型目录校验器：返回 null 表示可用，返回字符串即错误提示（已本地化）。
+  /// 由调用方注入（持有 TranslateService 的地方），异步执行、不加载模型权重。
+  final Future<String?> Function(String path)? translateValidator;
   final double width;
   final double height;
 
@@ -516,6 +567,10 @@ class _PathChooserPanelState extends State<PathChooserPanel> {
   late final TextEditingController _nameController;
   List<FileSystemEntity> _entries = const <FileSystemEntity>[];
   String? _error;
+
+  /// 翻译模型目录正在异步校验（调用 sidecar 发现逻辑）：期间禁用「选择此文件夹」
+  /// 并转圈，避免重复点击与选到未校验的目录。
+  bool _validating = false;
 
   @override
   void initState() {
@@ -531,14 +586,21 @@ class _PathChooserPanelState extends State<PathChooserPanel> {
     super.dispose();
   }
 
-  /// 目录模式（含 OCR 模型目录）：只能选文件夹本身，文件条目仅供查看。
-  bool get _dirMode => widget.directoryMode || widget.requiresOcrModels;
+  /// 目录模式（含 OCR/翻译模型目录）：只能选文件夹本身，文件条目仅供查看。
+  bool get _dirMode =>
+      widget.directoryMode ||
+      widget.requiresOcrModels ||
+      widget.requiresTranslateModels;
 
   bool _matches(FileSystemEntity entity) {
     if (entity is Directory) return true;
     // OCR 模型目录：把 .onnx 列出来，方便确认这个目录到底有没有模型文件。
     if (widget.requiresOcrModels) {
       return entity.path.toLowerCase().endsWith('.onnx');
+    }
+    // 翻译模型目录：把 .bin（CTranslate2 权重）列出来，同样方便确认。
+    if (widget.requiresTranslateModels) {
+      return entity.path.toLowerCase().endsWith('.bin');
     }
     if (_dirMode) return false;
     if (widget.patterns.isEmpty) return true;
@@ -614,10 +676,36 @@ class _PathChooserPanelState extends State<PathChooserPanel> {
     }
   }
 
-  void _confirm() {
+  /// 校验当前目录是否是可用的本地翻译模型根：交给调用方注入的 [PathChooserPanel.translateValidator]
+  /// （走 sidecar 发现逻辑，判据与运行时加载一致）。返回 null 放行，返回字符串即红字提示。
+  Future<String?> _validateTranslateDir() async {
+    final path = _directory.path;
+    setState(() {
+      _error = null;
+      _validating = true;
+    });
+    try {
+      return await widget.translateValidator?.call(path);
+    } on Object catch (error) {
+      return '$error';
+    } finally {
+      if (mounted) setState(() => _validating = false);
+    }
+  }
+
+  Future<void> _confirm() async {
     if (_dirMode) {
       if (widget.requiresOcrModels) {
         final error = _validateOcrDir();
+        if (error != null) {
+          setState(() => _error = error);
+          return;
+        }
+      }
+      if (widget.requiresTranslateModels) {
+        if (_validating) return;
+        final error = await _validateTranslateDir();
+        if (!mounted) return;
         if (error != null) {
           setState(() => _error = error);
           return;
@@ -633,6 +721,19 @@ class _PathChooserPanelState extends State<PathChooserPanel> {
 
   @override
   Widget build(BuildContext context) {
+    final dirHint = widget.requiresOcrModels
+        ? L.pick(
+            context,
+            '进入含 det/rec .onnx 的目录后选择',
+            'Enter the folder with det/rec .onnx files, then choose',
+          )
+        : widget.requiresTranslateModels
+        ? L.pick(
+            context,
+            '选择带有 model.bin 的模型目录',
+            'Choose a model folder that has model.bin',
+          )
+        : null;
     return _PathChooserContent(
       directory: _directory,
       entries: _entries,
@@ -640,7 +741,10 @@ class _PathChooserPanelState extends State<PathChooserPanel> {
       error: _error,
       save: widget.save,
       directoryMode: _dirMode,
-      showValidation: widget.requiresOcrModels,
+      showValidation:
+          widget.requiresOcrModels || widget.requiresTranslateModels,
+      validating: _validating,
+      dirHint: dirHint,
       width: widget.width,
       height: widget.height,
       onEnter: _enter,

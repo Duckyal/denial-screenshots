@@ -25,6 +25,7 @@ class ScreenshotSettings {
     this.ocrApiModel = '',
     this.ocrApiKey = '',
     this.translateEngine = 'argos',
+    this.translateModelsDir = '',
     this.autoScroll = true,
     this.autoScrollKey = 'Down',
     this.scrollInjector = 'denial',
@@ -61,6 +62,11 @@ class ScreenshotSettings {
   /// 'm2m100'（M2M-100 418M 单模型多语言，需下载，适合源语言未知/混杂的
   /// 截图，但英→中方向偏弱、CPU 上每句更慢）。
   final String translateEngine;
+
+  /// 自选本地翻译模型目录，覆盖内置下载目录（~/.local/share/denial-screenshots/models）。
+  /// 留空则用默认。指向的目录需按 Argos 布局（子目录含 metadata.json）或含
+  /// mt/m2m100 才有内容可扫；OCR 的 ocrLocalPath 是另一套、互不影响。
+  final String translateModelsDir;
 
   /// 长截图是否自动滚动。开启后按 [autoScrollKey] 向聚焦的客户端注入
   /// 键盘按键来翻页，无需手动滚动（依赖目标应用认可该按键为滚动）。
@@ -177,6 +183,7 @@ class ScreenshotSettings {
     String? ocrApiModel,
     String? ocrApiKey,
     String? translateEngine,
+    String? translateModelsDir,
     bool? autoScroll,
     String? autoScrollKey,
     String? scrollInjector,
@@ -203,6 +210,7 @@ class ScreenshotSettings {
       ocrApiModel: ocrApiModel ?? this.ocrApiModel,
       ocrApiKey: ocrApiKey ?? this.ocrApiKey,
       translateEngine: translateEngine ?? this.translateEngine,
+      translateModelsDir: translateModelsDir ?? this.translateModelsDir,
       autoScroll: autoScroll ?? this.autoScroll,
       autoScrollKey: autoScrollKey ?? this.autoScrollKey,
       scrollInjector: scrollInjector ?? this.scrollInjector,
@@ -230,6 +238,7 @@ class ScreenshotSettings {
     'ocrApiModel': ocrApiModel,
     'ocrApiKey': ocrApiKey,
     'translateEngine': translateEngine,
+    'translateModelsDir': translateModelsDir,
     'autoScroll': autoScroll,
     'autoScrollKey': autoScrollKey,
     'scrollInjector': scrollInjector,
@@ -271,6 +280,7 @@ class ScreenshotSettings {
       ocrApiModel: json['ocrApiModel'] as String? ?? '',
       ocrApiKey: json['ocrApiKey'] as String? ?? '',
       translateEngine: json['translateEngine'] as String? ?? 'argos',
+      translateModelsDir: json['translateModelsDir'] as String? ?? '',
       autoScroll: json['autoScroll'] as bool? ?? true,
       autoScrollKey: json['autoScrollKey'] as String? ?? 'Down',
       scrollInjector: switch (json['scrollInjector'] as String?) {

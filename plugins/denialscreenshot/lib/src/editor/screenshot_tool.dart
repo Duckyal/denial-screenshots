@@ -3723,6 +3723,22 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
     return Platform.environment['HOME'] ?? '/';
   }
 
+  /// 翻译模型目录选择器的起始目录：已选的目录 > 内置 models 根 > 主目录。
+  String _translateInitialDirectory() {
+    final chosen = _settings.translateModelsDir.trim();
+    if (chosen.isNotEmpty) return chosen;
+    final root = '${TranslateService.dataDir}/models';
+    if (Directory(root).existsSync()) return root;
+    return Platform.environment['HOME'] ?? '/';
+  }
+
+  /// 设置面板的全局矩形：贴边悬浮菜单据此边对边贴在面板外侧，而不是压在面板上。
+  Rect? _settingsPanelRect() {
+    final box = _settingsPanelKey.currentContext?.findRenderObject();
+    if (box is! RenderBox || !box.hasSize) return null;
+    return box.localToGlobal(Offset.zero) & box.size;
+  }
+
   bool _m2mInstalled = false;
   bool _m2mBusy = false;
   String _m2mMessage = '';
@@ -4350,6 +4366,7 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
             ),
           ),
         if (_settings.translateBackend == 'local') _buildEnginePicker(),
+        if (_settings.translateBackend == 'local') _buildTranslateDirOverride(),
         _settingsGroup(
           L.pick(context, '翻译为', 'Translate to'),
           _settings.translateTarget,
@@ -4405,6 +4422,107 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
             indent: true,
           ),
       ],
+    );
+  }
+
+  /// 本地翻译模型目录覆盖：默认用内置下载目录，可指向用户自己的模型目录。
+  /// 选目录走贴边悬浮菜单，点「选择此文件夹」时校验目录可用（含 Argos 语言包
+  /// 或 mt/m2m100），留空即回退默认。管理面板只管默认目录，这里是高级覆盖。
+  Widget _buildTranslateDirOverride() {
+    final chosen = _settings.translateModelsDir.trim();
+    return Padding(
+      padding: const EdgeInsets.only(top: 8),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            L.pick(
+              context,
+              '本地模型目录（可选，覆盖默认下载目录）',
+              'Local model folder (optional, overrides default)',
+            ),
+            style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600),
+          ),
+          const SizedBox(height: 4),
+          Row(
+            children: [
+              Expanded(
+                child: Text(
+                  chosen.isEmpty
+                      ? L.pick(
+                          context,
+                          '未选择（用默认下载目录）',
+                          'None (using default folder)',
+                        )
+                      : chosen,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(fontSize: 11, color: Colors.white70),
+                ),
+              ),
+              const SizedBox(width: 8),
+              if (chosen.isNotEmpty)
+                TextButton(
+                  onPressed: () => _applySettings(
+                    _settings.copyWith(translateModelsDir: ''),
+                  ),
+                  child: Text(L.pick(context, '清除', 'Clear')),
+                ),
+              Builder(
+                builder: (BuildContext buttonContext) => OutlinedButton(
+                  onPressed: () => showPathChooserPopup(
+                    anchorContext: buttonContext,
+                    title: L.pick(
+                      context,
+                      '选择本地翻译模型目录',
+                      'Choose local translation model folder',
+                    ),
+                    directoryMode: true,
+                    requiresTranslateModels: true,
+                    translateValidator: (path) async {
+                      try {
+                        final result = await _translateService
+                            .validateTranslateModelsDir(path);
+                        if (result.argosPacks > 0 || result.m2m) return null;
+                        return L.pick(
+                          context,
+                          '这个目录里没有可用的翻译模型（需 Argos 语言包或 mt/m2m100）',
+                          'No usable translation model here '
+                              '(needs an Argos pack or mt/m2m100)',
+                        );
+                      } on Object catch (error) {
+                        return '$error'.replaceFirst('Exception: ', '');
+                      }
+                    },
+                    anchorRect: _settingsPanelRect(),
+                    initialDirectory: _translateInitialDirectory(),
+                    onSelected: (path) async {
+                      // 选本地目录时按目录内容把引擎定对：有 Argos 包用 argos，
+                      // 否则（只有 mt/m2m100）用 m2m100，避免「校验命中 M2M、
+                      // 翻译却按 argos 找不到语言包」。
+                      var engine = 'argos';
+                      try {
+                        final result = await _translateService
+                            .validateTranslateModelsDir(path);
+                        engine = result.argosPacks > 0 ? 'argos' : 'm2m100';
+                      } on Object {
+                        // 校验器刚放行过，异常只可能是竞态；退回 argos。
+                      }
+                      if (!mounted) return;
+                      _applySettings(
+                        _settings.copyWith(
+                          translateModelsDir: path,
+                          translateEngine: engine,
+                        ),
+                      );
+                    },
+                  ),
+                  child: Text(L.pick(context, '选择目录', 'Choose folder')),
+                ),
+              ),
+            ],
+          ),
+        ],
+      ),
     );
   }
 
@@ -4693,6 +4811,7 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
                           ),
                           directoryMode: true,
                           requiresOcrModels: true,
+                          anchorRect: _settingsPanelRect(),
                           initialDirectory: _ocrInitialDirectory(),
                           onSelected: (path) => _applySettings(
                             _settings.copyWith(ocrLocalPath: path),
@@ -5757,6 +5876,7 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
         target: target,
         ocrModel: _settings.ocrModelForSidecar,
         engine: _settings.translateEngine,
+        modelsDir: _settings.translateModelsDir.trim(),
       )) {
         if (!mounted) return;
         switch (event.type) {
@@ -5840,6 +5960,7 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
         texts,
         target,
         engine: _settings.translateEngine,
+        modelsDir: _settings.translateModelsDir.trim(),
         onStatus: _setTranslateStatus,
       );
     }

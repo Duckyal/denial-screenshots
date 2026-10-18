@@ -472,6 +472,7 @@ class TranslateService {
     List<String> texts,
     String target, {
     String engine = 'argos',
+    String modelsDir = '',
     void Function(String message)? onStatus,
   }) async {
     if (!await isReady()) {
@@ -489,6 +490,7 @@ class TranslateService {
         'mode': 'texts',
         'texts': texts,
         'engine': engine,
+        'models_dir': modelsDir,
       });
     });
 
@@ -517,6 +519,40 @@ class TranslateService {
         L.s('翻译组件没有返回结果', 'The translation component returned no result'),
       );
     return translations;
+  }
+
+  /// 用 sidecar 自己的发现逻辑校验本地翻译模型目录（只扫描、不加载权重）：
+  /// 返回该目录里可用的 Argos 语言包数与 M2M 是否就绪。校验和运行时加载共用
+  /// 同一套判据，不会出现「选的时候过、翻译的时候挂」。依赖未装好时抛异常。
+  Future<({int argosPacks, bool m2m})> validateTranslateModelsDir(
+    String dir,
+  ) async {
+    if (!await isReady()) {
+      throw Exception(
+        L.s(
+          '翻译组件未安装，无法校验目录',
+          'Translation component not installed; cannot validate the folder',
+        ),
+      );
+    }
+    final events = await _serialized(() async {
+      await _ensureStarted();
+      return _requestEvents({'mode': 'validate_dir', 'models_dir': dir});
+    });
+    for (final event in events) {
+      switch (event['event']) {
+        case 'done':
+          return (
+            argosPacks: (event['argos_packs'] as num?)?.toInt() ?? 0,
+            m2m: event['m2m'] as bool? ?? false,
+          );
+        case 'error':
+          throw Exception(
+            event['message'] as String? ?? L.s('校验失败', 'Validation failed'),
+          );
+      }
+    }
+    throw Exception(L.s('校验没有返回结果', 'Validation returned no result'));
   }
 
   /// 启动（或在进程退出后重启）常驻 sidecar，并挂上 stdout 逐行分发。
@@ -635,6 +671,7 @@ class TranslateService {
     String mode = 'translate',
     String ocrModel = 'builtin',
     String engine = 'argos',
+    String modelsDir = '',
   }) async* {
     final ready = await isReady();
     if (!ready) {
@@ -659,6 +696,7 @@ class TranslateService {
         'mode': mode,
         'ocr_model': ocrModel,
         'engine': engine,
+        'models_dir': modelsDir,
       });
     });
 
