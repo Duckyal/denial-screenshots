@@ -5,8 +5,6 @@ QQ 风格截图标注工具，按 [denial-plugins](https://github.com/denialwm/d
 
 [English](README.en.md) | 简体中文
 
-> 想把它搬到别的桌面？见 [docs/PORTING.md](docs/PORTING.md)：多桌面适配计划（暂缓实施）。
-
 ## 这是什么
 
 捕获、区域选择、写 PNG、发布剪贴板全部由合成器 `deniald` 完成；
@@ -43,6 +41,27 @@ QQ 风格截图标注工具，按 [denial-plugins](https://github.com/denialwm/d
 
 设置文件：`~/.config/denial-screenshots/settings.json`。
 截图目录可用环境变量 `DENIAL_SCREENSHOT_DIR` 覆盖（默认 `~/Pictures/Screenshots`）。
+
+## 与同类工具对比
+
+和常见的截图标注工具相比（✔ 支持 / ✘ 不支持 / — 视版本而定）：
+
+| 维度 | denial-screenshots | mark-shot | QQ 截图 |
+|---|---|---|---|
+| 形态 | Denial shell **进程内插件**，无独立窗口 | 独立 Wayland 应用 | 随 QQ 客户端 |
+| 平台 | Denial（Wayland） | Linux / Wayland | Windows（Linux 版功能受限） |
+| 开源 | ✔ 开源 | ✔ 开源 | ✘ 闭源 |
+| 标注工具 | 画笔 / 直线 / 箭头 / 矩形 / 圆 / 文字 / 马赛克 / **荧光笔** / 橡皮 | 基础标注（矩形 / 箭头 / 文字 / 马赛克等） | 基础标注（矩形 / 箭头 / 文字 / 马赛克等） |
+| 就地编辑已绘图形 | ✔ 选中改色与粗细、双击改文字 | — | — |
+| 置顶贴图 | ✔ | ✔ | ✔ |
+| 长截图 / 滚动拼接 | ✔ | — | ✔ |
+| 文字识别 OCR | ✔ 本地 RapidOCR + 在线视觉模型 | ✘ | ✔（联网） |
+| 翻译 | ✔ **本地离线**（Argos / M2M）+ 在线 API | ✘ | ✔（联网、腾讯） |
+| 完全离线可用 | ✔ | ✔ | ✘ 需登录 QQ |
+| 取字 / 翻译进度可见 | ✔ 浮层实时显示耗时与原因 | ✘ | — |
+| 界面多语言 | ✔ 中 / 英 | — | — |
+
+差异点主要是三处：**嵌进合成器的插件形态**（不是又开一个 app）、**本地离线的 OCR + 翻译**（不联网也能取字翻译，进度可见），以及**中英双语界面**。
 
 ## 安装
 

@@ -13,6 +13,8 @@ environment:
 dependencies:
   flutter:
     sdk: flutter
+  flutter_localizations:
+    sdk: flutter
   crypto: ^3.0.6
   denial_sdk: '0.0.0'
   denial_flutter_sdk: '0.0.0'

@@ -75,6 +75,19 @@ class ToolCursorPainter extends CustomPainter {
       return;
     }
 
+    // 荧光笔：光标圈填充用实际落笔色（半透明），与画出的高亮一致；再套
+    // 白环 + 黑边，任意底色都辨得出位置。
+    if (tool == ScreenshotToolType.highlighter) {
+      canvas.drawCircle(
+        position,
+        radius,
+        Paint()..color = color.withValues(alpha: 0.4),
+      );
+      ring(radius, 3.2, Colors.black.withValues(alpha: 0.9));
+      ring(radius, 1.6, Colors.white);
+      return;
+    }
+
     // 画笔：环体显示笔色，外面套白环 + 黑边，任意底色都辨得出位置。
     canvas.drawCircle(position, radius, Paint()..color = color);
     ring(radius, 3.2, Colors.black.withValues(alpha: 0.9));
@@ -221,9 +234,10 @@ class PreviewDrawPainter extends CustomPainter {
       oldDelegate.backgroundImage != backgroundImage;
 }
 
-/// OCR 文字选区高亮：把当前跨块选中的文字区间逐块涂成半透明蓝，贴合每块
-/// 的 OCR 框。矩形由调用方按字符比例算好（world 坐标），这里只负责画。
-/// 整层在 `_canvasKey` 重绘边界之外，保存/置顶不会带上。
+/// OCR 文字选区高亮：把当前跨块选中的文字区间逐块涂成半透明蓝，并沿每块
+/// 选中边界描一圈实线，让选中的文本轮廓清晰可辨。矩形由调用方按字符比例
+/// 算好（world 坐标），这里只负责画。整层在 `_canvasKey` 重绘边界之外，
+/// 保存/置顶不会带上。
 class OcrSelectionPainter extends CustomPainter {
   const OcrSelectionPainter({required this.rects});
 
@@ -232,9 +246,14 @@ class OcrSelectionPainter extends CustomPainter {
   @override
   void paint(Canvas canvas, Size size) {
     if (rects.isEmpty) return;
-    final paint = Paint()..color = const Color(0x6633AADD);
+    final fill = Paint()..color = const Color(0x6633AADD);
+    final border = Paint()
+      ..color = const Color(0xFF1E88C9)
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 1;
     for (final rect in rects) {
-      canvas.drawRect(rect, paint);
+      canvas.drawRect(rect, fill);
+      canvas.drawRect(rect, border);
     }
   }
 
@@ -265,6 +284,17 @@ void drawCommand(
             ? BlendMode.clear
             : BlendMode.srcOver;
       canvas.drawPath(command.path, paint);
+      break;
+    case ScreenshotToolType.highlighter:
+      // 荧光笔：像直线那样从起点画到终点（一条粗线，盖住一行文字），
+      // 但强制半透明 + 圆头，叠在内容上像记号笔。用 srcOver 而非 multiply
+      // ——注释层是透明位图，栅格化后再叠到截图上，multiply 无背景可乘会失真。
+      final paint = Paint()
+        ..color = command.color.withValues(alpha: 0.4)
+        ..strokeWidth = command.strokeWidth
+        ..strokeCap = StrokeCap.round
+        ..blendMode = BlendMode.srcOver;
+      canvas.drawLine(command.start, command.end, paint);
       break;
     case ScreenshotToolType.line:
       final paint = Paint()

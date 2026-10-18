@@ -5,6 +5,7 @@ import 'dart:ui' show Color, Rect;
 
 import 'package:crypto/crypto.dart';
 
+import '../l10n.dart';
 import 'sidecar_source.dart';
 
 /// 翻译 sidecar 的宿主：管理 venv、按需安装依赖、spawn Python 进程并
@@ -14,6 +15,61 @@ const int apiTimeoutSeconds = 60;
 
 /// 建连超时：连不上就快点失败，别让用户对着一个「转圈」等一整分钟。
 const int apiConnectTimeoutSeconds = 10;
+
+/// sidecar 进度 / 错误消息的双语目录。Python 侧只发稳定的 `code`（并把
+/// 中文留在 `message` 作 zh 兜底与旧版兼容），带插值的另发 `params`；这里
+/// 按 code 渲染当前界面语言。占位符用 `{name}`，与事件 `params` 的键对应。
+const Map<String, (String, String)> _sidecarCatalog = {
+  'pack_skip': (
+    '跳过语言包 {dir}: {error}',
+    'Skipping language pack {dir}: {error}',
+  ),
+  'handle_error': ('处理失败：{error}', 'Processing failed: {error}'),
+  'load_m2m': ('加载 M2M 多语言模型…', 'Loading the M2M multilingual model…'),
+  'm2m_missing': (
+    'M2M 多语言模型还没下载，请在设置中下载后再用',
+    'M2M multilingual model isn’t downloaded yet — download it in Settings first',
+  ),
+  'no_pack': (
+    '未找到翻译语言包，请在设置中管理本地模型',
+    'No translation language pack found — manage local models in Settings',
+  ),
+  'load_mt': ('加载翻译模型…', 'Loading the translation model…'),
+  'no_lang_pair': ('没有 {src}→{tgt} 的语言包', 'No language pack for {src}→{tgt}'),
+  'no_lang_pair_detail': (
+    '没有 {src}→{tgt} 的语言包（已装：{available}）',
+    'No language pack for {src}→{tgt} (installed: {available})',
+  ),
+  'load_ocr': ('加载 OCR 模型…', 'Loading the OCR model…'),
+  'ocr_fallback': (
+    '所选 OCR 模型还没下载完，这次先用内置模型',
+    'The selected OCR model isn’t fully downloaded yet — using the built-in model this time',
+  ),
+  'recognizing': ('识别文字…', 'Recognizing text…'),
+};
+
+/// 把一条 sidecar 事件里的进度 / 错误消息渲染成当前界面语言。未知或没有
+/// `code` 时回落到事件自带的 `message`（中文），保持旧行为不变。
+String _sidecarText(Map<String, dynamic> event, {String? fallback}) {
+  final code = event['code'] as String?;
+  final entry = code == null ? null : _sidecarCatalog[code];
+  final message = event['message'] as String?;
+  if (entry == null) return message ?? fallback ?? '';
+  final params = <String, String>{
+    for (final e
+        in (event['params'] as Map<String, dynamic>? ?? const {}).entries)
+      e.key.toString(): e.value.toString(),
+  };
+  String render(String template) {
+    var out = template;
+    params.forEach((key, value) => out = out.replaceAll('{$key}', value));
+    return out;
+  }
+
+  // zh 优先用事件自带的真实 message（已含插值结果），缺失时再按 zh 模板渲染；
+  // en 用模板 + params 拼出。
+  return L.s(message ?? render(entry.$1), render(entry.$2));
+}
 
 /// API 返回非 200：带上服务端给的原因（限流、余额不足、模型不存在…），
 /// UI 直接展示，用户不用去猜。
@@ -47,7 +103,14 @@ class TranslateService {
   Future<void> _serialTail = Future<void>.value();
 
   static const _mirror = 'https://pypi.tuna.tsinghua.edu.cn/simple';
+  static const _pypiFallback = 'https://pypi.org/simple';
   static const _packages = [
+    'rapidocr',
+    // 统一 rapidocr 包不再自带推理引擎，必须显式装 onnxruntime，否则
+    // 加载模型时 ImportError。
+    'onnxruntime',
+    // 默认识字模型 PP-OCRv3 由这个老包提供（自带 ch_PP-OCRv3 det+rec，零
+    // 下载、中英识别稳）。它和统一包并存、各导各的 API。
     'rapidocr-onnxruntime',
     'ctranslate2',
     'sentencepiece',
@@ -62,49 +125,158 @@ class TranslateService {
   static const _ocrModelRepo =
       'https://www.modelscope.cn/models/RapidAI/RapidOCR/resolve/master';
 
-  /// 可选 OCR 模型：(key, 标签, 说明)。builtin 无需下载。
-  static const ocrModelCatalog = <(String, String, String)>[
-    ('builtin', '内置标准（PP-OCRv3）', '随识别组件自带，无需下载'),
-    ('v4mobile', '高精度（PP-OCRv4 移动版）', '约 16MB，精度更高、速度接近'),
-    ('v4server', '超高精度（PP-OCRv4 服务器版）', '约 204MB，CPU 识别明显变慢'),
-  ];
+  /// 可选 OCR 模型：(key, 标签, 说明)。v3/builtin 自带离线无需下载。
+  static const ocrModelCatalog =
+      <(String, ({String zh, String en}), ({String zh, String en}))>[
+        (
+          'v3',
+          (zh: '经典 PP-OCRv3（中英）', en: 'PP-OCRv3 classic (Zh/En)'),
+          (
+            zh: '自带离线 · 中英识别稳 · CPU 快 · 默认',
+            en: 'Built-in offline · solid Zh/En · fast on CPU · default',
+          ),
+        ),
+        (
+          'v4mobile',
+          (zh: 'PP-OCRv4 移动版（中英）', en: 'PP-OCRv4 mobile (Zh/En)'),
+          (
+            zh: '约 15MB · 中英比 v3 覆盖更全 · 速度快',
+            en: '~15MB · broader Zh/En than v3 · fast',
+          ),
+        ),
+        (
+          'v4server',
+          (zh: 'PP-OCRv4 服务端（中英）', en: 'PP-OCRv4 server (Zh/En)'),
+          (
+            zh: '约 120MB · 中英精度更高 · CPU 较慢',
+            en: '~120MB · higher Zh/En accuracy · slower on CPU',
+          ),
+        ),
+        (
+          'v5mobile',
+          (zh: 'PP-OCRv5 移动版（多语种）', en: 'PP-OCRv5 mobile (multilingual)'),
+          (
+            zh: '约 20MB · 简繁中英等语种更广 · 速度均衡',
+            en: '~20MB · wider languages (S/Trad Chinese, En…) · balanced speed',
+          ),
+        ),
+        (
+          'v5server',
+          (zh: 'PP-OCRv5 服务端（多语种）', en: 'PP-OCRv5 server (multilingual)'),
+          (
+            zh: '体积大 · 精度更高 · CPU 明显更慢',
+            en: 'Large · higher accuracy · clearly slower on CPU',
+          ),
+        ),
+        (
+          'builtin',
+          (zh: 'PP-OCRv6 small（多语言）', en: 'PP-OCRv6 small (multilingual)'),
+          (
+            zh: '自带离线 · 51 语种（简/繁中·英·日·法德西等）· 精度均衡',
+            en: 'Built-in offline · 51 languages (S/Trad Chinese·En·Ja·Fr/De/Es…) · balanced accuracy',
+          ),
+        ),
+        (
+          'v6tiny',
+          (zh: 'PP-OCRv6 tiny（多语言）', en: 'PP-OCRv6 tiny (multilingual)'),
+          (
+            zh: '约 6MB · 最快最省 · 50 语种（比内置少日文）',
+            en: '~6MB · fastest/leanest · 50 languages (no Japanese vs built-in)',
+          ),
+        ),
+        (
+          'v6medium',
+          (zh: 'PP-OCRv6 medium（多语言）', en: 'PP-OCRv6 medium (multilingual)'),
+          (
+            zh: '约 139MB · 精度最高 · 同 51 语种 · CPU 识别明显更慢',
+            en: '~139MB · highest accuracy · same 51 languages · clearly slower on CPU',
+          ),
+        ),
+        (
+          'api',
+          (zh: '在线（视觉大模型）', en: 'Online (vision LLM)'),
+          (
+            zh: '复用翻译 API 端点 · 能读文字但框定位常不准（漏行/粗框/幻觉）· 要精确定位请用上面的本地 PP-OCR',
+            en:
+                'Reuses the translation API · reads text but boxes are often off '
+                '(missed lines / coarse / hallucination) · use a local PP-OCR above for precise positioning',
+          ),
+        ),
+        (
+          'local',
+          (zh: '本地模型（自选目录）', en: 'Local model (own directory)'),
+          (
+            zh: '指向一个含 det/rec 的 .onnx 的本地目录 · 不走内置下载清单',
+            en: 'Point at a local dir with det/rec .onnx files · outside the built-in download catalog',
+          ),
+        ),
+      ];
+
+  /// 自带离线、无需下载的模型：builtin = 统一包内置 v6 small；v3 = 遗留包
+  /// rapidocr_onnxruntime 自带（默认模型）。
+  static const _bundledOcr = {'builtin', 'v3'};
+
+  /// 需下载的离线模型：key -> (ModelScope 版本目录, det 文件名, rec 文件名)。
+  static const _downloadableOcr = <String, (String, String, String)>{
+    'v4mobile': (
+      'PP-OCRv4',
+      'ch_PP-OCRv4_det_mobile.onnx',
+      'ch_PP-OCRv4_rec_mobile.onnx',
+    ),
+    'v4server': (
+      'PP-OCRv4',
+      'ch_PP-OCRv4_det_server.onnx',
+      'ch_PP-OCRv4_rec_server.onnx',
+    ),
+    'v5mobile': (
+      'PP-OCRv5',
+      'ch_PP-OCRv5_det_mobile.onnx',
+      'ch_PP-OCRv5_rec_mobile.onnx',
+    ),
+    'v5server': (
+      'PP-OCRv5',
+      'ch_PP-OCRv5_det_server.onnx',
+      'ch_PP-OCRv5_rec_server.onnx',
+    ),
+    'v6tiny': ('PP-OCRv6', 'PP-OCRv6_det_tiny.onnx', 'PP-OCRv6_rec_tiny.onnx'),
+    'v6medium': (
+      'PP-OCRv6',
+      'PP-OCRv6_det_medium.onnx',
+      'PP-OCRv6_rec_medium.onnx',
+    ),
+  };
 
   static String _ocrModelDir(String key) => '$dataDir/models/ocr/$key';
 
-  static String? _ocrModelFile(String key, String part) {
-    final suffix = switch (key) {
-      'v4server' => 'server',
-      'v4mobile' => 'mobile',
-      _ => null,
-    };
-    if (suffix == null) return null;
-    return 'ch_PP-OCRv4_${part}_$suffix.onnx';
-  }
+  /// 该识字模型是否需要下载（内置 v3/builtin 与在线 api 都不用）。
+  static bool isDownloadableOcr(String key) =>
+      _downloadableOcr.containsKey(key);
 
-  /// 高精度 OCR 模型（det+rec 两个文件）是否已下载就绪。
+  /// OCR 模型（det+rec 两个文件）是否已就绪。内置模型恒为已就绪。
   Future<bool> isOcrModelInstalled(String key) async {
-    if (key == 'builtin') return true;
-    for (final part in ['det', 'rec']) {
-      final name = _ocrModelFile(key, part);
-      if (name == null) return true;
+    if (_bundledOcr.contains(key)) return true;
+    final entry = _downloadableOcr[key];
+    if (entry == null) return true;
+    for (final name in [entry.$2, entry.$3]) {
       if (!await File('${_ocrModelDir(key)}/$name').exists()) return false;
     }
     return true;
   }
 
-  /// 下载所选 OCR 模型（[onStatus] 汇报进度）。
+  /// 下载所选 OCR 模型（[onStatus] 汇报进度）。内置模型无操作。
   Future<void> installOcrModel(
     String key, {
     void Function(String)? onStatus,
   }) async {
-    for (final part in ['det', 'rec']) {
-      final name = _ocrModelFile(key, part);
-      if (name == null) return;
+    final entry = _downloadableOcr[key];
+    if (entry == null) return;
+    final files = <(String, String)>[('det', entry.$2), ('rec', entry.$3)];
+    for (final (part, name) in files) {
       final dest = File('${_ocrModelDir(key)}/$name');
       if (await dest.exists()) continue;
-      onStatus?.call('下载 $name…');
+      onStatus?.call(L.s('下载 $name…', 'Downloading $name…'));
       await Directory(_ocrModelDir(key)).create(recursive: true);
-      await _download('$_ocrModelRepo/onnx/PP-OCRv4/$part/$name', dest);
+      await _download('$_ocrModelRepo/onnx/${entry.$1}/$part/$name', dest);
     }
   }
 
@@ -116,12 +288,55 @@ class TranslateService {
     }
   }
 
+  /// M2M-100 418M（JustFrederik 版）：单模型多语言翻译，走 HF 镜像下载。
+  /// 只有这个仓库的转换能在 ctranslate2 4.8.2 下正常解码（另几家会退化
+  /// 重复或加载报错，已逐一实测）。sp 文件在仓库里叫 spm.128k.model，
+  /// 落地时统一改成 sidecar 认识的 sentencepiece.bpe.model。
+  static const _m2mRepo =
+      '$_hfMirror/JustFrederik/m2m_100_418m_ct2_int8/resolve/main';
+  static const _m2mFiles = <(String, String)>[
+    ('config.json', 'config.json'),
+    ('shared_vocabulary.txt', 'shared_vocabulary.txt'),
+    ('spm.128k.model', 'sentencepiece.bpe.model'),
+    ('model.bin', 'model.bin'),
+  ];
+
+  static String _m2mDir() => '$dataDir/models/mt/m2m100';
+
+  /// M2M 模型（四个文件齐全）是否已下载就绪。
+  Future<bool> isM2mInstalled() async {
+    for (final (_, local) in _m2mFiles) {
+      if (!await File('${_m2mDir()}/$local').exists()) return false;
+    }
+    return true;
+  }
+
+  /// 下载 M2M-100 418M（约 490MB，走 HF 镜像；[onStatus] 汇报进度）。
+  Future<void> installM2m({void Function(String)? onStatus}) async {
+    await Directory(_m2mDir()).create(recursive: true);
+    for (final (remote, local) in _m2mFiles) {
+      if (await File('${_m2mDir()}/$local').exists()) continue;
+      onStatus?.call(L.s('下载 M2M 模型 $local…', 'Downloading M2M model $local…'));
+      await _download('$_m2mRepo/$remote', File('${_m2mDir()}/$local'));
+    }
+  }
+
+  Future<void> deleteM2m() async {
+    final dir = Directory(_m2mDir());
+    if (await dir.exists()) {
+      await dir.delete(recursive: true);
+    }
+  }
+
   static const _languagePacks = ['translate-en_zh', 'translate-zh_en'];
 
   static String get home => Platform.environment['HOME'] ?? '/';
   static String get dataDir => '$home/.local/share/denial-screenshots';
   static String get venvPython => '$dataDir/venv/bin/python';
   static String get sidecarScript => '$dataDir/sidecar/translate.py';
+
+  /// 可下载 OCR 模型的根目录（选本地模型目录时默认落这里，含已下载的子目录）。
+  static String get ocrModelsRoot => '$dataDir/models/ocr';
 
   Future<bool>? _readyCache;
 
@@ -138,7 +353,7 @@ class TranslateService {
     try {
       final result = await Process.run(venvPython, [
         '-c',
-        'import rapidocr_onnxruntime, ctranslate2, sentencepiece, PIL',
+        'import rapidocr, rapidocr_onnxruntime, onnxruntime, ctranslate2, sentencepiece, PIL',
       ]);
       return result.exitCode == 0;
     } on Object {
@@ -163,7 +378,10 @@ class TranslateService {
   Stream<TranslateSetupEvent> install() async* {
     _readyCache = null;
     try {
-      yield const TranslateSetupEvent('status', '创建 Python 环境…');
+      yield TranslateSetupEvent(
+        'status',
+        L.s('创建 Python 环境…', 'Creating the Python environment…'),
+      );
       final directory = Directory(dataDir);
       if (!await directory.exists()) {
         await directory.create(recursive: true);
@@ -171,7 +389,10 @@ class TranslateService {
       if (!await File(venvPython).exists()) {
         final venv = await Process.run('python3', ['--version']);
         if (venv.exitCode != 0) {
-          yield const TranslateSetupEvent('error', '系统缺少 python3');
+          yield TranslateSetupEvent(
+            'error',
+            L.s('系统缺少 python3', 'python3 is missing on this system'),
+          );
           return;
         }
         final create = await Process.run('python3', [
@@ -182,13 +403,21 @@ class TranslateService {
         if (create.exitCode != 0) {
           yield TranslateSetupEvent(
             'error',
-            '创建 venv 失败：${create.stderr}'.trim(),
+            L
+                .s(
+                  '创建 venv 失败：${create.stderr}',
+                  'Failed to create venv: ${create.stderr}',
+                )
+                .trim(),
           );
           return;
         }
       }
 
-      yield const TranslateSetupEvent('status', '安装 OCR 与翻译模型…');
+      yield TranslateSetupEvent(
+        'status',
+        L.s('安装 OCR 与翻译模型…', 'Installing OCR and translation models…'),
+      );
       final pip = await Process.start(venvPython, [
         '-m',
         'pip',
@@ -196,6 +425,9 @@ class TranslateService {
         '--quiet',
         '-i',
         _mirror,
+        // 新统一包 rapidocr 偶有镜像未同步/限流，回退官方 PyPI 保证能装上。
+        '--extra-index-url',
+        _pypiFallback,
         ..._packages,
       ]);
       pip.stdout.transform(utf8.decoder).listen((_) {});
@@ -203,11 +435,17 @@ class TranslateService {
       pip.stderr.transform(utf8.decoder).listen(stderr.write);
       final code = await pip.exitCode;
       if (code != 0) {
-        yield TranslateSetupEvent('error', '依赖安装失败：$stderr'.trim());
+        yield TranslateSetupEvent(
+          'error',
+          L.s('依赖安装失败：$stderr', 'Dependency install failed: $stderr').trim(),
+        );
         return;
       }
 
-      yield const TranslateSetupEvent('status', '部署翻译服务…');
+      yield TranslateSetupEvent(
+        'status',
+        L.s('部署翻译服务…', 'Deploying the translation service…'),
+      );
       await deploySidecar();
 
       for (final pack in _languagePacks) {
@@ -221,14 +459,26 @@ class TranslateService {
                 .any((entry) => entry.path.endsWith('metadata.json'));
         if (alreadyInstalled) continue;
         final archive = File('$dataDir/$pack.argosmodel');
-        yield TranslateSetupEvent('status', '下载语言包 $pair（约 70MB，走 HF 镜像）…');
+        yield TranslateSetupEvent(
+          'status',
+          L.s(
+            '下载语言包 $pair（约 70MB，走 HF 镜像）…',
+            'Downloading language pack $pair (~70MB via HF mirror)…',
+          ),
+        );
         try {
           await _download('$_packRepo/$pack.argosmodel', archive);
         } on Object catch (error) {
-          yield TranslateSetupEvent('error', '语言包下载失败：$error');
+          yield TranslateSetupEvent(
+            'error',
+            L.s('语言包下载失败：$error', 'Language pack download failed: $error'),
+          );
           return;
         }
-        yield TranslateSetupEvent('status', '解压语言包 $pair…');
+        yield TranslateSetupEvent(
+          'status',
+          L.s('解压语言包 $pair…', 'Extracting language pack $pair…'),
+        );
         final extract = await Process.run(venvPython, [
           '-c',
           'import zipfile, sys; '
@@ -239,7 +489,12 @@ class TranslateService {
         if (extract.exitCode != 0) {
           yield TranslateSetupEvent(
             'error',
-            '语言包解压失败：${extract.stderr}'.trim(),
+            L
+                .s(
+                  '语言包解压失败：${extract.stderr}',
+                  'Language pack extraction failed: ${extract.stderr}',
+                )
+                .trim(),
           );
           return;
         }
@@ -247,12 +502,21 @@ class TranslateService {
 
       final ready = await isReady();
       if (!ready) {
-        yield const TranslateSetupEvent('error', '依赖校验失败');
+        yield TranslateSetupEvent(
+          'error',
+          L.s('依赖校验失败', 'Dependency validation failed'),
+        );
         return;
       }
-      yield const TranslateSetupEvent('ready', '翻译组件就绪');
+      yield TranslateSetupEvent(
+        'ready',
+        L.s('翻译组件就绪', 'Translation component ready'),
+      );
     } on Object catch (error) {
-      yield TranslateSetupEvent('error', '安装失败：$error');
+      yield TranslateSetupEvent(
+        'error',
+        L.s('安装失败：$error', 'Installation failed: $error'),
+      );
     }
   }
 
@@ -262,10 +526,17 @@ class TranslateService {
   Future<List<(String, bool)>> translateTextsLocal(
     List<String> texts,
     String target, {
+    String engine = 'argos',
+    String modelsDir = '',
     void Function(String message)? onStatus,
   }) async {
     if (!await isReady()) {
-      throw Exception('翻译组件未安装，请先在设置中安装');
+      throw Exception(
+        L.s(
+          '翻译组件未安装，请先在设置中安装',
+          'Translation component not installed; install it in Settings first',
+        ),
+      );
     }
     final events = await _serialized(() async {
       await _ensureStarted();
@@ -273,6 +544,8 @@ class TranslateService {
         'target': target,
         'mode': 'texts',
         'texts': texts,
+        'engine': engine,
+        'models_dir': modelsDir,
       });
     });
 
@@ -289,14 +562,54 @@ class TranslateService {
               ),
           ];
         case 'error':
-          errorMessage = event['message'] as String? ?? '翻译失败';
+          errorMessage = _sidecarText(
+            event,
+            fallback: L.s('翻译失败', 'Translation failed'),
+          );
         case 'status':
-          onStatus?.call(event['message'] as String? ?? '');
+          onStatus?.call(_sidecarText(event));
       }
     }
     if (errorMessage != null) throw Exception(errorMessage);
-    if (translations == null) throw Exception('翻译组件没有返回结果');
+    if (translations == null)
+      throw Exception(
+        L.s('翻译组件没有返回结果', 'The translation component returned no result'),
+      );
     return translations;
+  }
+
+  /// 用 sidecar 自己的发现逻辑校验本地翻译模型目录（只扫描、不加载权重）：
+  /// 返回该目录里可用的 Argos 语言包数与 M2M 是否就绪。校验和运行时加载共用
+  /// 同一套判据，不会出现「选的时候过、翻译的时候挂」。依赖未装好时抛异常。
+  Future<({int argosPacks, bool m2m})> validateTranslateModelsDir(
+    String dir,
+  ) async {
+    if (!await isReady()) {
+      throw Exception(
+        L.s(
+          '翻译组件未安装，无法校验目录',
+          'Translation component not installed; cannot validate the folder',
+        ),
+      );
+    }
+    final events = await _serialized(() async {
+      await _ensureStarted();
+      return _requestEvents({'mode': 'validate_dir', 'models_dir': dir});
+    });
+    for (final event in events) {
+      switch (event['event']) {
+        case 'done':
+          return (
+            argosPacks: (event['argos_packs'] as num?)?.toInt() ?? 0,
+            m2m: event['m2m'] as bool? ?? false,
+          );
+        case 'error':
+          throw Exception(
+            _sidecarText(event, fallback: L.s('校验失败', 'Validation failed')),
+          );
+      }
+    }
+    throw Exception(L.s('校验没有返回结果', 'Validation returned no result'));
   }
 
   /// 启动（或在进程退出后重启）常驻 sidecar，并挂上 stdout 逐行分发。
@@ -317,7 +630,9 @@ class TranslateService {
         final waiting = _lineWait;
         if (waiting != null) {
           _lineWait = null;
-          waiting.complete('{"event":"error","message":"翻译进程已退出"}');
+          waiting.complete(
+            '{"event":"error","message":"${L.s('翻译进程已退出', 'The translation process exited')}"}',
+          );
         }
       }),
     );
@@ -346,7 +661,9 @@ class TranslateService {
       return Future.value(_lineQueue.removeAt(0));
     }
     if (!_procAlive) {
-      return Future.value('{"event":"error","message":"翻译进程已退出"}');
+      return Future.value(
+        '{"event":"error","message":"${L.s('翻译进程已退出', 'The translation process exited')}"}',
+      );
     }
     final completer = Completer<String>();
     _lineWait = completer;
@@ -367,7 +684,7 @@ class TranslateService {
   ) async {
     final process = _proc;
     if (process == null || !_procAlive) {
-      throw Exception('翻译进程不可用');
+      throw Exception(L.s('翻译进程不可用', 'The translation process is unavailable'));
     }
     process.stdin.writeln(jsonEncode(request));
     await process.stdin.flush();
@@ -414,10 +731,18 @@ class TranslateService {
     required String target,
     String mode = 'translate',
     String ocrModel = 'builtin',
+    String engine = 'argos',
+    String modelsDir = '',
   }) async* {
     final ready = await isReady();
     if (!ready) {
-      yield const TranslateEvent('error', message: '翻译组件未安装，请先在设置中安装');
+      yield TranslateEvent(
+        'error',
+        message: L.s(
+          '翻译组件未安装，请先在设置中安装',
+          'Translation component not installed; install it in Settings first',
+        ),
+      );
       return;
     }
     final tempInput = File('$dataDir/translate-input.png');
@@ -431,6 +756,8 @@ class TranslateService {
         'target': target,
         'mode': mode,
         'ocr_model': ocrModel,
+        'engine': engine,
+        'models_dir': modelsDir,
       });
     });
 
@@ -472,15 +799,9 @@ class TranslateService {
         }).toList();
         yield TranslateEvent('done', regions: regions);
       } else if (type == 'error') {
-        yield TranslateEvent(
-          'error',
-          message: event['message'] as String? ?? '',
-        );
+        yield TranslateEvent('error', message: _sidecarText(event));
       } else if (type == 'status') {
-        yield TranslateEvent(
-          'status',
-          message: event['message'] as String? ?? '',
-        );
+        yield TranslateEvent('status', message: _sidecarText(event));
       }
     }
   }
@@ -508,21 +829,21 @@ class TranslateService {
   }
 
   /// 可下载的语言包目录（HF 镜像仓库均存在，已逐一探测）。
-  static const packCatalog = <(String, String, String)>[
-    ('en', 'zh', '英语 → 中文'),
-    ('zh', 'en', '中文 → 英语'),
-    ('en', 'ja', '英语 → 日语'),
-    ('ja', 'en', '日语 → 英语'),
-    ('en', 'ko', '英语 → 韩语'),
-    ('ko', 'en', '韩语 → 英语'),
-    ('en', 'fr', '英语 → 法语'),
-    ('fr', 'en', '法语 → 英语'),
-    ('en', 'de', '英语 → 德语'),
-    ('de', 'en', '德语 → 英语'),
-    ('en', 'ru', '英语 → 俄语'),
-    ('ru', 'en', '俄语 → 英语'),
-    ('en', 'es', '英语 → 西班牙语'),
-    ('es', 'en', '西班牙语 → 英语'),
+  static const packCatalog = <(String, String, ({String zh, String en}))>[
+    ('en', 'zh', (zh: '英语 → 中文', en: 'English → Chinese')),
+    ('zh', 'en', (zh: '中文 → 英语', en: 'Chinese → English')),
+    ('en', 'ja', (zh: '英语 → 日语', en: 'English → Japanese')),
+    ('ja', 'en', (zh: '日语 → 英语', en: 'Japanese → English')),
+    ('en', 'ko', (zh: '英语 → 韩语', en: 'English → Korean')),
+    ('ko', 'en', (zh: '韩语 → 英语', en: 'Korean → English')),
+    ('en', 'fr', (zh: '英语 → 法语', en: 'English → French')),
+    ('fr', 'en', (zh: '法语 → 英语', en: 'French → English')),
+    ('en', 'de', (zh: '英语 → 德语', en: 'English → German')),
+    ('de', 'en', (zh: '德语 → 英语', en: 'German → English')),
+    ('en', 'ru', (zh: '英语 → 俄语', en: 'English → Russian')),
+    ('ru', 'en', (zh: '俄语 → 英语', en: 'Russian → English')),
+    ('en', 'es', (zh: '英语 → 西班牙语', en: 'English → Spanish')),
+    ('es', 'en', (zh: '西班牙语 → 英语', en: 'Spanish → English')),
   ];
 
   static String _packDir(String from, String to) =>
@@ -536,6 +857,16 @@ class TranslateService {
         .any((entry) => entry.path.endsWith('metadata.json'));
   }
 
+  /// Argos 引擎能否产出 [target]：目录里存在某个「→target」语言包且已下载。
+  /// 命中即视为该目标语言有本地模型（缺则点翻译前先提醒去安装/下载）。
+  Future<bool> canProduceTargetLanguage(String target) async {
+    for (final (from, to, _) in packCatalog) {
+      if (to != target) continue;
+      if (await isPackInstalled(from, to)) return true;
+    }
+    return false;
+  }
+
   /// 下载并解压语言包（走 HF 镜像）。[onStatus] 汇报进度。
   Future<void> installPack(
     String from,
@@ -543,11 +874,15 @@ class TranslateService {
     void Function(String)? onStatus,
   }) async {
     final pack = 'translate-${from}_$to';
-    onStatus?.call('下载 $from→$to 语言包…');
+    onStatus?.call(
+      L.s('下载 $from→$to 语言包…', 'Downloading $from→$to language pack…'),
+    );
     final archive = File('$dataDir/$pack.argosmodel');
     await Directory(dataDir).create(recursive: true);
     await _download('$_packRepo/$pack.argosmodel', archive);
-    onStatus?.call('解压 $from→$to 语言包…');
+    onStatus?.call(
+      L.s('解压 $from→$to 语言包…', 'Extracting $from→$to language pack…'),
+    );
     final extract = await Process.run(venvPython, [
       '-c',
       'import zipfile; '
@@ -556,7 +891,9 @@ class TranslateService {
     ]);
     await archive.delete();
     if (extract.exitCode != 0) {
-      throw Exception('解压失败：${extract.stderr}');
+      throw Exception(
+        L.s('解压失败：${extract.stderr}', 'Extraction failed: ${extract.stderr}'),
+      );
     }
   }
 
@@ -565,6 +902,268 @@ class TranslateService {
     if (await dir.exists()) {
       await dir.delete(recursive: true);
     }
+  }
+
+  /// 把 OpenAI 兼容 base URL 规整成 chat/completions 端点。路径已带版本段
+  /// （DeepSeek /v1、智谱 /v4…）只补 chat/completions，否则补 /v1/chat/completions。
+  Uri _chatCompletionsUri(String endpoint) {
+    var url = endpoint.trim().replaceAll(RegExp(r'/+$'), '');
+    if (!url.contains('chat/completions')) {
+      final path = Uri.parse(url).path;
+      url = path.contains('/v1') || RegExp(r'/v\d+$').hasMatch(path)
+          ? '$url/chat/completions'
+          : '$url/v1/chat/completions';
+    }
+    return Uri.parse(url);
+  }
+
+  /// 从模型回复里抠出第一个 JSON 数组（容忍 markdown 代码围栏）。
+  List<dynamic>? _extractJsonArray(String content) {
+    final cleaned = content.replaceAll(RegExp(r'```[A-Za-z0-9]*'), '');
+    final start = cleaned.indexOf('[');
+    final end = cleaned.lastIndexOf(']');
+    if (start < 0 || end <= start) return null;
+    try {
+      final decoded = jsonDecode(cleaned.substring(start, end + 1));
+      return decoded is List ? decoded : null;
+    } on FormatException {
+      return null;
+    }
+  }
+
+  /// 在线视觉大模型识字：把截图交给 OpenAI 兼容的 vision 端点，取回文字块
+  /// 和像素框。复用翻译 API 的同一套 endpoint / key / model 配置。
+  /// 返回的 region 只带文字与框（背景/前景色为空，落图时退到设置里的固定色）。
+  Future<List<TranslateRegion>> ocrViaApi({
+    required List<int> imageBytes,
+    required int width,
+    required int height,
+    required String endpoint,
+    required String apiKey,
+    required String model,
+    void Function(String note)? onRetry,
+  }) async {
+    if (endpoint.trim().isEmpty) {
+      throw Exception(
+        L.s('未配置 API 地址，请在设置中填写', 'No API endpoint set; fill it in Settings'),
+      );
+    }
+    if (model.trim().isEmpty) {
+      throw Exception(
+        L.s(
+          '未配置模型名，请在设置中填写（需支持图片输入）',
+          'No model set; fill one in Settings (must accept image input)',
+        ),
+      );
+    }
+    final uri = _chatCompletionsUri(endpoint);
+    final disableThinking =
+        uri.host.endsWith('bigmodel.cn') || uri.host.endsWith('z.ai');
+    final dataUrl = 'data:image/png;base64,${base64Encode(imageBytes)}';
+    final prompt =
+        'Extract ALL visible text from this image as OCR. For every text '
+        'segment, give its bounding box plus the exact original text. Reply '
+        'ONLY with a JSON array, no prose, each element shaped like '
+        '{"text": "原文", "box": [x, y, w, h]} where the box is NORMALIZED to '
+        'the range 0.0-1.0: x,y is the top-left corner and w,h the width and '
+        'height, all as fractions of the image width/height (0.0 = left/top, '
+        '1.0 = right/bottom). Do not use raw pixel values.';
+
+    Object? lastError;
+    for (var attempt = 0; attempt < 3; attempt++) {
+      if (attempt > 0) {
+        final wait = attempt * 2;
+        onRetry?.call(
+          L.s(
+            '限流/服务忙，${wait}s 后重试（第 $attempt 次）',
+            'Rate-limited / busy, retrying in ${wait}s (attempt $attempt)',
+          ),
+        );
+        await Future<void>.delayed(Duration(seconds: wait));
+      }
+      final client = HttpClient()
+        ..connectionTimeout = const Duration(seconds: apiConnectTimeoutSeconds);
+      try {
+        final request = await client.postUrl(uri);
+        request.headers.contentType = ContentType.json;
+        if (apiKey.isNotEmpty) {
+          request.headers.set('Authorization', 'Bearer $apiKey');
+        }
+        request.write(
+          jsonEncode({
+            'model': model.trim(),
+            'temperature': 0,
+            if (disableThinking) 'thinking': {'type': 'disabled'},
+            'messages': [
+              {
+                'role': 'user',
+                'content': [
+                  {'type': 'text', 'text': prompt},
+                  {
+                    'type': 'image_url',
+                    'image_url': {'url': dataUrl},
+                  },
+                ],
+              },
+            ],
+          }),
+        );
+        final response = await request.close().timeout(
+          const Duration(seconds: apiTimeoutSeconds),
+        );
+        final body = await response.transform(utf8.decoder).join();
+        if (response.statusCode != HttpStatus.ok) {
+          final error = _apiErrorOf(response.statusCode, body);
+          if (attempt < 2 &&
+              (response.statusCode == 429 || response.statusCode >= 500)) {
+            lastError = error;
+            continue;
+          }
+          throw error;
+        }
+        final content =
+            ((((jsonDecode(body) as Map<String, dynamic>)['choices'] as List?)
+                            ?.first
+                        as Map<String, dynamic>?)?['message']
+                    as Map<String, dynamic>?)?['content']
+                as String?;
+        if (content == null || content.trim().isEmpty) {
+          throw Exception(L.s('API 返回为空', 'The API returned empty'));
+        }
+        return _parseApiOcr(content, width, height);
+      } on ApiTranslateException {
+        rethrow;
+      } on Object catch (error) {
+        if (attempt < 2 &&
+            (error is TimeoutException || error is SocketException)) {
+          lastError = error;
+          continue;
+        }
+        rethrow;
+      } finally {
+        client.close();
+      }
+    }
+    throw lastError ??
+        Exception(
+          L.s(
+            '在线识字 API 调用失败（已重试 2 次）',
+            'Online OCR API call failed (retried 2x)',
+          ),
+        );
+  }
+
+  /// 解析视觉模型的 OCR 回复为文字块：容忍 text/box 的多种键名与坐标写法。
+  ///
+  /// 关键：视觉大模型（GLM-4V / Qwen-VL 等）经常无视「用像素」的指令，回传
+  /// 归一化坐标——要么是 [0,1] 小数，要么是 [0,1000] 整数。所以先从所有框里
+  /// 取坐标最大值判定用的是哪种坐标系，换算回像素，再做越界/角点兜底。
+  List<TranslateRegion> _parseApiOcr(String content, int width, int height) {
+    final array = _extractJsonArray(content);
+    if (array == null) return const [];
+    // 先把有效条目挑出来，顺带记下所有坐标里的最大值（判定坐标系的依据）。
+    final entries = <List<num>>[];
+    final texts = <String>[];
+    var maxCoord = 0.0;
+    for (final raw in array) {
+      if (raw is! Map) continue;
+      final map = raw.cast<String, dynamic>();
+      final text =
+          (map['text'] ??
+                  map['txt'] ??
+                  map['content'] ??
+                  map['text_content'] ??
+                  map['words_result'] ??
+                  '')
+              .toString();
+      final box =
+          (map['box'] ??
+          map['bbox'] ??
+          map['bbox_2d'] ??
+          map['box_2d'] ??
+          map['rect']);
+      if (box is! List || box.length < 4 || text.trim().isEmpty) continue;
+      final nums = <double>[
+        for (final v in box.take(4))
+          if (v is num) v.toDouble() else double.tryParse(v.toString()) ?? 0.0,
+      ];
+      for (final v in nums) {
+        if (v > maxCoord) maxCoord = v;
+      }
+      entries.add(nums);
+      texts.add(text);
+    }
+    // 坐标系判定：
+    // - 最大坐标 ≤1.5 → [0,1] 归一化小数（乘宽高得像素）。
+    // - 最大坐标 ≤1050 而画布明显更大 → [0,1000] 归一化（除以 1000 再乘宽高）。
+    // - 其余按真实像素，原样用。
+    final double sx;
+    final double sy;
+    if (maxCoord <= 1.5) {
+      sx = width.toDouble();
+      sy = height.toDouble();
+    } else if (maxCoord <= 1050 && (width > 1100 || height > 1100)) {
+      sx = width / 1000.0;
+      sy = height / 1000.0;
+    } else {
+      sx = 1;
+      sy = 1;
+    }
+    // 角点 vs 宽高：视觉模型（Qwen-VL 等）常无视「[x,y,w,h]」而回传
+    // [x1,y1,x2,y2] 角点。单框无法区分（宽高也可能大于起点），整组可以：按
+    // 「宽高」解会把文字框撑得又高又互相重叠，按「角点」解则彼此不重叠。取重叠
+    // 更小的那种解释作为全体框的解法。
+    Rect rectFor(int i, bool asCorners) {
+      final box = entries[i];
+      final x = box[0].toDouble() * sx;
+      final y = box[1].toDouble() * sy;
+      final a = box[2].toDouble() * sx;
+      final b = box[3].toDouble() * sy;
+      final corner = asCorners && a > x && b > y;
+      final w = corner ? a - x : a;
+      final h = corner ? b - y : b;
+      return Rect.fromLTRB(
+        x.clamp(0.0, width.toDouble()),
+        y.clamp(0.0, height.toDouble()),
+        (x + w).clamp(0.0, width.toDouble()),
+        (y + h).clamp(0.0, width.toDouble()),
+      );
+    }
+
+    double overlapTotal(bool asCorners) {
+      var total = 0.0;
+      for (var i = 0; i < entries.length; i++) {
+        final ri = rectFor(i, asCorners);
+        for (var j = i + 1; j < entries.length; j++) {
+          final rj = rectFor(j, asCorners);
+          final l = ri.left > rj.left ? ri.left : rj.left;
+          final t = ri.top > rj.top ? ri.top : rj.top;
+          final r = ri.right < rj.right ? ri.right : rj.right;
+          final b = ri.bottom < rj.bottom ? ri.bottom : rj.bottom;
+          if (r > l && b > t) total += (r - l) * (b - t);
+        }
+      }
+      return total;
+    }
+
+    final asCorners =
+        entries.length > 1 && overlapTotal(true) < overlapTotal(false);
+
+    final regions = <TranslateRegion>[];
+    for (var i = 0; i < entries.length; i++) {
+      final rect = rectFor(i, asCorners);
+      if (rect.width <= 1 || rect.height <= 1) continue;
+      regions.add(
+        TranslateRegion(
+          rect: rect,
+          source: texts[i],
+          translated: texts[i],
+          background: const [],
+          foreground: const [],
+        ),
+      );
+    }
+    return regions;
   }
 
   /// 在线翻译 API：把 [texts] 逐条翻译，返回与输入对齐的结果。
@@ -580,7 +1179,12 @@ class TranslateService {
   }) async {
     if (apiType == 'baidu') {
       if (apiKey.trim().isEmpty) {
-        throw Exception('未配置百度翻译密钥，请在设置中填写');
+        throw Exception(
+          L.s(
+            '未配置百度翻译密钥，请在设置中填写',
+            'No Baidu Translate key set; fill it in Settings',
+          ),
+        );
       }
       return _baiduBatchTranslate(
         texts,
@@ -592,12 +1196,16 @@ class TranslateService {
     }
     if (apiType == 'deepl') {
       if (apiKey.trim().isEmpty) {
-        throw Exception('未配置 DeepL 密钥，请在设置中填写');
+        throw Exception(
+          L.s('未配置 DeepL 密钥，请在设置中填写', 'No DeepL key set; fill it in Settings'),
+        );
       }
       return _deeplBatchTranslate(texts, target, apiKey);
     }
     if (endpoint.trim().isEmpty) {
-      throw Exception('未配置 API 地址，请在设置中填写');
+      throw Exception(
+        L.s('未配置 API 地址，请在设置中填写', 'No API endpoint set; fill it in Settings'),
+      );
     }
     if (apiType == 'libre') {
       final results = <String>[];
@@ -694,7 +1302,9 @@ class TranslateService {
     void Function(String note)? onRetry,
   }) async {
     if (model.trim().isEmpty) {
-      throw Exception('未配置模型名，请在设置中填写');
+      throw Exception(
+        L.s('未配置模型名，请在设置中填写', 'No model set; fill it in Settings'),
+      );
     }
     var url = endpoint.trim().replaceAll(RegExp(r'/+$'), '');
     if (!url.contains('chat/completions')) {
@@ -722,7 +1332,12 @@ class TranslateService {
     for (var attempt = 0; attempt < 3; attempt++) {
       if (attempt > 0) {
         final wait = attempt * 2;
-        onRetry?.call('限流/服务忙，${wait}s 后重试（第 $attempt 次）');
+        onRetry?.call(
+          L.s(
+            '限流/服务忙，${wait}s 后重试（第 $attempt 次）',
+            'Rate-limited / busy, retrying in ${wait}s (attempt $attempt)',
+          ),
+        );
         await Future<void>.delayed(Duration(seconds: wait));
       }
       final client = HttpClient()
@@ -772,7 +1387,7 @@ class TranslateService {
                     as Map<String, dynamic>?)?['content']
                 as String?;
         if (content == null || content.trim().isEmpty) {
-          throw Exception('API 返回为空');
+          throw Exception(L.s('API 返回为空', 'The API returned empty'));
         }
         // 有些模型会把结果包在 markdown 代码块里，或不用「1. 」这种编号。
         // 先剥围栏，再按编号对齐；编号解析不出来时按行顺序兜底，避免整批
@@ -823,7 +1438,13 @@ class TranslateService {
         client.close();
       }
     }
-    throw lastError ?? Exception('翻译 API 调用失败（已重试 2 次）');
+    throw lastError ??
+        Exception(
+          L.s(
+            '翻译 API 调用失败（已重试 2 次）',
+            'Translation API call failed (retried 2x)',
+          ),
+        );
   }
 
   /// 百度语言代码与通用码的差异（ja/jp、ko/kor、fr/fra、es/spa）。
@@ -847,7 +1468,9 @@ class TranslateService {
     required String appKey,
   }) async {
     if (appId.trim().isEmpty) {
-      throw Exception('未配置百度 APP ID，请在设置中填写');
+      throw Exception(
+        L.s('未配置百度 APP ID，请在设置中填写', 'No Baidu APP ID set; fill it in Settings'),
+      );
     }
     final id = appId.trim();
     final key = appKey.trim();
@@ -884,17 +1507,28 @@ class TranslateService {
       );
       final body = await response.transform(utf8.decoder).join();
       if (response.statusCode != HttpStatus.ok) {
-        throw Exception('百度翻译 HTTP ${response.statusCode}: $body');
+        throw Exception(
+          L.s(
+            '百度翻译 HTTP ${response.statusCode}: $body',
+            'Baidu Translate HTTP ${response.statusCode}: $body',
+          ),
+        );
       }
       final json = jsonDecode(body) as Map<String, dynamic>;
       final errorCode = json['error_code'] as String?;
       if (errorCode != null) {
-        throw Exception('百度翻译错误 $errorCode: ${json['error_msg'] ?? ''}');
+        final detail = json['error_msg'] ?? '';
+        throw Exception(
+          L.s(
+            '百度翻译错误 $errorCode: $detail',
+            'Baidu Translate error $errorCode: $detail',
+          ),
+        );
       }
       final items = (json['trans_result'] as List?)
           ?.cast<Map<String, dynamic>>();
       if (items == null || items.isEmpty) {
-        throw Exception('百度翻译返回为空');
+        throw Exception(L.s('百度翻译返回为空', 'Baidu Translate returned empty'));
       }
       final results = List<String>.filled(texts.length, '');
       // 返回条数可能少于请求（空行被合并），按 src 对齐。
@@ -947,7 +1581,7 @@ class TranslateService {
               as List?) ??
           <dynamic>[];
       if (translations.isEmpty) {
-        throw Exception('DeepL 返回为空');
+        throw Exception(L.s('DeepL 返回为空', 'DeepL returned empty'));
       }
       return [
         for (final item in translations)

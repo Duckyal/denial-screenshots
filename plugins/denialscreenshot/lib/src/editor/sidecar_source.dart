@@ -39,6 +39,7 @@ from PIL import Image
 
 MODELS_DIR = os.path.expanduser(
     "~/.local/share/denial-screenshots/models")
+DEFAULT_MODELS_DIR = MODELS_DIR
 
 
 def emit(obj):
@@ -47,18 +48,29 @@ def emit(obj):
 
 
 def detect_language(text):
-    """按字符占比猜源语言，决定语言包方向。"""
+    """按「词数」猜源语言，决定翻译方向。
+
+    一个 CJK 字符≈一个词，拉丁要按空格切成词才可比。旧版直接拿拉丁字母数
+    和 CJK 字数比，导致「中文里夹几个英文词」的行被误判成英文，进而被
+    zh→zh「翻译」（M2M 尤其明显，表现为中文译中文）。改成词数比较后，中文
+    为主的行会正确判为 zh、目标为中文时直接跳过。"""
     cjk = 0
-    latin = 0
+    latin_words = 0
+    in_word = False
     for ch in text:
         code = ord(ch)
         if 0x4E00 <= code <= 0x9FFF or 0x3040 <= code <= 0x30FF:
             cjk += 1
+            in_word = False
         elif ch.isascii() and ch.isalpha():
-            latin += 1
-    if cjk > latin:
+            if not in_word:
+                latin_words += 1
+                in_word = True
+        else:
+            in_word = False
+    if cjk > 0 and cjk >= latin_words:
         return "zh"
-    if latin > 0:
+    if latin_words > 0:
         return "en"
     return None
 
@@ -96,6 +108,101 @@ class PackTranslator:
         return self._sp.decode(hypotheses[0]).replace("\u2581", " ").strip()
 
 
+# 单模型多语言翻译（M2M-100 418M，ctranslate2 int8）：一个模型覆盖所有
+# 语种，靠 target_prefix 指定目标语言，天然适合「源语言未知/混杂」的截图，
+# 这是逐语对的 Argos 语言包做不到的。代价：418M 模型 CPU 上每句约 0.4-0.6s，
+# 且英→中方向偏弱（常中英夹杂）——所以默认仍是 Argos，M2M 作为可选多语言档。
+_M2M_LANGS = {
+    "en", "fr", "zh", "ja", "ru", "es", "de", "it", "hi", "nl", "pt", "fa",
+}
+_M2M_CACHE = {}
+
+
+def _m2m_base():
+    """解析 M2M 模型目录，兼容两种布局：
+    - `MODELS_DIR/mt/m2m100`（选到含 `mt/` 的上级，如默认下载目录）
+    - `MODELS_DIR/m2m100`（直接选到 `mt` 这一层）
+    返回第一个含 `model.bin` 的；都没有返回 None。load_m2m 与 discover_dir
+    共用它，保证「校验」和「加载」认同一套布局。"""
+    for base in (os.path.join(MODELS_DIR, "mt", "m2m100"),
+                 os.path.join(MODELS_DIR, "m2m100")):
+        if os.path.exists(os.path.join(base, "model.bin")):
+            return base
+    return None
+
+
+def load_m2m():
+    """加载 M2M 模型（见 _m2m_base 的两种布局），进程内复用。没就绪返回 None。
+
+    缓存 key 用解析后的 base 目录：自选本地模型目录会重设 MODELS_DIR，
+    若只按 "m2m100" 缓存，切目录后仍会复用上一个目录的模型。
+    """
+    base = _m2m_base()
+    if base is None:
+        return None
+    if base in _M2M_CACHE:
+        return _M2M_CACHE[base]
+    import ctranslate2
+    import sentencepiece as spm
+
+    translator = ctranslate2.Translator(base, device="cpu")
+    sp = spm.SentencePieceProcessor(
+        model_file=os.path.join(base, "sentencepiece.bpe.model"))
+    _M2M_CACHE[base] = (translator, sp)
+    return _M2M_CACHE[base]
+
+
+def m2m_translate(translator, sp, text, target):
+    """按目标语言码翻译一句；目标码不在受监督集合里就退回英文，
+    避免 CT2 因未知 __xx__ token 报错。"""
+    tokens = sp.encode(text, out_type=str)
+    if not tokens:
+        return text
+    if target not in _M2M_LANGS:
+        target = "en"
+    result = translator.translate_batch(
+        [tokens], target_prefix=[[f"__{target}__"]], max_decoding_length=256)
+    hypotheses = result[0].hypotheses
+    if not hypotheses:
+        return text
+    # CT2 会把强制的 __xx__ 前缀原样回显在首个 token，去掉再解码。
+    hyp = [t for t in hypotheses[0]
+           if not (t.startswith("__") and t.endswith("__"))]
+    return sp.decode(hyp).replace("▁", " ").strip()
+
+
+def discover_dir():
+    """只扫描、不加载权重：统计当前 MODELS_DIR 下可用的 Argos 语言包数与
+    M2M 是否就绪。判据与 load_packs / load_m2m 的发现路径完全一致，目录选择器
+    用它当场校验——校验和加载共用同一套发现逻辑，绝不会「校验过、运行挂」。
+
+    Argos 包要凑齐 metadata.json + model/model.bin + sentencepiece.model 才算
+    可用（缺任一，PackTranslator 构造即失败）；M2M 要 model.bin +
+    sentencepiece.bpe.model（缺 sp，m2m 翻译会崩）。
+    """
+    argos = 0
+    candidates = glob.glob(os.path.join(MODELS_DIR, "*"))
+    candidates += glob.glob(os.path.join(MODELS_DIR, "*", "*"))
+    for package_dir in candidates:
+        if not os.path.isdir(package_dir):
+            continue
+        if not os.path.exists(
+                os.path.join(package_dir, "metadata.json")):
+            continue
+        if not os.path.exists(
+                os.path.join(package_dir, "model", "model.bin")):
+            continue
+        if not os.path.exists(
+                os.path.join(package_dir, "sentencepiece.model")):
+            continue
+        argos += 1
+    m2m_base = _m2m_base()
+    m2m = (m2m_base is not None and
+           os.path.exists(
+               os.path.join(m2m_base, "sentencepiece.bpe.model")))
+    return argos, m2m
+
+
 def load_packs():
     """扫描模型目录（含一层子目录），按语言对建索引。"""
     packs = {}
@@ -110,6 +217,8 @@ def load_packs():
         except (OSError, RuntimeError, ValueError) as error:
             emit({
                 "event": "status",
+                "code": "pack_skip",
+                "params": {"dir": package_dir, "error": str(error)},
                 "message": f"跳过语言包 {package_dir}: {error}",
             })
             continue
@@ -170,30 +279,73 @@ def sample_colors(image, box):
 # 每次请求重复载入。回退内置模型的请求不缓存，避免下载完成后仍用旧模型。
 _OCR_CACHE = {}
 
+# 自带离线、无需下载的模型：builtin = 统一包内置 PP-OCRv6 small；
+# v3 = 老包 rapidocr_onnxruntime 自带 PP-OCRv3（中英），它不跟统一包走。
+_BUNDLED = {"builtin", "v3"}
+
 
 def load_ocr(model_key):
     """按设置选择 OCR 模型；高精度模型没下载完就回退内置并提示。
 
-    模型文件由编辑器下载到 MODELS_DIR/ocr/<key>/ 下（det + rec 两个 onnx），
-    cls 沿用组件自带的方向分类模型。
+    统一 rapidocr 包里 model_path 为空即走自带模型路由（命中包内文件则不
+    联网），给了 det/rec 路径就直接加载——PP-OCR 的字符字典内嵌在 rec onnx
+    的 metadata 里，所以指哪个版本的 rec 就用哪套字典，不会串台。
+    v3 由遗留包 rapidocr_onnxruntime 提供（自带 ch_PP-OCRv3 det+rec，零下载）。
+    返回 (ocr, note)，调用方统一用 run_ocr 取归一化结果。
     """
     if model_key in _OCR_CACHE:
         return _OCR_CACHE[model_key], ""
-    from rapidocr_onnxruntime import RapidOCR
 
-    if model_key not in ("v4mobile", "v4server"):
-        ocr = RapidOCR()
+    if model_key == "v3":
+        from rapidocr_onnxruntime import RapidOCR as RapidOCRLegacy
+
+        ocr = RapidOCRLegacy()
+        ocr._ds_key = "legacy"
         _OCR_CACHE[model_key] = ocr
         return ocr, ""
-    suffix = "server" if model_key == "v4server" else "mobile"
+
+    from rapidocr import RapidOCR
+
+    if model_key in _BUNDLED:
+        ocr = RapidOCR()
+        ocr._ds_key = "unified"
+        _OCR_CACHE[model_key] = ocr
+        return ocr, ""
+
     base = os.path.join(MODELS_DIR, "ocr", model_key)
-    det = os.path.join(base, f"ch_PP-OCRv4_det_{suffix}.onnx")
-    rec = os.path.join(base, f"ch_PP-OCRv4_rec_{suffix}.onnx")
-    if not (os.path.exists(det) and os.path.exists(rec)):
-        return RapidOCR(), "所选 OCR 模型还没下载完，这次先用内置模型"
-    ocr = RapidOCR(det_model_path=det, rec_model_path=rec)
+    onnx = sorted(glob.glob(os.path.join(base, "*.onnx")))
+    det = next((f for f in onnx if "det" in os.path.basename(f)), None)
+    rec = next((f for f in onnx if "rec" in os.path.basename(f)), None)
+    if not (det and rec):
+        fallback = RapidOCR()
+        fallback._ds_key = "unified"
+        return fallback, "所选 OCR 模型还没下载完，这次先用内置模型"
+    ocr = RapidOCR(params={"Det.model_path": det, "Rec.model_path": rec})
+    ocr._ds_key = "unified"
     _OCR_CACHE[model_key] = ocr
     return ocr, ""
+
+
+def run_ocr(ocr, image_path):
+    """跑一次识别，把不同包的返回归一化成 (boxes, txts, scores)。
+
+    统一 rapidocr 给 RapidOCROutput（.boxes/.txts/.scores，boxes 是
+    [N,4,2]）；老包 rapidocr_onnxruntime 给 (list[[box,text,score]], elapse)。
+    """
+    if getattr(ocr, "_ds_key", "unified") == "legacy":
+        result, _ = ocr(image_path)
+        result = result or []
+        boxes = [item[0] for item in result]
+        txts = [item[1] for item in result]
+        scores = [item[2] for item in result]
+        return boxes, txts, scores
+    output = ocr(image_path)
+    if output is None or getattr(output, "txts", None) is None:
+        return [], [], []
+    boxes = list(output.boxes) if output.boxes is not None else []
+    txts = list(output.txts)
+    scores = list(output.scores) if output.scores is not None else []
+    return boxes, txts, scores
 
 
 def main():
@@ -212,22 +364,74 @@ def main():
         try:
             handle(request)
         except Exception as error:  # noqa: BLE001
-            emit({"event": "error", "message": f"处理失败：{error}"})
+            emit({
+                "event": "error",
+                "code": "handle_error",
+                "params": {"error": str(error)},
+                "message": f"处理失败：{error}",
+            })
 
 
 def handle(request):
+    global MODELS_DIR
+    # 自选本地模型目录：每条请求按需重设 MODELS_DIR（load_packs/load_m2m 在
+    # 调用时读它）。空则回退内置下载目录，保证常驻进程切回默认时不残留旧目录。
+    models_dir = (request.get("models_dir") or "").strip()
+    MODELS_DIR = os.path.expanduser(models_dir) if models_dir \
+        else DEFAULT_MODELS_DIR
+
     target = request.get("target", "zh")
     min_height = int(request.get("min_height", 8))
     # mode=ocr：只识别不翻译；mode=texts：只翻译给定文本（OCR 结果由
     # 编辑器后台缓存复用，不重复识别）；默认 translate：OCR+翻译。
     mode = request.get("mode", "translate")
+    # engine=argos（默认，逐语对语言包，中英最稳最快）| m2m100（单模型多
+    # 语言，适合源语言未知/混杂的截图，但英→中偏弱）。
+    engine = request.get("engine", "argos")
+
+    # mode=validate_dir：只发现、不加载，供目录选择器当场校验本地翻译模型目录。
+    if mode == "validate_dir":
+        argos, m2m_ready = discover_dir()
+        emit({
+            "event": "done",
+            "argos_packs": argos,
+            "m2m": m2m_ready,
+        })
+        return 0
+
+    m2m = None
+    if engine == "m2m100" and mode != "ocr":
+        emit({"event": "status", "code": "load_m2m", "message": "加载 M2M 多语言模型…"})
+        m2m = load_m2m()
+        if m2m is None:
+            emit({
+                "event": "error",
+                "code": "m2m_missing",
+                "message": "M2M 多语言模型还没下载，请在设置中下载后再用",
+            })
+            return 2
 
     if mode == "texts":
         texts = request.get("texts", [])
+        if m2m is not None:
+            translator, sp = m2m
+            translations = []
+            for text in texts:
+                if detect_language(text) == target:
+                    translations.append({"translated": text, "skip": True})
+                    continue
+                translated = m2m_translate(translator, sp, text, target)
+                translations.append({
+                    "translated": translated or text,
+                    "skip": False,
+                })
+            emit({"event": "done", "translations": translations})
+            return 0
         packs = load_packs()
         if not packs:
             emit({
                 "event": "error",
+                "code": "no_pack",
                 "message": "未找到翻译语言包，请在设置中管理本地模型",
             })
             return 2
@@ -243,12 +447,14 @@ def handle(request):
                 translations.append({"translated": text, "skip": False})
                 continue
             if source_lang not in pack_cache:
-                emit({"event": "status", "message": "加载翻译模型…"})
+                emit({"event": "status", "code": "load_mt", "message": "加载翻译模型…"})
                 pack_cache[source_lang] = pick_pack(packs, source_lang, target)
             first, second = pack_cache[source_lang]
             if first is None and second is None:
                 emit({
                     "event": "error",
+                    "code": "no_lang_pair",
+                    "params": {"src": source_lang, "tgt": target},
                     "message": f"没有 {source_lang}→{target} 的语言包",
                 })
                 return 2
@@ -264,23 +470,28 @@ def handle(request):
 
     image_path = request["image"]
 
-    emit({"event": "status", "message": "加载 OCR 模型…"})
+    emit({"event": "status", "code": "load_ocr", "message": "加载 OCR 模型…"})
     ocr, ocr_note = load_ocr(request.get("ocr_model", ""))
     if ocr_note:
-        emit({"event": "status", "message": ocr_note})
+        emit({
+            "event": "status",
+            "code": "ocr_fallback",
+            "message": ocr_note,
+        })
 
-    emit({"event": "status", "message": "识别文字…"})
-    result, _ = ocr(image_path)
-    if not result:
+    emit({"event": "status", "code": "recognizing", "message": "识别文字…"})
+    boxes, txts, scores = run_ocr(ocr, image_path)
+    if not txts:
         emit({"event": "done", "regions": []})
         return 0
 
     packs = {}
-    if mode != "ocr":
+    if mode != "ocr" and m2m is None:
         packs = load_packs()
         if not packs:
             emit({
                 "event": "error",
+                "code": "no_pack",
                 "message": "未找到翻译语言包，请在设置中管理本地模型",
             })
             return 2
@@ -289,7 +500,7 @@ def handle(request):
     image = Image.open(image_path)
     direct = None
     via_en = None
-    for box, text, confidence in result:
+    for box, text, confidence in zip(boxes, txts, scores):
         xs = [p[0] for p in box]
         ys = [p[1] for p in box]
         x = max(0, int(min(xs)))
@@ -306,14 +517,23 @@ def handle(request):
         elif source_lang == target:
             # 原文就是目标语言：跳过，不做"自己盖自己"的无意义蒙版。
             continue
+        elif m2m is not None:
+            translator, sp = m2m
+            translated = m2m_translate(translator, sp, text, target)
         elif source_lang is not None and source_lang != target:
             if direct is None and via_en is None:
-                emit({"event": "status", "message": "加载翻译模型…"})
+                emit({"event": "status", "code": "load_mt", "message": "加载翻译模型…"})
                 direct, via_en = pick_pack(packs, source_lang, target)
                 if direct is None and via_en is None:
                     available = ", ".join(f"{k[0]}→{k[1]}" for k in packs)
                     emit({
                         "event": "error",
+                        "code": "no_lang_pair_detail",
+                        "params": {
+                            "src": source_lang,
+                            "tgt": target,
+                            "available": available,
+                        },
                         "message": f"没有 {source_lang}→{target} 的语言包"
                                    f"（已装：{available}）",
                     })

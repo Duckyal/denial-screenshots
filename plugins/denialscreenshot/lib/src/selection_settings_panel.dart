@@ -3,9 +3,13 @@ import 'dart:io';
 
 import 'package:flutter/material.dart';
 
+import 'api_config_field.dart';
 import 'clipboard.dart';
+import 'editor/file_picker.dart';
 import 'editor/settings.dart';
 import 'editor/translate_service.dart';
+import 'l10n.dart';
+import 'panel_nav.dart';
 
 /// 框选截图工具栏里的「设置」面板。
 ///
@@ -19,12 +23,14 @@ class SelectionSettingsPanel extends StatefulWidget {
     required this.translateService,
     required this.onChanged,
     required this.onClose,
+    this.nav,
   });
 
   final ScreenshotSettings settings;
   final TranslateService translateService;
   final ValueChanged<ScreenshotSettings> onChanged;
   final VoidCallback onClose;
+  final SelectionPanelNav? nav;
 
   @override
   State<SelectionSettingsPanel> createState() => _SelectionSettingsPanelState();
@@ -33,8 +39,16 @@ class SelectionSettingsPanel extends StatefulWidget {
 class _SelectionSettingsPanelState extends State<SelectionSettingsPanel> {
   late ScreenshotSettings _settings = widget.settings;
 
+  /// 面板根容器 key：贴边悬浮菜单据此边对边贴在面板外侧。
+  final GlobalKey _panelKey = GlobalKey();
+
+  /// 面板底色：悬浮菜单弹层复用同一色，保证和面板风格一致。
+  static const Color _panelBg = Color(0xE60F1419);
+
   bool _apiOpen = false;
-  bool _modelsOpen = false;
+
+  /// 临时：选了「选择本地模型目录」但还没挑目录时，让该项保持选中并展开目录行。
+  bool _localPicked = false;
 
   Map<(String, String), bool> _packInstalled = const {};
   (String, String) _packBusy = const ('', '');
@@ -52,17 +66,102 @@ class _SelectionSettingsPanelState extends State<SelectionSettingsPanel> {
   bool _apiTesting = false;
   String _apiTestResult = '';
 
+  /// API 配置草稿：编辑只动草稿、不写盘；点「测试连接」成功后才写回设置生效。
+  /// null 表示沿用已保存值。与编辑器设置面板同一套行为。
+  String? _draftApiType;
+  String? _draftApiEndpoint;
+  String? _draftApiKey;
+  String? _draftApiModel;
+  String? _draftApiAppId;
+  String get _apiTypeV => _draftApiType ?? _settings.apiType;
+  String get _apiEndpointV => _draftApiEndpoint ?? _settings.apiEndpoint;
+  String get _apiKeyV => _draftApiKey ?? _settings.apiKey;
+  String get _apiModelV => _draftApiModel ?? _settings.apiModel;
+  String get _apiAppIdV => _draftApiAppId ?? _settings.apiAppId;
+  void _resetApiDraft() {
+    _draftApiType = null;
+    _draftApiEndpoint = null;
+    _draftApiKey = null;
+    _draftApiModel = null;
+    _draftApiAppId = null;
+  }
+
+  /// M2M-100 多语言单模型的下载状态（本地翻译引擎用）。
+  bool _m2mInstalled = false;
+  bool _m2mBusy = false;
+  String _m2mMessage = '';
+
   @override
   void initState() {
     super.initState();
     unawaited(_refreshPacks());
     unawaited(_refreshOcr());
     unawaited(_refreshTools());
+    unawaited(_refreshM2m());
+    widget.nav?.canGoBack = () => _apiOpen || _localPicked;
+    widget.nav?.goBack = () => setState(() {
+      _apiOpen = false;
+      _localPicked = false;
+    });
+  }
+
+  Future<void> _refreshM2m() async {
+    final installed = await widget.translateService.isM2mInstalled();
+    if (mounted) setState(() => _m2mInstalled = installed);
+  }
+
+  Future<void> _toggleM2m() async {
+    setState(() {
+      _m2mBusy = true;
+      _m2mMessage = '';
+    });
+    try {
+      if (_m2mInstalled) {
+        await widget.translateService.deleteM2m();
+      } else {
+        await widget.translateService.installM2m(
+          onStatus: (status) {
+            if (mounted) setState(() => _m2mMessage = status);
+          },
+        );
+      }
+      await _refreshM2m();
+    } on Object catch (error) {
+      if (mounted) setState(() => _m2mMessage = '$error');
+    }
+    if (mounted) setState(() => _m2mBusy = false);
   }
 
   void _apply(ScreenshotSettings next) {
     setState(() => _settings = next);
     widget.onChanged(next);
+  }
+
+  /// 本地模型目录选择器的起始目录：已选优先，否则落到 OCR 模型根目录
+  /// （含已下载的子目录），再退回主目录。
+  String _ocrInitialDirectory() {
+    final chosen = _settings.ocrLocalPath.trim();
+    if (chosen.isNotEmpty) return chosen;
+    if (Directory(TranslateService.ocrModelsRoot).existsSync()) {
+      return TranslateService.ocrModelsRoot;
+    }
+    return Platform.environment['HOME'] ?? '/';
+  }
+
+  /// 翻译模型目录选择器的起始目录：已选的目录 > 内置 models 根 > 主目录。
+  String _translateInitialDirectory() {
+    final chosen = _settings.translateModelsDir.trim();
+    if (chosen.isNotEmpty) return chosen;
+    final root = '${TranslateService.dataDir}/models';
+    if (Directory(root).existsSync()) return root;
+    return Platform.environment['HOME'] ?? '/';
+  }
+
+  /// 面板全局矩形：悬浮菜单据此边对边贴在面板外侧，不压在面板上。
+  Rect? _panelRect() {
+    final box = _panelKey.currentContext?.findRenderObject();
+    if (box is! RenderBox || !box.hasSize) return null;
+    return box.localToGlobal(Offset.zero) & box.size;
   }
 
   Future<void> _refreshPacks() async {
@@ -158,7 +257,7 @@ class _SelectionSettingsPanelState extends State<SelectionSettingsPanel> {
   Future<void> _installTool(String tool) async {
     setState(() {
       _toolBusy = tool;
-      _toolMessage = '正在安装 $tool…';
+      _toolMessage = L.s('正在安装 $tool…', 'Installing $tool…');
     });
     try {
       const managers = <String, List<String>>{
@@ -179,7 +278,12 @@ class _SelectionSettingsPanelState extends State<SelectionSettingsPanel> {
       }
       if (manager == null) {
         if (mounted) {
-          setState(() => _toolMessage = '未找到包管理器，请手动安装 $tool');
+          setState(
+            () => _toolMessage = L.s(
+              '未找到包管理器，请手动安装 $tool',
+              'No package manager found, please install $tool manually',
+            ),
+          );
         }
         return;
       }
@@ -190,13 +294,19 @@ class _SelectionSettingsPanelState extends State<SelectionSettingsPanel> {
           ...args,
         ], environment: childProcessEnvironment());
         if (!mounted) return;
+        final detail = result.stderr.toString().trim();
         setState(() {
           _toolMessage = result.exitCode == 0
-              ? '$tool 安装完成'
-              : '安装失败：${result.stderr.toString().trim()}';
+              ? L.s('$tool 安装完成', '$tool installed')
+              : L.s('安装失败：$detail', 'Install failed: $detail');
         });
       } else {
-        setState(() => _toolMessage = '请手动执行：sudo $manager ${args.join(' ')}');
+        setState(
+          () => _toolMessage = L.s(
+            '请手动执行：sudo $manager ${args.join(' ')}',
+            'Run manually: sudo $manager ${args.join(' ')}',
+          ),
+        );
       }
     } on Object catch (error) {
       if (mounted) setState(() => _toolMessage = '$error');
@@ -218,22 +328,37 @@ class _SelectionSettingsPanelState extends State<SelectionSettingsPanel> {
     if (_apiTesting) return;
     setState(() {
       _apiTesting = true;
-      _apiTestResult = '正在测试…';
+      _apiTestResult = L.pick(context, '正在测试…', 'Testing…');
     });
     try {
       final result = await widget.translateService.translateViaApi(
         texts: const ['Hello, world'],
         target: _target(),
-        apiType: _settings.apiType,
-        endpoint: _settings.apiEndpoint,
-        apiKey: _settings.apiKey,
-        model: _settings.apiModel,
-        apiAppId: _settings.apiAppId,
+        apiType: _apiTypeV,
+        endpoint: _apiEndpointV,
+        apiKey: _apiKeyV,
+        model: _apiModelV,
+        apiAppId: _apiAppIdV,
       );
       if (!mounted) return;
+      // 测通了才把草稿写回设置并生效。
+      _apply(
+        _settings.copyWith(
+          apiType: _apiTypeV,
+          apiEndpoint: _apiEndpointV,
+          apiKey: _apiKeyV,
+          apiModel: _apiModelV,
+          apiAppId: _apiAppIdV,
+        ),
+      );
+      _resetApiDraft();
       setState(() {
         _apiTesting = false;
-        _apiTestResult = '可用：Hello, world → ${result.first}';
+        _apiTestResult = L.pick(
+          context,
+          '可用：Hello, world → ${result.first}',
+          'Working: Hello, world → ${result.first}',
+        );
       });
     } on Object catch (error) {
       if (!mounted) return;
@@ -251,10 +376,11 @@ class _SelectionSettingsPanelState extends State<SelectionSettingsPanel> {
       child: DefaultTextStyle.merge(
         style: const TextStyle(color: Colors.white),
         child: Container(
+          key: _panelKey,
           width: 380,
           constraints: const BoxConstraints(maxHeight: 520),
           decoration: BoxDecoration(
-            color: const Color(0xE60F1419),
+            color: _panelBg,
             borderRadius: BorderRadius.circular(12),
             boxShadow: const [
               BoxShadow(
@@ -272,9 +398,9 @@ class _SelectionSettingsPanelState extends State<SelectionSettingsPanel> {
                 padding: const EdgeInsets.fromLTRB(14, 12, 10, 6),
                 child: Row(
                   children: [
-                    const Text(
-                      '设置',
-                      style: TextStyle(
+                    Text(
+                      L.pick(context, '设置', 'Settings'),
+                      style: const TextStyle(
                         fontSize: 14,
                         fontWeight: FontWeight.w600,
                       ),
@@ -313,55 +439,281 @@ class _SelectionSettingsPanelState extends State<SelectionSettingsPanel> {
 
   List<Widget> _sections() {
     return [
+      ..._ocrSection(),
       _group(
-        '翻译接口',
+        L.pick(context, '翻译接口', 'Translation backend'),
         _settings.translateBackend,
-        const [('api', '在线翻译 API'), ('local', '本地模型')],
+        const [
+          ('api', '在线翻译 API', 'Online API'),
+          ('local', '本地模型', 'Local model'),
+        ],
         (value) {
           if (value == 'local') _apiOpen = false;
-          if (value == 'api') _modelsOpen = false;
+          if (value == 'api') _localPicked = false;
           _apply(_settings.copyWith(translateBackend: value));
         },
       ),
       if (_settings.translateBackend == 'api') ..._apiSection(),
-      if (_settings.translateBackend == 'local') ..._localModelsSection(),
-      _group('翻译为', _settings.translateTarget, const [
-        ('system', '跟随系统'),
-        ('zh', '中文'),
-        ('en', 'English'),
-        ('ja', '日本語'),
-        ('ko', '한국어'),
-        ('fr', 'Français'),
-        ('de', 'Deutsch'),
-        ('ru', 'Русский'),
-        ('es', 'Español'),
-      ], (value) => _apply(_settings.copyWith(translateTarget: value))),
-      ..._ocrSection(),
+      if (_settings.translateBackend == 'local') ..._localTranslateSection(),
+      _group(
+        L.pick(context, '翻译为', 'Translate to'),
+        _settings.translateTarget,
+        const [
+          ('system', '跟随系统', 'System'),
+          ('zh', '中文', '中文'),
+          ('en', 'English', 'English'),
+          ('ja', '日本語', '日本語'),
+          ('ko', '한국어', '한국어'),
+          ('fr', 'Français', 'Français'),
+          ('de', 'Deutsch', 'Deutsch'),
+          ('ru', 'Русский', 'Русский'),
+          ('es', 'Español', 'Español'),
+        ],
+        (value) => _apply(_settings.copyWith(translateTarget: value)),
+      ),
+      if (_settings.translateBackend == 'local') _localTargetHint(),
       ..._scrollCaptureSection(),
     ];
   }
 
-  List<Widget> _scrollCaptureSection() {
+  /// 本地翻译来源：与「识字模型」同款 RadioListTile 纵向列表。三选一
+  /// （Argos 逐语对 / M2M-100 单模型 / 选择本地模型目录），选中哪项就在其
+  /// 下方直接展开该项的模型管理，不再套一层展开按钮。
+  List<Widget> _localTranslateSection() {
+    final dir = _settings.translateModelsDir.trim();
+    final source = dir.isNotEmpty || _localPicked
+        ? 'local'
+        : _settings.translateEngine;
     return [
-      const Padding(
-        padding: EdgeInsets.only(top: 10, bottom: 2),
+      Padding(
+        padding: const EdgeInsets.only(top: 8, bottom: 2),
         child: Text(
-          '长截图',
-          style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600),
+          L.pick(context, '翻译模型来源', 'Translation model source'),
+          style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600),
         ),
       ),
-      _group('滚动方式（是否自动滚动）', _settings.autoScroll ? 'auto' : 'manual', const [
-        ('auto', '自动滚动（默认）'),
-        ('manual', '手动滚动'),
-      ], (value) => _apply(_settings.copyWith(autoScroll: value == 'auto'))),
+      RadioGroup<String>(
+        groupValue: source,
+        onChanged: (next) {
+          if (next == null) return;
+          if (next == 'local') {
+            setState(() => _localPicked = true);
+            return;
+          }
+          setState(() => _localPicked = false);
+          _apply(
+            _settings.copyWith(translateEngine: next, translateModelsDir: ''),
+          );
+        },
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            RadioListTile<String>(
+              dense: true,
+              visualDensity: VisualDensity.compact,
+              contentPadding: EdgeInsets.zero,
+              value: 'argos',
+              title: Text(
+                L.pick(
+                  context,
+                  'Argos 语言包（默认）',
+                  'Argos dictionaries (default)',
+                ),
+                style: const TextStyle(fontSize: 13),
+              ),
+              subtitle: Text(
+                L.pick(
+                  context,
+                  '逐语对下载，无直连对时经英语中继',
+                  'Per-language pairs; relays via English without a direct pair',
+                ),
+                style: const TextStyle(fontSize: 11, color: Colors.white60),
+              ),
+            ),
+            RadioListTile<String>(
+              dense: true,
+              visualDensity: VisualDensity.compact,
+              contentPadding: EdgeInsets.zero,
+              value: 'm2m100',
+              title: Text(
+                L.pick(context, 'M2M-100 多语言单模型', 'M2M-100 multilingual model'),
+                style: const TextStyle(fontSize: 13),
+              ),
+              subtitle: Text(
+                '${L.pick(context, '一个模型覆盖 12 语种互译', 'One model covers 12 languages')} · '
+                '${_m2mInstalled ? L.pick(context, '已下载', 'Downloaded') : L.pick(context, '未下载（约 490MB）', 'Not downloaded (~490MB)')}',
+                style: const TextStyle(fontSize: 11, color: Colors.white60),
+              ),
+            ),
+            RadioListTile<String>(
+              dense: true,
+              visualDensity: VisualDensity.compact,
+              contentPadding: EdgeInsets.zero,
+              value: 'local',
+              title: Text(
+                L.pick(context, '选择本地模型目录', 'Choose local model folder'),
+                style: const TextStyle(fontSize: 13),
+              ),
+              subtitle: Text(
+                dir.isEmpty
+                    ? L.pick(
+                        context,
+                        '指向自己的翻译模型目录（覆盖默认）',
+                        'Point at your own model folder (overrides default)',
+                      )
+                    : dir,
+                overflow: TextOverflow.ellipsis,
+                style: const TextStyle(fontSize: 11, color: Colors.white60),
+              ),
+            ),
+          ],
+        ),
+      ),
+      if (source == 'argos') ..._argosModels(),
+      if (source == 'm2m100') ..._m2mModels(),
+      if (source == 'local') _translateDirOverride(),
+    ];
+  }
+
+  /// Argos 选中时直接展开：逐语对语言包下载/删除列表。
+  List<Widget> _argosModels() {
+    return [
+      if (_packBusy != const ('', ''))
+        Padding(
+          padding: const EdgeInsets.only(top: 6),
+          child: Row(
+            children: [
+              const SizedBox(
+                width: 14,
+                height: 14,
+                child: CircularProgressIndicator(strokeWidth: 2),
+              ),
+              const SizedBox(width: 10),
+              Expanded(
+                child: Text(_packMessage, style: const TextStyle(fontSize: 12)),
+              ),
+            ],
+          ),
+        ),
+      for (final (from, to, label) in TranslateService.packCatalog)
+        ListTile(
+          dense: true,
+          visualDensity: VisualDensity.compact,
+          contentPadding: EdgeInsets.zero,
+          title: Text(
+            L.pick(context, label.zh, label.en),
+            style: const TextStyle(fontSize: 13),
+          ),
+          trailing: _packBusy == (from, to)
+              ? const SizedBox(
+                  width: 16,
+                  height: 16,
+                  child: CircularProgressIndicator(strokeWidth: 2),
+                )
+              : TextButton(
+                  onPressed: () => _togglePack(from, to),
+                  child: Text(
+                    (_packInstalled[(from, to)] ?? false)
+                        ? L.pick(context, '删除', 'Delete')
+                        : L.pick(context, '下载', 'Download'),
+                    style: const TextStyle(fontSize: 12),
+                  ),
+                ),
+        ),
+    ];
+  }
+
+  /// M2M 选中时直接展开：单个模型的下载/删除按钮（与 OCR 同款）。
+  List<Widget> _m2mModels() {
+    return [
+      if (_m2mBusy)
+        Padding(
+          padding: const EdgeInsets.symmetric(vertical: 6),
+          child: Row(
+            children: [
+              const SizedBox(
+                width: 14,
+                height: 14,
+                child: CircularProgressIndicator(strokeWidth: 2),
+              ),
+              const SizedBox(width: 10),
+              Expanded(
+                child: Text(_m2mMessage, style: const TextStyle(fontSize: 12)),
+              ),
+            ],
+          ),
+        )
+      else
+        Padding(
+          padding: const EdgeInsets.only(top: 4),
+          child: OutlinedButton(
+            onPressed: _toggleM2m,
+            child: Text(
+              _m2mInstalled
+                  ? L.pick(context, '删除模型', 'Delete model')
+                  : L.pick(context, '下载模型（约 490MB）', 'Download model (~490MB)'),
+            ),
+          ),
+        ),
+    ];
+  }
+
+  /// 本地翻译的目标语言说明：讲清直连对 / 经英语中继 / M2M 的区别。
+  Widget _localTargetHint() {
+    final note = _settings.translateEngine == 'm2m100'
+        ? L.pick(
+            context,
+            'M2M 单模型覆盖中↔日/韩/法德西俄等 12 语种互译，无需逐语对下载；'
+                '源语言自动判定，混杂也能译。',
+            'A single M2M model covers 12 languages (Zh↔Ja/Ko/Fr/De/Es/Ru…)'
+                ' with no per-pair downloads; the source language is detected'
+                ' automatically and mixed text still translates.',
+          )
+        : L.pick(
+            context,
+            'Argos 逐语对：源语言自动判定，没有直连对时经英语中继'
+                '（如中→日需同时下载「中→英」和「英→日」两个包）。'
+                '想要中↔日直接互译，把上面的引擎换成 M2M-100。',
+            'Argos uses per-language pairs: the source is auto-detected, and'
+                ' without a direct pair it relays through English (e.g. Zh→Ja'
+                ' needs both the "Zh→En" and "En→Ja" packs). For direct'
+                ' Zh↔Ja, switch the engine above to M2M-100.',
+          );
+    return Padding(
+      padding: const EdgeInsets.only(top: 6),
+      child: Text(
+        note,
+        style: const TextStyle(fontSize: 11, color: Colors.white60),
+      ),
+    );
+  }
+
+  List<Widget> _scrollCaptureSection() {
+    return [
+      Padding(
+        padding: const EdgeInsets.only(top: 10, bottom: 2),
+        child: Text(
+          L.pick(context, '长截图', 'Scrolling capture'),
+          style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600),
+        ),
+      ),
+      _group(
+        L.pick(context, '滚动方式（是否自动滚动）', 'Scroll mode (auto or manual)'),
+        _settings.autoScroll ? 'auto' : 'manual',
+        const [
+          ('auto', '自动滚动（默认）', 'Auto-scroll (default)'),
+          ('manual', '手动滚动', 'Manual scroll'),
+        ],
+        (value) => _apply(_settings.copyWith(autoScroll: value == 'auto')),
+      ),
       if (_settings.autoScroll) ...[
         _group(
-          '注入方式',
+          L.pick(context, '注入方式', 'Key injector'),
           _settings.scrollInjector,
           const [
-            ('denial', 'denial 虚拟键盘（默认）'),
-            ('wtype', 'wtype'),
-            ('ydotool', 'ydotool'),
+            ('denial', 'denial 虚拟键盘（默认）', 'denial virtual keyboard (default)'),
+            ('wtype', 'wtype', 'wtype'),
+            ('ydotool', 'ydotool', 'ydotool'),
           ],
           (value) {
             _apply(_settings.copyWith(scrollInjector: value));
@@ -369,22 +721,36 @@ class _SelectionSettingsPanelState extends State<SelectionSettingsPanel> {
           },
         ),
         if (_settings.scrollInjector != 'denial') _toolInstallRow(),
-        _group('滚动速度', _settings.autoScrollSpeed, const [
-          ('fast', '快'),
-          ('normal', '中'),
-          ('slow', '慢'),
-        ], (value) => _apply(_settings.copyWith(autoScrollSpeed: value))),
-        _group('滚动按键', _settings.autoScrollKey, const [
-          ('Down', '逐行 ↓'),
-          ('space', '翻页 空格'),
-        ], (value) => _apply(_settings.copyWith(autoScrollKey: value))),
-        const Padding(
-          padding: EdgeInsets.only(top: 4),
+        _group(
+          L.pick(context, '滚动速度', 'Scroll speed'),
+          _settings.autoScrollSpeed,
+          const [
+            ('fast', '快', 'Fast'),
+            ('normal', '中', 'Medium'),
+            ('slow', '慢', 'Slow'),
+          ],
+          (value) => _apply(_settings.copyWith(autoScrollSpeed: value)),
+        ),
+        _group(
+          L.pick(context, '滚动按键', 'Scroll key'),
+          _settings.autoScrollKey,
+          const [('Down', '逐行 ↓', 'Line ↓'), ('space', '翻页 空格', 'Page space')],
+          (value) => _apply(_settings.copyWith(autoScrollKey: value)),
+        ),
+        Padding(
+          padding: const EdgeInsets.only(top: 4),
           child: Text(
-            '自动滚动靠向目标窗口注入按键实现，仅对浏览器、阅读器等'
-            '“方向键/空格可滚动”的应用有效；文本编辑器里按键可能改变光标。'
-            'wtype 直接连 Wayland 会话，ydotool 需要 ydotoold 守护进程。',
-            style: TextStyle(fontSize: 11, color: Colors.white60),
+            L.pick(
+              context,
+              '自动滚动靠向目标窗口注入按键实现，仅对浏览器、阅读器等'
+                  '“方向键/空格可滚动”的应用有效；文本编辑器里按键可能改变光标。'
+                  'wtype 直接连 Wayland 会话，ydotool 需要 ydotoold 守护进程。',
+              'Auto-scroll injects keys into the target window, so it only works'
+                  ' for apps that scroll with arrow/space keys (browsers, readers);'
+                  ' in text editors the keys may move the caret. wtype talks to the'
+                  ' Wayland session directly; ydotool needs the ydotoold daemon.',
+            ),
+            style: const TextStyle(fontSize: 11, color: Colors.white60),
           ),
         ),
       ],
@@ -412,7 +778,9 @@ class _SelectionSettingsPanelState extends State<SelectionSettingsPanel> {
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 Text(
-                  installed ? '$tool 已安装' : '$tool 未安装',
+                  installed
+                      ? L.pick(context, '$tool 已安装', '$tool installed')
+                      : L.pick(context, '$tool 未安装', '$tool not installed'),
                   style: const TextStyle(fontSize: 12, color: Colors.white),
                 ),
                 if (_toolMessage.isNotEmpty && !busy)
@@ -438,7 +806,10 @@ class _SelectionSettingsPanelState extends State<SelectionSettingsPanel> {
                       visualDensity: VisualDensity.compact,
                       padding: const EdgeInsets.symmetric(horizontal: 10),
                     ),
-                    child: const Text('安装', style: TextStyle(fontSize: 12)),
+                    child: Text(
+                      L.pick(context, '安装', 'Install'),
+                      style: const TextStyle(fontSize: 12),
+                    ),
                   ),
         ],
       ),
@@ -447,97 +818,136 @@ class _SelectionSettingsPanelState extends State<SelectionSettingsPanel> {
 
   List<Widget> _apiSection() {
     final details = <String>[
-      _apiTypeLabel(_settings.apiType),
+      _apiTypeLabel(context, _settings.apiType),
       if (_settings.apiEndpoint.trim().isNotEmpty) _settings.apiEndpoint.trim(),
       if (_settings.apiModel.trim().isNotEmpty) _settings.apiModel.trim(),
       if (_settings.apiType == 'baidu' && _settings.apiAppId.trim().isNotEmpty)
         'APP ID ${_settings.apiAppId.trim()}',
-      _settings.apiKey.trim().isNotEmpty ? '密钥已填' : '密钥未填',
+      _settings.apiKey.trim().isNotEmpty
+          ? L.pick(context, '密钥已填', 'Key set')
+          : L.pick(context, '密钥未填', 'No key'),
     ];
     return [
       Padding(
         padding: const EdgeInsets.only(top: 4),
         child: Text(
-          '当前接口：${details.join(' · ')}',
+          L.pick(
+            context,
+            '当前接口：${details.join(' · ')}',
+            'Current: ${details.join(' · ')}',
+          ),
           style: const TextStyle(fontSize: 12, color: Colors.white70),
         ),
       ),
       Padding(
         padding: const EdgeInsets.only(top: 6),
         child: OutlinedButton(
-          onPressed: () => setState(() => _apiOpen = !_apiOpen),
-          child: Text(_apiOpen ? '收起配置' : '配置在线翻译 API'),
+          onPressed: () {
+            if (!_apiOpen) _resetApiDraft();
+            setState(() => _apiOpen = !_apiOpen);
+          },
+          child: Text(
+            _apiOpen
+                ? L.pick(context, '收起配置', 'Hide config')
+                : L.pick(context, '配置在线翻译 API', 'Configure online API'),
+          ),
         ),
       ),
       if (_apiOpen) ...[
-        _group('翻译协议', _settings.apiType, const [
-          ('openai', 'OpenAI 兼容（DeepSeek / OpenAI / Ollama…）'),
-          ('baidu', '百度翻译'),
-          ('deepl', 'DeepL'),
-          ('libre', 'LibreTranslate'),
-        ], (value) => _apply(_settings.copyWith(apiType: value))),
-        if (_settings.apiType == 'openai') ...[
+        _group(L.pick(context, '翻译协议', 'Protocol'), _apiTypeV, const [
+          (
+            'openai',
+            'OpenAI 兼容（DeepSeek / OpenAI / Ollama…）',
+            'OpenAI-compatible (DeepSeek / OpenAI / Ollama…)',
+          ),
+          ('baidu', '百度翻译', 'Baidu Translate'),
+          ('deepl', 'DeepL', 'DeepL'),
+          ('libre', 'LibreTranslate', 'LibreTranslate'),
+        ], (value) => setState(() => _draftApiType = value)),
+        if (_apiTypeV == 'openai') ...[
           _apiField(
-            'API 地址',
-            _settings.apiEndpoint,
+            L.pick(context, 'API 地址', 'API endpoint'),
+            _apiEndpointV,
             'https://api.deepseek.com',
-            (value) => _apply(_settings.copyWith(apiEndpoint: value)),
+            (value) => setState(() => _draftApiEndpoint = value),
           ),
           _apiField(
-            'API 密钥',
-            _settings.apiKey,
+            L.pick(context, 'API 密钥', 'API key'),
+            _apiKeyV,
             'sk-…',
-            (value) => _apply(_settings.copyWith(apiKey: value)),
+            (value) => setState(() => _draftApiKey = value),
             obscure: true,
           ),
           _apiField(
-            '模型名',
-            _settings.apiModel,
+            L.pick(context, '模型名', 'Model name'),
+            _apiModelV,
             'deepseek-chat',
-            (value) => _apply(_settings.copyWith(apiModel: value)),
+            (value) => setState(() => _draftApiModel = value),
           ),
-        ] else if (_settings.apiType == 'baidu') ...[
+        ] else if (_apiTypeV == 'baidu') ...[
           _apiField(
             'APP ID',
-            _settings.apiAppId,
-            '在 fanyi-api.baidu.com 免费申请',
-            (value) => _apply(_settings.copyWith(apiAppId: value)),
+            _apiAppIdV,
+            L.pick(
+              context,
+              '在 fanyi-api.baidu.com 免费申请',
+              'Free at fanyi-api.baidu.com',
+            ),
+            (value) => setState(() => _draftApiAppId = value),
           ),
           _apiField(
-            '密钥',
-            _settings.apiKey,
-            '与 APP ID 配对',
-            (value) => _apply(_settings.copyWith(apiKey: value)),
+            L.pick(context, '密钥', 'Secret key'),
+            _apiKeyV,
+            L.pick(context, '与 APP ID 配对', 'Paired with the APP ID'),
+            (value) => setState(() => _draftApiKey = value),
             obscure: true,
           ),
-        ] else if (_settings.apiType == 'deepl')
+        ] else if (_apiTypeV == 'deepl')
           _apiField(
-            '密钥',
-            _settings.apiKey,
-            '…:fx 结尾为免费版',
-            (value) => _apply(_settings.copyWith(apiKey: value)),
+            L.pick(context, '密钥', 'Secret key'),
+            _apiKeyV,
+            L.pick(context, '…:fx 结尾为免费版', 'ends with :fx for the free tier'),
+            (value) => setState(() => _draftApiKey = value),
             obscure: true,
           )
         else ...[
           _apiField(
-            'API 地址',
-            _settings.apiEndpoint,
+            L.pick(context, 'API 地址', 'API endpoint'),
+            _apiEndpointV,
             'https://libretranslate.example.com',
-            (value) => _apply(_settings.copyWith(apiEndpoint: value)),
+            (value) => setState(() => _draftApiEndpoint = value),
           ),
           _apiField(
-            'API 密钥',
-            _settings.apiKey,
-            '可留空',
-            (value) => _apply(_settings.copyWith(apiKey: value)),
+            L.pick(context, 'API 密钥', 'API key'),
+            _apiKeyV,
+            L.pick(context, '可留空', 'Optional'),
+            (value) => setState(() => _draftApiKey = value),
             obscure: true,
           ),
         ],
         Padding(
           padding: const EdgeInsets.only(top: 8),
+          child: Text(
+            L.pick(
+              context,
+              '改完点「测试连接」，成功后才会保存并生效。',
+              'Edit, then press "Test connection"; it saves only on success.',
+            ),
+            style: TextStyle(
+              fontSize: 11,
+              color: Colors.white.withValues(alpha: 0.6),
+            ),
+          ),
+        ),
+        Padding(
+          padding: const EdgeInsets.only(top: 4),
           child: OutlinedButton(
             onPressed: _apiTesting ? null : _runApiTest,
-            child: Text(_apiTesting ? '测试中…' : '测试连接'),
+            child: Text(
+              _apiTesting
+                  ? L.pick(context, '测试中…', 'Testing…')
+                  : L.pick(context, '测试连接', 'Test connection'),
+            ),
           ),
         ),
         if (_apiTestResult.isNotEmpty)
@@ -554,67 +964,114 @@ class _SelectionSettingsPanelState extends State<SelectionSettingsPanel> {
     ];
   }
 
-  List<Widget> _localModelsSection() {
-    return [
-      Padding(
-        padding: const EdgeInsets.only(top: 6),
-        child: OutlinedButton(
-          onPressed: () => setState(() => _modelsOpen = !_modelsOpen),
-          child: Text(_modelsOpen ? '收起模型列表' : '管理本地翻译模型（下载/删除）'),
-        ),
-      ),
-      if (_modelsOpen) ...[
-        if (_packBusy != const ('', ''))
-          Padding(
-            padding: const EdgeInsets.only(top: 6),
-            child: Row(
-              children: [
-                const SizedBox(
-                  width: 14,
-                  height: 14,
-                  child: CircularProgressIndicator(strokeWidth: 2),
-                ),
-                const SizedBox(width: 10),
-                Expanded(
-                  child: Text(
-                    _packMessage,
-                    style: const TextStyle(fontSize: 12),
-                  ),
-                ),
-              ],
-            ),
+  /// 本地翻译模型目录覆盖（「选择本地模型目录」项选中时直接展开）：默认用内置
+  /// 下载目录，可指向用户自己的目录。选目录走贴边悬浮菜单，点「选择此文件夹」时
+  /// 校验目录可用（Argos 语言包或 mt/m2m100），清除后回退默认。
+  Widget _translateDirOverride() {
+    final chosen = _settings.translateModelsDir.trim();
+    return Padding(
+      padding: const EdgeInsets.only(top: 8),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            L.pick(context, '本地模型目录', 'Local model folder'),
+            style: const TextStyle(fontSize: 12),
           ),
-        for (final (from, to, label) in TranslateService.packCatalog)
-          ListTile(
-            dense: true,
-            visualDensity: VisualDensity.compact,
-            contentPadding: EdgeInsets.zero,
-            title: Text(label, style: const TextStyle(fontSize: 13)),
-            trailing: _packBusy == (from, to)
-                ? const SizedBox(
-                    width: 16,
-                    height: 16,
-                    child: CircularProgressIndicator(strokeWidth: 2),
-                  )
-                : TextButton(
-                    onPressed: () => _togglePack(from, to),
-                    child: Text(
-                      (_packInstalled[(from, to)] ?? false) ? '删除' : '下载',
-                      style: const TextStyle(fontSize: 12),
+          const SizedBox(height: 4),
+          Row(
+            children: [
+              Expanded(
+                child: Text(
+                  chosen.isEmpty
+                      ? L.pick(
+                          context,
+                          '未选择（用默认下载目录）',
+                          'None (using default folder)',
+                        )
+                      : chosen,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(fontSize: 11, color: Colors.white70),
+                ),
+              ),
+              const SizedBox(width: 8),
+              if (chosen.isNotEmpty)
+                TextButton(
+                  onPressed: () =>
+                      _apply(_settings.copyWith(translateModelsDir: '')),
+                  child: Text(L.pick(context, '清除', 'Clear')),
+                ),
+              Builder(
+                builder: (BuildContext buttonContext) => OutlinedButton(
+                  onPressed: () => showPathChooserPopup(
+                    anchorContext: buttonContext,
+                    title: L.pick(
+                      context,
+                      '选择本地翻译模型目录',
+                      'Choose local translation model folder',
                     ),
+                    directoryMode: true,
+                    requiresTranslateModels: true,
+                    translateValidator: (path) async {
+                      try {
+                        final result = await widget.translateService
+                            .validateTranslateModelsDir(path);
+                        if (result.argosPacks > 0 || result.m2m) return null;
+                        return L.pick(
+                          context,
+                          '这个目录里没有可用的翻译模型（需 Argos 语言包或 mt/m2m100）',
+                          'No usable translation model here '
+                              '(needs an Argos pack or mt/m2m100)',
+                        );
+                      } on Object catch (error) {
+                        return '$error'.replaceFirst('Exception: ', '');
+                      }
+                    },
+                    anchorRect: _panelRect(),
+                    background: _panelBg,
+                    initialDirectory: _translateInitialDirectory(),
+                    onSelected: (path) async {
+                      // 选本地目录时把引擎一起定对：目录里有 Argos 语言包就用
+                      // argos，否则（只有 mt/m2m100）用 m2m100。否则引擎会停在
+                      // 默认 argos，导致「校验命中 M2M、翻译却找不到语言包」。
+                      var engine = 'argos';
+                      try {
+                        final result = await widget.translateService
+                            .validateTranslateModelsDir(path);
+                        engine = result.argosPacks > 0 ? 'argos' : 'm2m100';
+                      } on Object {
+                        // 校验器刚放行过，这里异常只可能是竞态；退回 argos。
+                      }
+                      if (!mounted) return;
+                      _apply(
+                        _settings.copyWith(
+                          translateModelsDir: path,
+                          translateEngine: engine,
+                        ),
+                      );
+                    },
                   ),
+                  child: Text(L.pick(context, '选择目录', 'Choose folder')),
+                ),
+              ),
+            ],
           ),
-      ],
-    ];
+        ],
+      ),
+    );
   }
 
   List<Widget> _ocrSection() {
     return [
-      const Padding(
-        padding: EdgeInsets.only(top: 10, bottom: 2),
+      Padding(
+        padding: const EdgeInsets.only(top: 10, bottom: 2),
         child: Text(
-          '识字模型（截图取字与翻译共用，CPU 推理）',
-          style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600),
+          L.pick(
+            context,
+            '识字模型（截图取字与翻译共用，CPU 推理）',
+            'OCR model (shared by capture-to-text and translation, CPU inference)',
+          ),
+          style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600),
         ),
       ),
       RadioGroup<String>(
@@ -633,17 +1090,152 @@ class _SelectionSettingsPanelState extends State<SelectionSettingsPanel> {
                 visualDensity: VisualDensity.compact,
                 contentPadding: EdgeInsets.zero,
                 value: key,
-                title: Text(label, style: const TextStyle(fontSize: 13)),
+                title: Text(
+                  L.pick(context, label.zh, label.en),
+                  style: const TextStyle(fontSize: 13),
+                ),
                 subtitle: Text(
-                  key == 'builtin'
-                      ? note
-                      : '$note · ${_ocrInstalled[key] ?? false ? '已下载' : '未下载'}',
+                  TranslateService.isDownloadableOcr(key)
+                      ? '${L.pick(context, note.zh, note.en)} · '
+                            '${_ocrInstalled[key] ?? false ? L.pick(context, '已下载', 'Downloaded') : L.pick(context, '未下载', 'Not downloaded')}'
+                      : L.pick(context, note.zh, note.en),
                   style: const TextStyle(fontSize: 11, color: Colors.white60),
                 ),
               ),
           ],
         ),
       ),
+      if (_settings.ocrModel == 'api')
+        Padding(
+          padding: const EdgeInsets.only(top: 6),
+          child: Container(
+            padding: const EdgeInsets.all(8),
+            decoration: BoxDecoration(
+              color: Colors.orange.withValues(alpha: 0.12),
+              borderRadius: BorderRadius.circular(8),
+              border: Border.all(color: Colors.orangeAccent),
+            ),
+            child: Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Icon(
+                  Icons.warning_amber_rounded,
+                  size: 16,
+                  color: Colors.orangeAccent,
+                ),
+                const SizedBox(width: 6),
+                Expanded(
+                  child: Text(
+                    L.pick(
+                      context,
+                      '在线视觉模型识字：文字能读出来，但框的位置常常对不准'
+                          '（漏行、粗框、把图标当文字），翻译蒙版可能盖偏或盖不全。'
+                          '需要逐行精确定位，请改用上面的本地 PP-OCR 模型。',
+                      'Online vision-model OCR: the text can be read, but the box '
+                          'positions are often off (missed lines, coarse boxes, '
+                          'icons mistaken for text), so the translation mask may be '
+                          'misplaced or incomplete. For precise per-line positioning, '
+                          'switch to a local PP-OCR model above.',
+                    ),
+                    style: const TextStyle(fontSize: 11, color: Colors.white),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      if (_settings.ocrModel == 'api')
+        Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            _apiField(
+              L.pick(context, 'OCR API 地址', 'OCR API endpoint'),
+              _settings.ocrApiEndpoint,
+              L.pick(
+                context,
+                '留空则复用翻译 API 地址',
+                'Leave blank to reuse the translation endpoint',
+              ),
+              (v) => _apply(_settings.copyWith(ocrApiEndpoint: v)),
+            ),
+            _apiField(
+              L.pick(context, 'OCR API 密钥', 'OCR API key'),
+              _settings.ocrApiKey,
+              L.pick(
+                context,
+                '留空则复用翻译 API 密钥',
+                'Leave blank to reuse the translation key',
+              ),
+              (v) => _apply(_settings.copyWith(ocrApiKey: v)),
+              obscure: true,
+            ),
+            _apiField(
+              L.pick(context, 'OCR 模型名', 'OCR model name'),
+              _settings.ocrApiModel,
+              L.pick(
+                context,
+                '留空则复用翻译模型名（需支持图片输入）',
+                'Leave blank to reuse the translation model (must accept images)',
+              ),
+              (v) => _apply(_settings.copyWith(ocrApiModel: v)),
+            ),
+          ],
+        ),
+      if (_settings.ocrModel == 'local')
+        Padding(
+          padding: const EdgeInsets.only(top: 8),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                L.pick(context, '本地模型目录', 'Local model directory'),
+                style: const TextStyle(fontSize: 12),
+              ),
+              const SizedBox(height: 4),
+              Row(
+                children: [
+                  Expanded(
+                    child: Text(
+                      _settings.ocrLocalPath.trim().isEmpty
+                          ? L.pick(
+                              context,
+                              '未选择本地模型目录',
+                              'No local model folder chosen',
+                            )
+                          : _settings.ocrLocalPath.trim(),
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(
+                        fontSize: 11,
+                        color: Colors.white70,
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  Builder(
+                    builder: (BuildContext buttonContext) => OutlinedButton(
+                      onPressed: () => showPathChooserPopup(
+                        anchorContext: buttonContext,
+                        title: L.pick(
+                          context,
+                          '选择本地 OCR 模型目录',
+                          'Choose local OCR model folder',
+                        ),
+                        directoryMode: true,
+                        requiresOcrModels: true,
+                        anchorRect: _panelRect(),
+                        background: _panelBg,
+                        initialDirectory: _ocrInitialDirectory(),
+                        onSelected: (path) =>
+                            _apply(_settings.copyWith(ocrLocalPath: path)),
+                      ),
+                      child: Text(L.pick(context, '选择目录', 'Choose folder')),
+                    ),
+                  ),
+                ],
+              ),
+            ],
+          ),
+        ),
       if (_ocrBusyKey.isNotEmpty)
         Padding(
           padding: const EdgeInsets.symmetric(vertical: 6),
@@ -661,23 +1253,39 @@ class _SelectionSettingsPanelState extends State<SelectionSettingsPanel> {
             ],
           ),
         )
-      else if (_settings.ocrModel != 'builtin')
+      else if (TranslateService.isDownloadableOcr(_settings.ocrModel))
         Padding(
           padding: const EdgeInsets.only(top: 4),
           child: OutlinedButton(
             onPressed: () => _toggleOcr(_settings.ocrModel),
             child: Text(
-              (_ocrInstalled[_settings.ocrModel] ?? false) ? '删除模型' : '下载模型',
+              (_ocrInstalled[_settings.ocrModel] ?? false)
+                  ? L.pick(context, '删除模型', 'Delete model')
+                  : L.pick(context, '下载模型', 'Download model'),
             ),
           ),
         ),
+      Padding(
+        padding: const EdgeInsets.only(top: 6),
+        child: Text(
+          L.pick(
+            context,
+            '默认 v3 自带离线、中英稳；v4/v5/v6 需下载，覆盖更全；'
+                '「在线（视觉大模型）」复用翻译 API 端点识字，但框定位常不准。',
+            'v3 ships offline and is solid for Chinese/English; v4/v5/v6 need '
+                'download for broader coverage; "Online (vision LLM)" reuses the '
+                'translation API endpoint for OCR, but box positions are often off.',
+          ),
+          style: const TextStyle(fontSize: 11, color: Colors.white60),
+        ),
+      ),
     ];
   }
 
   Widget _group(
     String title,
     String groupValue,
-    List<(String, String)> options,
+    List<(String, String, String)> options,
     ValueChanged<String> onChanged,
   ) {
     return Column(
@@ -695,9 +1303,9 @@ class _SelectionSettingsPanelState extends State<SelectionSettingsPanel> {
           spacing: 6,
           runSpacing: 6,
           children: [
-            for (final (value, label) in options)
+            for (final (value, zh, en) in options)
               _ChoiceChip(
-                label: label,
+                label: L.pick(context, zh, en),
                 selected: value == groupValue,
                 onTap: () => onChanged(value),
               ),
@@ -714,28 +1322,20 @@ class _SelectionSettingsPanelState extends State<SelectionSettingsPanel> {
     ValueChanged<String> onChanged, {
     bool obscure = false,
   }) {
-    return Padding(
-      padding: const EdgeInsets.only(top: 8),
-      child: TextField(
-        controller: TextEditingController(text: value)
-          ..selection = TextSelection.collapsed(offset: value.length),
-        obscureText: obscure,
-        style: const TextStyle(fontSize: 13),
-        decoration: InputDecoration(
-          isDense: true,
-          labelText: label,
-          hintText: hint,
-          border: const OutlineInputBorder(),
-        ),
-        onChanged: onChanged,
-      ),
+    return ApiConfigField(
+      label: label,
+      value: value,
+      hint: hint,
+      obscure: obscure,
+      topPadding: 8,
+      onChanged: onChanged,
     );
   }
 }
 
-String _apiTypeLabel(String type) => switch (type) {
-  'openai' => 'OpenAI 兼容',
-  'baidu' => '百度翻译',
+String _apiTypeLabel(BuildContext context, String type) => switch (type) {
+  'openai' => L.pick(context, 'OpenAI 兼容', 'OpenAI-compatible'),
+  'baidu' => L.pick(context, '百度翻译', 'Baidu Translate'),
   'deepl' => 'DeepL',
   'libre' => 'LibreTranslate',
   _ => type,

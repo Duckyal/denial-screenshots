@@ -19,7 +19,13 @@ class ScreenshotSettings {
     this.translateTextColor = '000000',
     this.translateMaskMode = 'blur',
     this.translateTextColorMode = 'auto',
-    this.ocrModel = 'builtin',
+    this.ocrModel = 'v3',
+    this.ocrLocalPath = '',
+    this.ocrApiEndpoint = '',
+    this.ocrApiModel = '',
+    this.ocrApiKey = '',
+    this.translateEngine = 'argos',
+    this.translateModelsDir = '',
     this.autoScroll = true,
     this.autoScrollKey = 'Down',
     this.scrollInjector = 'denial',
@@ -37,9 +43,30 @@ class ScreenshotSettings {
   /// 翻译文字颜色模式：'auto'（提取图片里文字的原色）| 'fixed'（固定颜色）。
   final String translateTextColorMode;
 
-  /// 识字用的 OCR 模型：'builtin'（组件自带的 PP-OCRv3）|
-  /// 'v4mobile'（PP-OCRv4 移动版，需下载）| 'v4server'（服务器版，需下载）。
+  /// 识字用的 OCR 模型（默认 'v3'）：'v3'（自带 PP-OCRv3 中英）|
+  /// 'v4mobile'/'v4server'/'v5mobile'/'v5server'/'v6tiny'/'v6medium'（需下载）|
+  /// 'builtin'（统一包内置 PP-OCRv6 small，多语言，自带离线）|
+  /// 'api'（在线视觉大模型，复用翻译 API 的 OpenAI 兼容端点）。
   final String ocrModel;
+
+  /// 自选本地 OCR 模型目录（含 det/rec 的 .onnx）；ocrModel=='local' 时生效。
+  final String ocrLocalPath;
+
+  /// OCR 独立在线 API（ocrModel=='api' 时用）：留空的字段回退到翻译 API 对应值，
+  /// 常见用法是复用翻译 API 的地址/密钥、只换一个支持图片输入的视觉模型名。
+  final String ocrApiEndpoint;
+  final String ocrApiModel;
+  final String ocrApiKey;
+
+  /// 本地翻译引擎：'argos'（默认，逐语对语言包，中英最稳最快）|
+  /// 'm2m100'（M2M-100 418M 单模型多语言，需下载，适合源语言未知/混杂的
+  /// 截图，但英→中方向偏弱、CPU 上每句更慢）。
+  final String translateEngine;
+
+  /// 自选本地翻译模型目录，覆盖内置下载目录（~/.local/share/denial-screenshots/models）。
+  /// 留空则用默认。指向的目录需按 Argos 布局（子目录含 metadata.json）或含
+  /// mt/m2m100 才有内容可扫；OCR 的 ocrLocalPath 是另一套、互不影响。
+  final String translateModelsDir;
 
   /// 长截图是否自动滚动。开启后按 [autoScrollKey] 向聚焦的客户端注入
   /// 键盘按键来翻页，无需手动滚动（依赖目标应用认可该按键为滚动）。
@@ -74,6 +101,7 @@ class ScreenshotSettings {
     'tool.rect': 'r',
     'tool.circle': 'c',
     'tool.text': 't',
+    'tool.highlighter': 'h',
     'tool.mask': 'm',
     'tool.eraser': 'e',
     'scrollCapture': 'super+r',
@@ -123,6 +151,19 @@ class ScreenshotSettings {
     return Color(0xFF000000 | value);
   }
 
+  /// 传给 sidecar 的 OCR 模型值：'local' 时换成自选目录的绝对路径（load_ocr 里
+  /// os.path.join 遇绝对路径直接当模型目录用），其余按目录 key 原样传。
+  String get ocrModelForSidecar =>
+      ocrModel == 'local' ? ocrLocalPath.trim() : ocrModel;
+
+  /// OCR 在线 API 各字段：填了用自己的，留空回退到翻译 API。
+  String get effectiveOcrApiEndpoint =>
+      ocrApiEndpoint.trim().isNotEmpty ? ocrApiEndpoint : apiEndpoint;
+  String get effectiveOcrApiModel =>
+      ocrApiModel.trim().isNotEmpty ? ocrApiModel : apiModel;
+  String get effectiveOcrApiKey =>
+      ocrApiKey.trim().isNotEmpty ? ocrApiKey : apiKey;
+
   ScreenshotSettings copyWith({
     String? dockPosition,
     Map<String, String>? shortcuts,
@@ -138,6 +179,12 @@ class ScreenshotSettings {
     String? translateMaskMode,
     String? translateTextColorMode,
     String? ocrModel,
+    String? ocrLocalPath,
+    String? ocrApiEndpoint,
+    String? ocrApiModel,
+    String? ocrApiKey,
+    String? translateEngine,
+    String? translateModelsDir,
     bool? autoScroll,
     String? autoScrollKey,
     String? scrollInjector,
@@ -159,6 +206,12 @@ class ScreenshotSettings {
       translateTextColorMode:
           translateTextColorMode ?? this.translateTextColorMode,
       ocrModel: ocrModel ?? this.ocrModel,
+      ocrLocalPath: ocrLocalPath ?? this.ocrLocalPath,
+      ocrApiEndpoint: ocrApiEndpoint ?? this.ocrApiEndpoint,
+      ocrApiModel: ocrApiModel ?? this.ocrApiModel,
+      ocrApiKey: ocrApiKey ?? this.ocrApiKey,
+      translateEngine: translateEngine ?? this.translateEngine,
+      translateModelsDir: translateModelsDir ?? this.translateModelsDir,
       autoScroll: autoScroll ?? this.autoScroll,
       autoScrollKey: autoScrollKey ?? this.autoScrollKey,
       scrollInjector: scrollInjector ?? this.scrollInjector,
@@ -181,6 +234,12 @@ class ScreenshotSettings {
     'translateMaskMode': translateMaskMode,
     'translateTextColorMode': translateTextColorMode,
     'ocrModel': ocrModel,
+    'ocrLocalPath': ocrLocalPath,
+    'ocrApiEndpoint': ocrApiEndpoint,
+    'ocrApiModel': ocrApiModel,
+    'ocrApiKey': ocrApiKey,
+    'translateEngine': translateEngine,
+    'translateModelsDir': translateModelsDir,
     'autoScroll': autoScroll,
     'autoScrollKey': autoScrollKey,
     'scrollInjector': scrollInjector,
@@ -216,7 +275,13 @@ class ScreenshotSettings {
           : 'blur',
       translateTextColorMode:
           json['translateTextColorMode'] as String? ?? 'auto',
-      ocrModel: json['ocrModel'] as String? ?? 'builtin',
+      ocrModel: json['ocrModel'] as String? ?? 'v3',
+      ocrLocalPath: json['ocrLocalPath'] as String? ?? '',
+      ocrApiEndpoint: json['ocrApiEndpoint'] as String? ?? '',
+      ocrApiModel: json['ocrApiModel'] as String? ?? '',
+      ocrApiKey: json['ocrApiKey'] as String? ?? '',
+      translateEngine: json['translateEngine'] as String? ?? 'argos',
+      translateModelsDir: json['translateModelsDir'] as String? ?? '',
       autoScroll: json['autoScroll'] as bool? ?? true,
       autoScrollKey: json['autoScrollKey'] as String? ?? 'Down',
       scrollInjector: switch (json['scrollInjector'] as String?) {

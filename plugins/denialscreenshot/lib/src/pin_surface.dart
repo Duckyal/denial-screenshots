@@ -8,6 +8,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import 'clipboard.dart';
 import 'clipboard_read.dart';
+import 'l10n.dart';
 import 'scroll_capture.dart';
 import 'editor/commands.dart';
 import 'editor_bus.dart';
@@ -81,7 +82,9 @@ final class PinCardBus {
   Future<void> pinFromClipboard() async {
     final content = await readClipboardPinContent();
     if (content == null) {
-      showToast('剪贴板里没有可钉住的图片或文字');
+      showToast(
+        L.s('剪贴板里没有可钉住的图片或文字', 'No image or text in the clipboard to pin'),
+      );
       return;
     }
     if (content is ClipboardImage) {
@@ -499,7 +502,7 @@ class _ScrollPreviewWindowState extends State<_ScrollPreviewWindow> {
           child: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
-              _buildHeader(preview, viewport),
+              _buildHeader(context, preview, viewport),
               ClipRRect(
                 borderRadius: const BorderRadius.vertical(
                   bottom: Radius.circular(9),
@@ -522,7 +525,11 @@ class _ScrollPreviewWindowState extends State<_ScrollPreviewWindow> {
     );
   }
 
-  Widget _buildHeader(ScrollPreview preview, Size viewport) {
+  Widget _buildHeader(
+    BuildContext context,
+    ScrollPreview preview,
+    Size viewport,
+  ) {
     return GestureDetector(
       behavior: HitTestBehavior.opaque,
       onPanStart: (_) {
@@ -541,22 +548,15 @@ class _ScrollPreviewWindowState extends State<_ScrollPreviewWindow> {
             padding: const EdgeInsets.only(left: 10, right: 2),
             child: Row(
               children: [
-                const Text(
-                  '长图预览',
-                  style: TextStyle(
+                Text(
+                  L.pick(context, '长图预览', 'Long-image preview'),
+                  style: const TextStyle(
                     color: Colors.white,
                     fontSize: 12,
                     fontWeight: FontWeight.w600,
                   ),
                 ),
-                const SizedBox(width: 8),
-                Expanded(
-                  child: Text(
-                    '${preview.width}×${preview.height}',
-                    textAlign: TextAlign.right,
-                    style: const TextStyle(color: Colors.white54, fontSize: 11),
-                  ),
-                ),
+                const Spacer(),
                 GestureDetector(
                   behavior: HitTestBehavior.opaque,
                   onTap: () => ScrollCaptureManager.instance.stop(),
@@ -569,18 +569,18 @@ class _ScrollPreviewWindowState extends State<_ScrollPreviewWindow> {
                       color: const Color(0xFF1976D2),
                       borderRadius: BorderRadius.circular(6),
                     ),
-                    child: const Row(
+                    child: Row(
                       mainAxisSize: MainAxisSize.min,
                       children: [
-                        Icon(
+                        const Icon(
                           Icons.stop_circle_outlined,
                           size: 14,
                           color: Colors.white,
                         ),
-                        SizedBox(width: 4),
+                        const SizedBox(width: 4),
                         Text(
-                          '结束截屏',
-                          style: TextStyle(
+                          L.pick(context, '结束截屏', 'Stop capture'),
+                          style: const TextStyle(
                             color: Colors.white,
                             fontSize: 12,
                             fontWeight: FontWeight.w500,
@@ -639,8 +639,11 @@ class _ScrollRegionMark extends StatelessWidget {
       builder: (BuildContext context, int captured, Widget? child) {
         final preview = manager.preview.value;
         final stitched = preview?.height ?? 0;
-        final label =
-            '${region.width.round()}×${region.height.round()}\n已拼 $stitched px · $captured 帧';
+        final label = L.pick(
+          context,
+          '${region.width.round()}×${region.height.round()}\n已拼 $stitched px · $captured 帧',
+          '${region.width.round()}×${region.height.round()}\nStitched $stitched px · $captured frames',
+        );
         return ValueListenableBuilder<ScrollPreview?>(
           valueListenable: manager.preview,
           builder: (BuildContext context, ScrollPreview? _, Widget? __) =>
@@ -876,7 +879,14 @@ class _PinnedImageCard extends StatelessWidget {
           Positioned(
             top: 6,
             right: 6,
-            child: _PinCloseButton(onTap: onClose, tooltip: '关闭（双击浮窗打开编辑）'),
+            child: _PinCloseButton(
+              onTap: onClose,
+              tooltip: L.pick(
+                context,
+                '关闭（双击浮窗打开编辑）',
+                'Close (double-click the card to edit)',
+              ),
+            ),
           ),
           // 窗口式边缘/角落缩放手柄。右上角留给关闭按钮，从手柄列表里去掉。
           Positioned.fill(child: _PinnedResizeHandles(onResize: onResize)),
@@ -949,11 +959,15 @@ class _PinnedTextCard extends StatelessWidget {
                 ),
                 const Spacer(),
                 Tooltip(
-                  message: '复制全部',
+                  message: L.pick(context, '复制全部', 'Copy all'),
                   child: GestureDetector(
                     onTap: () async {
                       final copied = await copyTextToClipboard(text);
-                      PinCardBus.instance.showToast(copied ? '已复制文字' : '复制失败');
+                      PinCardBus.instance.showToast(
+                        copied
+                            ? L.s('已复制文字', 'Text copied')
+                            : L.s('复制失败', 'Copy failed'),
+                      );
                     },
                     child: Padding(
                       padding: const EdgeInsets.all(2),
@@ -966,7 +980,10 @@ class _PinnedTextCard extends StatelessWidget {
                   ),
                 ),
                 const SizedBox(width: 8),
-                _PinCloseButton(onTap: onClose, tooltip: '关闭'),
+                _PinCloseButton(
+                  onTap: onClose,
+                  tooltip: L.pick(context, '关闭', 'Close'),
+                ),
               ],
             ),
             const SizedBox(height: 4),

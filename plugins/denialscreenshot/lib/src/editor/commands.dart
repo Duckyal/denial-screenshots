@@ -128,26 +128,22 @@ class DrawCommand {
       ),
       textDirection: TextDirection.ltr,
     )..layout(maxWidth: inner?.width ?? textMaxWidth);
+    // 自由文字（无文本框）：字号优先，按用户设定值渲染，不缩放。
     if (inner == null) return build(baseFontSize);
-    // 字号随框自适应：装不下就按比例逐级缩小（不放大，框大不多占）。
+    // 文本框：换行后仍塞不下（高或宽超出内框）就逐级缩小字号，直到完整放进
+    // 框内；缩到下限仍放不下则停在最小字号、允许溢出。
     var fontSize = baseFontSize;
     var painter = build(fontSize);
-    var attempts = 0;
-    while ((painter.width > inner.width || painter.height > inner.height) &&
-        fontSize > 7 &&
-        attempts < 24) {
-      final scale =
-          math.min(
-            inner.width / math.max(painter.width, 1),
-            inner.height / math.max(painter.height, 1),
-          ) *
-          0.92;
-      fontSize = (fontSize * scale).clamp(7.0, baseFontSize);
+    while ((painter.height > inner.height || painter.width > inner.width) &&
+        fontSize > _minBoxFontSize) {
+      fontSize = math.max(_minBoxFontSize, fontSize * 0.9);
       painter = build(fontSize);
-      attempts++;
     }
     return painter;
   }
+
+  /// 文本框自适应缩小的字号下限（渲染像素），低于此值基本不可读。
+  static const double _minBoxFontSize = 6;
 
   DrawCommand({
     required this.type,
@@ -233,11 +229,12 @@ class DrawCommand {
   }
 }
 
-/// 画笔与橡皮痕迹是编辑效果而非图形对象，不参与点击选中/拖动/整体删除，
+/// 画笔、橡皮与荧光笔痕迹是编辑效果而非图形对象，不参与点击选中/拖动/整体删除，
 /// 否则点击会删掉之前的橡皮命令，令已擦除的痕迹重新出现。
 bool isEditableEffect(DrawCommand command) {
   return command.type == ScreenshotToolType.brush ||
-      command.type == ScreenshotToolType.eraser;
+      command.type == ScreenshotToolType.eraser ||
+      command.type == ScreenshotToolType.highlighter;
 }
 
 /// 从最上层往下找到第一个可整体操作（光标模式拖动/编辑）的图形对象。
@@ -284,6 +281,7 @@ bool commandHits(DrawCommand command, Offset position, double radius) {
     case ScreenshotToolType.select:
     case ScreenshotToolType.brush:
     case ScreenshotToolType.eraser:
+    case ScreenshotToolType.highlighter:
       return false;
     case ScreenshotToolType.mask:
       return command.rect.inflate(radius).contains(position);

@@ -5,16 +5,21 @@ import 'dart:typed_data';
 import 'dart:ui' as ui;
 
 import 'package:denial_flutter_sdk/input.dart';
-import 'package:denial_flutter_sdk/state.dart' show denialBridgeProvider;
+import 'package:denial_flutter_sdk/state.dart'
+    show denialBridgeProvider, screenshotSelectionProvider;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart' show KeyDownEvent, LogicalKeyboardKey;
+import 'package:flutter_localizations/flutter_localizations.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import 'capture_flow_bus.dart';
 import 'clipboard.dart';
+import 'editor/file_picker.dart';
 import 'editor/settings.dart';
 import 'editor/translate_service.dart';
 import 'editor_bus.dart';
+import 'l10n.dart';
+import 'panel_nav.dart';
 import 'pin_surface.dart';
 import 'scroll_capture.dart';
 import 'scroll_stitch.dart' show eraseRegionInPlace;
@@ -92,9 +97,20 @@ class _CaptureFlowHostState extends ConsumerState<CaptureFlowHost> {
   String _resultStatus = '';
   List<TranslateRegion> _resultRegions = const [];
 
+  /// 结果窗整块列表共用一个选择组（SelectableRegion）：跨行拖选、一次复制
+  /// 多行。SelectableRegion 需要一个常驻 FocusNode 承载选择焦点。
+  final FocusNode _resultSelectFocus = FocusNode();
+
   /// 设置面板（框选流程专用精简面板）。
   bool _settingsOpen = false;
+
+  /// 设置面板内部导航桥：ESC 先在面板里返回上一级（收起展开的 API 配置 /
+  /// 模型列表），都收起了才关面板。见 [SelectionPanelNav]。
+  final SelectionPanelNav _settingsNav = SelectionPanelNav();
   bool _savePanelOpen = false;
+
+  /// 保存面板（文件浏览器）导航桥：ESC 先回到上级目录，到根目录才关面板。
+  final SelectionPanelNav _saveNav = SelectionPanelNav();
   String _saveDirectory = '';
   String _saveFileName = 'Screenshot.png';
 
@@ -138,6 +154,7 @@ class _CaptureFlowHostState extends ConsumerState<CaptureFlowHost> {
     _requests?.cancel();
     _cursorSub?.cancel();
     _cursorPosition.dispose();
+    _resultSelectFocus.dispose();
     _translateService.dispose();
     _disposeKeyFrame();
     super.dispose();
@@ -157,8 +174,18 @@ class _CaptureFlowHostState extends ConsumerState<CaptureFlowHost> {
           if (event is KeyDownEvent &&
               event.logicalKey == LogicalKeyboardKey.escape) {
             if (!_visible || _capturing) return KeyEventResult.handled;
+            // 目录悬浮菜单是子菜单层：Esc 先收它，再轮到设置面板、结果窗、退出。
+            if (closePathChooserPopup()) return KeyEventResult.handled;
+            if (_settingsOpen && (_settingsNav.canGoBack?.call() ?? false)) {
+              _settingsNav.goBack?.call();
+              return KeyEventResult.handled;
+            }
             if (_settingsOpen) {
               setState(() => _settingsOpen = false);
+              return KeyEventResult.handled;
+            }
+            if (_savePanelOpen && (_saveNav.canGoBack?.call() ?? false)) {
+              _saveNav.goBack?.call();
               return KeyEventResult.handled;
             }
             if (_savePanelOpen) {
@@ -178,6 +205,15 @@ class _CaptureFlowHostState extends ConsumerState<CaptureFlowHost> {
             ? const SizedBox.shrink()
             : MaterialApp(
                 debugShowCheckedModeBanner: false,
+                // 跟随壳层 locale：见 editor_surface 同款说明，避免框选工具栏/
+                // 设置面板的 L.pick 文案落回英文。
+                locale:
+                    Localizations.maybeLocaleOf(context) ??
+                    View.of(context).platformDispatcher.locale,
+                supportedLocales: const [Locale('zh'), Locale('en')],
+                // 非英文 locale 必须挂 Global*Localizations，否则 TextField 内部
+                // MaterialLocalizations.of 空断言崩成灰块 ErrorWidget。
+                localizationsDelegates: GlobalMaterialLocalizations.delegates,
                 theme: ThemeData(
                   colorScheme: ColorScheme.fromSeed(seedColor: Colors.blue),
                   useMaterial3: true,
@@ -219,8 +255,16 @@ class _CaptureFlowHostState extends ConsumerState<CaptureFlowHost> {
           if (_region != null) _buildRegionOverlay(size, _region!),
           if (_resultOpen && _region != null)
             _buildResultWindow(size, _region!),
-          if (_settingsOpen && _region != null)
-            _buildSettingsOverlay(size, _region!),
+          // 常驻挂载、仅用可见性切换：面板的下载状态（M2M/语言包/识字/外部
+          // 工具）都存在它自己的 State 里，若按 _settingsOpen 条件卸载，关面板
+          // 即 dispose、重开转圈就清空。maintainState 让 State 跨开关存活，
+          // 后台下载继续、重开时进度原样还在。
+          if (_region != null)
+            Visibility(
+              visible: _settingsOpen,
+              maintainState: true,
+              child: _buildSettingsOverlay(size, _region!),
+            ),
           if (_savePanelOpen && _region != null)
             _buildSaveOverlay(size, _region!),
         ],
@@ -247,6 +291,7 @@ class _CaptureFlowHostState extends ConsumerState<CaptureFlowHost> {
         settings: _settings,
         translateService: _translateService,
         onChanged: _onSettingsChanged,
+        nav: _settingsNav,
         onClose: () => setState(() => _settingsOpen = false),
       ),
     );
@@ -327,6 +372,7 @@ class _CaptureFlowHostState extends ConsumerState<CaptureFlowHost> {
         initialDirectory: _saveDirectory,
         initialFileName: _saveFileName,
         onConfirm: _confirmSave,
+        nav: _saveNav,
         onClose: () => setState(() => _savePanelOpen = false),
       ),
     );
@@ -397,15 +443,35 @@ class _CaptureFlowHostState extends ConsumerState<CaptureFlowHost> {
           top: toolbar.top,
           onToolbarHitChanged: (hit) => _toolbarHit = hit,
           children: [
-            _toolItem(Icons.text_fields, '识字', () => _runText('ocr')),
-            _toolItem(Icons.translate, '翻译', () => _runText('translate')),
-            _toolItem(Icons.screenshot, '长截屏', _startScrollCapture),
-            _toolItem(Icons.edit, '编辑', _openEditor),
-            _toolItem(Icons.copy, '复制', _copyImage),
-            _toolItem(Icons.save_alt, '保存', _saveImage),
-            _toolItem(Icons.push_pin, '置顶', _pinImage),
-            _toolItem(Icons.settings, '设置', _openSettings),
-            _toolItem(Icons.close, '关闭', _close),
+            _toolItem(
+              Icons.text_fields,
+              L.pick(context, '识字', 'OCR'),
+              () => _runText('ocr'),
+            ),
+            _toolItem(
+              Icons.translate,
+              L.pick(context, '翻译', 'Translate'),
+              () => _runText('translate'),
+            ),
+            _toolItem(
+              Icons.screenshot,
+              L.pick(context, '长截屏', 'Scroll'),
+              _startScrollCapture,
+            ),
+            _toolItem(Icons.edit, L.pick(context, '编辑', 'Edit'), _openEditor),
+            _toolItem(Icons.copy, L.pick(context, '复制', 'Copy'), _copyImage),
+            _toolItem(
+              Icons.save_alt,
+              L.pick(context, '保存', 'Save'),
+              _saveImage,
+            ),
+            _toolItem(Icons.push_pin, L.pick(context, '置顶', 'Pin'), _pinImage),
+            _toolItem(
+              Icons.settings,
+              L.pick(context, '设置', 'Settings'),
+              _openSettings,
+            ),
+            _toolItem(Icons.close, L.pick(context, '关闭', 'Close'), _close),
           ],
         ),
       ],
@@ -459,25 +525,40 @@ class _CaptureFlowHostState extends ConsumerState<CaptureFlowHost> {
     return right >= left ? 'right' : 'left';
   }
 
-  /// 工具栏位置。默认贴选区下方；若结果窗也在下方，则让到结果窗下面；结果窗在
-  /// 上方时对称地让到结果窗上面。同侧放不下就换另一侧，上下都放不下时取上方并
-  /// 夹取到屏幕内。
+  /// 工具栏位置。结果窗已占一侧时，工具栏优先移到选区的**另一侧**，避免与
+  /// 结果窗同侧堆叠被挤出屏幕；异侧放不下才退回同侧堆叠。结果窗在左/右侧或
+  /// 未展开时，工具栏贴选区下方，下方放不下再贴上方，最后夹取到屏幕内。
   ({double left, double top}) _toolbarPlacement(Size size, Rect region) {
     final resultHeight = _resultWindowHeight ?? 0;
     final resultSide = _resultOpen ? _resultSide(size, region) : null;
-    final canBelow = region.bottom + 12 + _toolbarBarHeight <= size.height;
-    final canAbove = region.top - 12 - _toolbarBarHeight >= 0;
-    final belowPlain = region.bottom + 12;
-    final abovePlain = region.top - 12 - _toolbarBarHeight;
+    const gap = 12.0;
+    final canBelow = region.bottom + gap + _toolbarBarHeight <= size.height;
+    final canAbove = region.top - gap - _toolbarBarHeight >= 0;
+    final belowPlain = region.bottom + gap;
+    final abovePlain = region.top - gap - _toolbarBarHeight;
     final belowStacked = region.bottom + 10 + resultHeight + 10;
     final aboveStacked =
         region.top - 10 - resultHeight - 10 - _toolbarBarHeight;
+    final belowStackedFits = belowStacked + _toolbarBarHeight <= size.height;
+    final aboveStackedFits = aboveStacked >= 0;
 
     double top;
-    if (resultSide == 'below' && canBelow) {
-      top = belowStacked;
-    } else if (resultSide == 'above' && canAbove) {
-      top = aboveStacked;
+    if (resultSide == 'below') {
+      if (canAbove) {
+        top = abovePlain;
+      } else if (belowStackedFits) {
+        top = belowStacked;
+      } else {
+        top = abovePlain;
+      }
+    } else if (resultSide == 'above') {
+      if (canBelow) {
+        top = belowPlain;
+      } else if (aboveStackedFits) {
+        top = aboveStacked;
+      } else {
+        top = belowPlain;
+      }
     } else if (canBelow) {
       top = belowPlain;
     } else {
@@ -516,7 +597,9 @@ class _CaptureFlowHostState extends ConsumerState<CaptureFlowHost> {
     final useVertical = side == 'below' || side == 'above';
 
     Widget card({required double maxWidth, required double maxHeight}) {
-      final title = _resultMode == 'ocr' ? '识别结果' : '翻译结果';
+      final title = _resultMode == 'ocr'
+          ? L.pick(context, '识别结果', 'Recognized text')
+          : L.pick(context, '翻译结果', 'Translation');
       final hasText = _resultRegions.isNotEmpty;
       return KeyedSubtree(
         key: _resultCardKey,
@@ -579,7 +662,9 @@ class _CaptureFlowHostState extends ConsumerState<CaptureFlowHost> {
                     )
                   else if (!hasText)
                     Text(
-                      _resultStatus.isEmpty ? '未识别到文字' : _resultStatus,
+                      _resultStatus.isEmpty
+                          ? L.pick(context, '未识别到文字', 'No text recognized')
+                          : _resultStatus,
                       style: const TextStyle(
                         fontSize: 13,
                         color: Colors.white54,
@@ -587,15 +672,18 @@ class _CaptureFlowHostState extends ConsumerState<CaptureFlowHost> {
                     )
                   else
                     Flexible(
-                      child: ListView.separated(
-                        shrinkWrap: true,
-                        itemCount: _resultRegions.length,
-                        separatorBuilder: (_, _) => const SizedBox(height: 8),
-                        itemBuilder: (context, index) => _ResultRow(
-                          mode: _resultMode,
-                          source: _resultRegions[index].source,
-                          translated: _resultRegions[index].translated,
-                          index: index,
+                      child: SelectableRegion(
+                        focusNode: _resultSelectFocus,
+                        selectionControls: MaterialTextSelectionControls(),
+                        child: ListView.separated(
+                          shrinkWrap: true,
+                          itemCount: _resultRegions.length,
+                          separatorBuilder: (_, _) => const SizedBox(height: 8),
+                          itemBuilder: (context, index) => _ResultRow(
+                            mode: _resultMode,
+                            source: _resultRegions[index].source,
+                            translated: _resultRegions[index].translated,
+                          ),
                         ),
                       ),
                     ),
@@ -605,7 +693,7 @@ class _CaptureFlowHostState extends ConsumerState<CaptureFlowHost> {
                       alignment: Alignment.centerRight,
                       child: TextButton(
                         onPressed: _copyResultText,
-                        child: const Text('复制文字'),
+                        child: Text(L.pick(context, '复制文字', 'Copy text')),
                       ),
                     ),
                   ],
@@ -860,12 +948,25 @@ class _CaptureFlowHostState extends ConsumerState<CaptureFlowHost> {
   /// 鼠标被合成进 grim 的整屏帧里的包围盒大小（输出逻辑像素）。
   static const double _keyCursorBoxLogical = 36.0;
 
-  /// 用 grim 抓整屏作为关键帧并解码。发生在浮层显示之前，所以画面干净；
-  /// 抓完顺手把合成进画面里的鼠标指针抹掉，否则背景和裁出来的图都会带个
-  /// 鼠标剪影。指针位置在 grim 一启动就读，抓帧有延迟，等解码后再读会滞后。
+  /// 借用 shell 藏好光标后、grim 之前留给合成的一拍时长。太小 grim 可能仍
+  /// 抓到含光标的旧帧（尤其静态画面这一拍没重绘），太大拖慢启动；当前取
+  /// ~1.5 帧，按实测再调。
+  static const Duration _cursorHideSettle = Duration(milliseconds: 24);
+
+  /// 用 grim 抓整屏作为关键帧并解码。为了让抓到的画面天生不含软件光标，
+  /// 先借用 shell 自己的隐藏光标信号（把 `screenshotSelectionProvider` 置为
+  /// `preparing` 相 → shell 这一拍不画光标），等一拍合成出无光标画面后再 grim，
+  /// 抓完立刻恢复光标。若借不到（已有原生截图在跑，`prepare` 返回 false）就
+  /// 退回老办法：抓到后在像素层把光标抹掉。指针位置在 grim 一启动就读，抓帧
+  /// 有延迟，等解码后再读会滞后。
   Future<void> _loadKeyFrame() async {
     Uint8List? bytes;
     Offset? cursorAtCapture;
+    final hideId = _beginCursorHide();
+    if (hideId != null) {
+      // 给 shell 一拍时间真正合成出无光标的帧，否则 grim 仍可能抓到旧帧。
+      await Future<void>.delayed(_cursorHideSettle);
+    }
     try {
       final process = await Process.start('grim', [
         '-t',
@@ -873,10 +974,10 @@ class _CaptureFlowHostState extends ConsumerState<CaptureFlowHost> {
         '-',
       ], environment: childProcessEnvironment());
       cursorAtCapture = _cursorPosition.value;
-      final stdout = <int>[];
-      final stderr = <int>[];
-      process.stdout.listen((chunk) => stdout.addAll(chunk));
-      process.stderr.listen((chunk) => stderr.addAll(chunk));
+      final stdout = BytesBuilder(copy: false);
+      final stderr = BytesBuilder(copy: false);
+      process.stdout.listen(stdout.add);
+      process.stderr.listen(stderr.add);
       final code = await process.exitCode.timeout(
         const Duration(seconds: 4),
         onTimeout: () {
@@ -884,23 +985,31 @@ class _CaptureFlowHostState extends ConsumerState<CaptureFlowHost> {
           return -1;
         },
       );
-      if (code == 0 && stdout.isNotEmpty) {
-        bytes = Uint8List.fromList(stdout);
+      if (code == 0 && stdout.length > 0) {
+        bytes = stdout.takeBytes();
       }
     } on Object {
       bytes = null;
+    } finally {
+      _endCursorHide(hideId);
     }
     if (bytes == null || bytes.isEmpty) {
       _disposeKeyFrame();
       return;
     }
-    final rgba = await _decodeRgbaBytes(bytes);
-    if (rgba == null) {
-      _disposeKeyFrame();
-      return;
+    ui.Image? image;
+    if (hideId != null) {
+      // 主路径：画面本就无光标、不抹除，直接把 PNG 解成 ui.Image 即可，
+      // 省掉读回 rawRgba 再重编码这两趟全屏。
+      image = await _decodePngToImage(bytes);
+    } else {
+      // 回退：grim 抓到了光标，需在像素层抹掉，只能走 rawRgba 往返。
+      final rgba = await _decodeRgbaBytes(bytes);
+      if (rgba != null) {
+        _eraseKeyCursor(rgba.$1, rgba.$2, rgba.$3, cursorAtCapture);
+        image = await _rgbaToImage(rgba.$1, rgba.$2, rgba.$3);
+      }
     }
-    _eraseKeyCursor(rgba.$1, rgba.$2, rgba.$3, cursorAtCapture);
-    final image = await _rgbaToImage(rgba.$1, rgba.$2, rgba.$3);
     if (image == null) {
       _disposeKeyFrame();
       return;
@@ -908,6 +1017,44 @@ class _CaptureFlowHostState extends ConsumerState<CaptureFlowHost> {
     final previous = _keyFrame;
     _keyFrame = image;
     previous?.dispose();
+  }
+
+  /// PNG 一次性解码成 ui.Image，供「已藏光标、无需抹除」的关键帧路径使用。
+  static Future<ui.Image?> _decodePngToImage(Uint8List bytes) async {
+    try {
+      final codec = await ui.instantiateImageCodec(bytes);
+      final frame = await codec.getNextFrame();
+      codec.dispose();
+      return frame.image;
+    } on Object {
+      return null;
+    }
+  }
+
+  static int _cursorHideSeq = 0;
+
+  /// 请求 shell 进入「截图准备」相以隐藏软件光标；成功返回 requestId，
+  /// 借不到（已有原生会话）返回 null。
+  int? _beginCursorHide() {
+    try {
+      final id = ++_cursorHideSeq;
+      final prepared = ref
+          .read(screenshotSelectionProvider.notifier)
+          .prepare(id);
+      return prepared ? id : null;
+    } on Object {
+      return null;
+    }
+  }
+
+  /// 结束隐藏会话、恢复光标。幂等：[id] 为 null 时什么都不做。
+  void _endCursorHide(int? id) {
+    if (id == null) return;
+    try {
+      ref.read(screenshotSelectionProvider.notifier).done(id);
+    } on Object {
+      // 恢复失败不致命：下一次抓取/交互会重绘光标。
+    }
   }
 
   /// 整屏关键帧里抹掉鼠标：关键帧覆盖整个输出，指针逻辑坐标即像素坐标，
@@ -1043,13 +1190,17 @@ class _CaptureFlowHostState extends ConsumerState<CaptureFlowHost> {
       bytes = null;
     }
     if (bytes == null || bytes.isEmpty) {
-      PinCardBus.instance.showToast('截取失败，请重试');
+      PinCardBus.instance.showToast(
+        L.s('截取失败，请重试', 'Capture failed, try again'),
+      );
       if (mounted) setState(() => _captureHidden = false);
       return null;
     }
     final file = await _writeCapture(region, bytes);
     if (file == null) {
-      PinCardBus.instance.showToast('截取失败，请重试');
+      PinCardBus.instance.showToast(
+        L.s('截取失败，请重试', 'Capture failed, try again'),
+      );
       return null;
     }
     return (file: file, bytes: bytes);
@@ -1169,12 +1320,16 @@ class _CaptureFlowHostState extends ConsumerState<CaptureFlowHost> {
       });
     }
     if (bytes == null || bytes.isEmpty) {
-      PinCardBus.instance.showToast('截取失败，请重试');
+      PinCardBus.instance.showToast(
+        L.s('截取失败，请重试', 'Capture failed, try again'),
+      );
       return null;
     }
     final file = await _writeCapture(region, bytes);
     if (file == null) {
-      PinCardBus.instance.showToast('截取失败，请重试');
+      PinCardBus.instance.showToast(
+        L.s('截取失败，请重试', 'Capture failed, try again'),
+      );
       return null;
     }
     return (file: file, bytes: bytes);
@@ -1189,16 +1344,38 @@ class _CaptureFlowHostState extends ConsumerState<CaptureFlowHost> {
   Future<void> _runText(String mode) async {
     final captured = await _captureNow(restore: false);
     if (captured == null) return;
+    // 在线视觉大模型识字：和编辑器保持一致——选了「在线」就真走 API。
+    // 不能把 ocrModel='api' 丢给本地 sidecar：它只认 v3/builtin/下载目录，
+    // 遇到 'api' 会静默回退内置 PP-OCR，让人误以为在用大模型。
+    if (_settings.ocrModel == 'api') {
+      await _runTextViaApi(mode, captured.bytes);
+      return;
+    }
+    if (_settings.ocrModel == 'local' &&
+        _settings.ocrLocalPath.trim().isEmpty) {
+      if (mounted) setState(() => _captureHidden = false);
+      PinCardBus.instance.showToast(
+        L.s('请先在设置里选择本地模型目录', 'Choose a local model folder in settings first'),
+      );
+      return;
+    }
     if (!await _translateService.isReady()) {
       if (mounted) setState(() => _captureHidden = false);
-      PinCardBus.instance.showToast('翻译组件未安装，请先在编辑器设置中安装');
+      PinCardBus.instance.showToast(
+        L.s(
+          '翻译组件未安装，请先在编辑器设置中安装',
+          'Translation component not installed; install it in the editor settings first',
+        ),
+      );
       return;
     }
     setState(() {
       _captureHidden = false;
       _resultMode = mode;
       _resultRegions = const [];
-      _resultStatus = mode == 'ocr' ? '正在识别文字…' : '正在翻译…';
+      _resultStatus = mode == 'ocr'
+          ? L.s('正在识别文字…', 'Recognizing text…')
+          : L.s('正在翻译…', 'Translating…');
       _resultBusy = true;
       _resultOpen = true;
       _resultWindowHeight = null;
@@ -1208,7 +1385,9 @@ class _CaptureFlowHostState extends ConsumerState<CaptureFlowHost> {
         imagePath: captured.file.path,
         target: _targetLanguage(),
         mode: mode,
-        ocrModel: _settings.ocrModel,
+        ocrModel: _settings.ocrModelForSidecar,
+        engine: _settings.translateEngine,
+        modelsDir: _settings.translateModelsDir.trim(),
       )) {
         if (!mounted) return;
         switch (event.type) {
@@ -1225,7 +1404,7 @@ class _CaptureFlowHostState extends ConsumerState<CaptureFlowHost> {
           case 'error':
             setState(() {
               _resultBusy = false;
-              _resultStatus = event.message ?? '处理失败';
+              _resultStatus = event.message ?? L.s('处理失败', 'Processing failed');
             });
         }
       }
@@ -1238,23 +1417,163 @@ class _CaptureFlowHostState extends ConsumerState<CaptureFlowHost> {
     }
   }
 
+  /// 在线识字/翻译：对刚截的图直接调视觉模型 OCR（ocrViaApi），需要翻译时
+  /// 再逐条走翻译 API。缺配置、无结果、接口报错都在结果窗里写清楚，不静默。
+  Future<void> _runTextViaApi(String mode, Uint8List bytes) async {
+    setState(() {
+      _captureHidden = false;
+      _resultMode = mode;
+      _resultRegions = const [];
+      _resultStatus = mode == 'ocr'
+          ? L.s('正在识别文字…', 'Recognizing text…')
+          : L.s('正在翻译…', 'Translating…');
+      _resultBusy = true;
+      _resultOpen = true;
+      _resultWindowHeight = null;
+    });
+    if (_settings.effectiveOcrApiEndpoint.trim().isEmpty ||
+        _settings.effectiveOcrApiModel.trim().isEmpty) {
+      setState(() {
+        _resultBusy = false;
+        _resultStatus = L.s(
+          '未配置 API 地址或模型名，请在设置中填写',
+          'No API endpoint or model set; fill them in Settings',
+        );
+      });
+      return;
+    }
+    try {
+      final size = await _pngSizeOf(bytes);
+      if (size == null) {
+        if (mounted) {
+          setState(() {
+            _resultBusy = false;
+            _resultStatus = L.s(
+              '截图解析失败，无法在线识字',
+              'Failed to decode the capture; cannot run online OCR',
+            );
+          });
+        }
+        return;
+      }
+      final regions = await _translateService.ocrViaApi(
+        imageBytes: bytes,
+        width: size.$1,
+        height: size.$2,
+        endpoint: _settings.effectiveOcrApiEndpoint,
+        apiKey: _settings.effectiveOcrApiKey,
+        model: _settings.effectiveOcrApiModel,
+        onRetry: (note) {
+          if (mounted) setState(() => _resultStatus = note);
+        },
+      );
+      if (!mounted) return;
+      if (regions.isEmpty) {
+        setState(() {
+          _resultBusy = false;
+          _resultStatus = L.s(
+            '未识别到文字：模型「${_settings.effectiveOcrApiModel.trim()}」可能不支持图片'
+                '输入，请改用带视觉的模型（如 glm-4v-flash）',
+            'No text recognized: model "${_settings.effectiveOcrApiModel.trim()}" may not '
+                'accept image input; switch to a vision model (e.g. glm-4v-flash)',
+          );
+        });
+        return;
+      }
+      if (mode == 'ocr') {
+        setState(() {
+          _resultRegions = List<TranslateRegion>.of(regions);
+          _resultBusy = false;
+          _resultStatus = '';
+        });
+        return;
+      }
+      setState(
+        () => _resultStatus = L.s('调用翻译 API…', 'Calling translation API…'),
+      );
+      final texts = [for (final region in regions) region.source];
+      final translations = await _translateService.translateViaApi(
+        texts: texts,
+        target: _targetLanguage(),
+        apiType: _settings.apiType,
+        endpoint: _settings.apiEndpoint,
+        apiKey: _settings.apiKey,
+        model: _settings.apiModel,
+        apiAppId: _settings.apiAppId,
+        onRetry: (note) {
+          if (mounted) setState(() => _resultStatus = note);
+        },
+      );
+      if (!mounted) return;
+      setState(() {
+        _resultRegions = [
+          for (var i = 0; i < regions.length; i++)
+            TranslateRegion(
+              rect: regions[i].rect,
+              source: regions[i].source,
+              translated: i < translations.length
+                  ? translations[i]
+                  : regions[i].source,
+              background: regions[i].background,
+              foreground: regions[i].foreground,
+            ),
+        ];
+        _resultBusy = false;
+        _resultStatus = '';
+      });
+    } on Object catch (error) {
+      if (!mounted) return;
+      setState(() {
+        _resultBusy = false;
+        _resultStatus = '$error';
+      });
+    }
+  }
+
+  Future<(int, int)?> _pngSizeOf(Uint8List bytes) async {
+    try {
+      final codec = await ui.instantiateImageCodec(bytes);
+      final frame = await codec.getNextFrame();
+      codec.dispose();
+      final image = frame.image;
+      final size = (image.width, image.height);
+      image.dispose();
+      return size;
+    } on Object {
+      return null;
+    }
+  }
+
   Future<void> _copyResultText() async {
     final text = _resultMode == 'ocr'
         ? _resultRegions.map((region) => region.source).join('\n')
         : _resultRegions
-              .map((region) => region.translated)
-              .where((line) => line.isNotEmpty)
+              .map(
+                (region) => region.translated.isNotEmpty
+                    ? region.translated
+                    : region.source,
+              )
               .join('\n');
     if (text.isEmpty) return;
     final ok = await copyTextToClipboard(text);
     if (!mounted) return;
-    PinCardBus.instance.showToast(ok ? '已复制文字' : '复制失败（缺 wl-copy / xclip）');
+    PinCardBus.instance.showToast(
+      ok
+          ? L.s('已复制文字', 'Text copied')
+          : L.s(
+              '复制失败（缺 wl-copy / xclip）',
+              'Copy failed (missing wl-copy / xclip)',
+            ),
+    );
   }
 
   Future<void> _openEditor() async {
     final captured = await _captureNow(restore: false);
     if (captured == null) return;
-    DenialScreenshotEditorBus.instance.openPath(captured.file.path);
+    DenialScreenshotEditorBus.instance.openBytes(
+      captured.bytes,
+      path: captured.file.path,
+    );
     _close();
   }
 
@@ -1264,11 +1583,15 @@ class _CaptureFlowHostState extends ConsumerState<CaptureFlowHost> {
     final ok = await copyPngToClipboard(captured.bytes);
     if (!mounted) return;
     if (ok) {
-      PinCardBus.instance.showToast('已复制图片到剪贴板');
+      PinCardBus.instance.showToast(
+        L.s('已复制图片到剪贴板', 'Image copied to clipboard'),
+      );
       _close();
     } else {
       setState(() => _captureHidden = false);
-      PinCardBus.instance.showToast('复制失败（缺 wl-copy / xclip）');
+      PinCardBus.instance.showToast(
+        L.s('复制失败（缺 wl-copy / xclip）', 'Copy failed (missing wl-copy / xclip)'),
+      );
     }
   }
 
@@ -1294,7 +1617,7 @@ class _CaptureFlowHostState extends ConsumerState<CaptureFlowHost> {
       await File(path).writeAsBytes(captured.bytes, flush: true);
     } on Object {
       if (mounted) setState(() => _captureHidden = false);
-      PinCardBus.instance.showToast('保存失败');
+      PinCardBus.instance.showToast(L.s('保存失败', 'Save failed'));
       return;
     }
     if (!mounted) return;
@@ -1308,7 +1631,7 @@ class _CaptureFlowHostState extends ConsumerState<CaptureFlowHost> {
         if (name.isNotEmpty) _saveFileName = name;
       }
     });
-    PinCardBus.instance.showToast('已保存：$path');
+    PinCardBus.instance.showToast(L.s('已保存：$path', 'Saved: $path'));
   }
 
   Future<void> _pinImage() async {
@@ -1391,19 +1714,19 @@ class _CaptureFlowHostState extends ConsumerState<CaptureFlowHost> {
   }
 }
 
-/// 识字/翻译结果列表里的单行：OCR 显示原文，翻译显示序号+原文+译文。
+/// 识字/翻译结果列表里的单行：OCR 显示原文；翻译只出一行——真被翻译的
+/// 块用加粗+主题蓝标出，没翻的（译文即原文）按原样显示。行本身用普通
+/// [Text]，跨行选择由外层 [SelectableRegion] 统一接管（不再逐行 SelectableText）。
 class _ResultRow extends StatelessWidget {
   const _ResultRow({
     required this.mode,
     required this.source,
     required this.translated,
-    required this.index,
   });
 
   final String mode;
   final String source;
   final String translated;
-  final int index;
 
   @override
   Widget build(BuildContext context) {
@@ -1413,19 +1736,15 @@ class _ResultRow extends StatelessWidget {
         style: const TextStyle(fontSize: 13, color: Colors.white),
       );
     }
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Text(
-          '${index + 1}. $source',
-          style: const TextStyle(fontSize: 12, color: Colors.white54),
-        ),
-        const SizedBox(height: 2),
-        Text(
-          translated,
-          style: const TextStyle(fontSize: 13, color: Colors.white),
-        ),
-      ],
+    final translatedHere =
+        translated.trim().isNotEmpty && translated.trim() != source.trim();
+    return Text(
+      translatedHere ? translated : source,
+      style: TextStyle(
+        fontSize: 13,
+        color: translatedHere ? const Color(0xFF6FC3FF) : Colors.white,
+        fontWeight: translatedHere ? FontWeight.bold : FontWeight.normal,
+      ),
     );
   }
 }

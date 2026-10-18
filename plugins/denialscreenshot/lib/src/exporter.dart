@@ -2,6 +2,8 @@ import 'dart:io';
 
 import 'package:flutter/services.dart';
 
+import 'l10n.dart';
+
 /// Which external tool owns image clipboard delivery on this machine.
 enum ClipboardImageBackend {
   /// `wl-copy` over `ext/zwlr-data-control`, which Denial advertises.
@@ -16,7 +18,10 @@ enum ClipboardImageBackend {
   String get description => switch (this) {
     ClipboardImageBackend.wlCopy => 'wl-copy (image/png)',
     ClipboardImageBackend.xclip => 'xclip (image/png)',
-    ClipboardImageBackend.unavailable => '无图片剪贴板，仅复制路径',
+    ClipboardImageBackend.unavailable => L.s(
+      '无图片剪贴板，仅复制路径',
+      'No image clipboard; path copied instead',
+    ),
   };
 }
 

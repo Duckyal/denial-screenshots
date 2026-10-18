@@ -6,8 +6,6 @@ implemented as a Denial plugin per the
 
 English | [简体中文](README.md)
 
-> Porting this to other desktops? See [docs/PORTING.md](docs/PORTING.md) — multi-desktop plan (on hold).
-
 ## What it is
 
 Capture, region selection, PNG encoding and clipboard publishing are all done by
@@ -46,6 +44,29 @@ which is what you look for in **Settings → Shortcuts → Denial actions**.
 Settings file: `~/.config/denial-screenshots/settings.json`.
 Set `DENIAL_SCREENSHOT_DIR` to override the capture directory
 (default `~/Pictures/Screenshots`).
+
+## How it compares
+
+Versus common screenshot annotation tools (✔ supported / ✘ not supported / — version-dependent):
+
+| Dimension | denial-screenshots | mark-shot | QQ Snapshot |
+|---|---|---|---|
+| Form | **In-process Denial shell plugin**, no separate window | Standalone Wayland app | Bundled with the QQ client |
+| Platform | Denial (Wayland) | Linux / Wayland | Windows (feature-limited on Linux) |
+| Open source | ✔ | ✔ | ✘ Closed source |
+| Tools | Brush / line / arrow / rectangle / circle / text / mosaic / **highlighter** / eraser | Basic annotation (rectangle / arrow / text / mosaic, etc.) | Basic annotation (rectangle / arrow / text / mosaic, etc.) |
+| Edit drawn shapes | ✔ Recolor / resize on select, double-click to edit text | — | — |
+| Pin to desktop | ✔ | ✔ | ✔ |
+| Scrolling capture | ✔ | — | ✔ |
+| OCR | ✔ Local RapidOCR + online vision model | ✘ | ✔ (online) |
+| Translation | ✔ **Local offline** (Argos / M2M) + online API | ✘ | ✔ (online, Tencent) |
+| Fully offline | ✔ | ✔ | ✘ Requires QQ login |
+| Visible OCR/translation progress | ✔ Real-time elapsed time and cause in an overlay | ✘ | — |
+| UI languages | ✔ Chinese / English | — | — |
+
+The main differentiators are three: it's a **plugin embedded in the compositor**
+(not yet another app), it does **local offline OCR + translation** (works without
+network, with visible progress), and it ships a **bilingual (zh/en) UI**.
 
 ## Install
 
