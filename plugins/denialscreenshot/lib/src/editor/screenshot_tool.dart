@@ -1350,6 +1350,11 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
         ? double.infinity
         : math.max(12.0, box.width - 8);
     final origin = box?.topLeft ?? _textDialogPosition;
+    // 拖框创建时默认字号按框自适应（选能塞进框的最大档），点击创建的自由
+    // 文字仍沿用工具栏设定字号。
+    final initialFontSize = box == null
+        ? textFontSize
+        : _fitFontSizeForBox(text, box, maxWidth);
     Rect rect;
     if (box != null) {
       rect = box;
@@ -1359,7 +1364,7 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
           text: text,
           style: TextStyle(
             color: currentColor,
-            fontSize: textFontSize,
+            fontSize: initialFontSize,
             fontFamily: textFontFamily.isEmpty ? null : textFontFamily,
             fontWeight: FontWeight.bold,
           ),
@@ -1382,7 +1387,7 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
       text: text,
       rect: rect,
       color: currentColor,
-      strokeWidth: textFontSize,
+      strokeWidth: initialFontSize,
       textMaxWidth: maxWidth,
       textBox: box,
       fontFamily: textFontFamily,
@@ -1390,6 +1395,39 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
     _textBoxRect = null;
 
     setState(() => _pushCommand(command));
+  }
+
+  /// 为拖框文本框挑一个默认字号：从框高起估，逐级降到换行后仍能塞进框高的
+  /// Excel 档；框很大时最多到 72 档。避免大框恒配 16px 显得过小。
+  double _fitFontSizeForBox(String text, Rect box, double maxWidth) {
+    final usableHeight = math.max(12.0, box.height - 8);
+    TextPainter layout(double size) => TextPainter(
+      text: TextSpan(
+        text: text,
+        style: TextStyle(
+          fontSize: size,
+          fontFamily: textFontFamily.isEmpty ? null : textFontFamily,
+          fontWeight: FontWeight.bold,
+        ),
+      ),
+      textDirection: TextDirection.ltr,
+    )..layout(maxWidth: maxWidth);
+
+    var fontSize = _excelFontSizes.lastWhere(
+      (size) => size <= usableHeight,
+      orElse: () => _excelFontSizes.first,
+    );
+    var painter = layout(fontSize);
+    while (painter.height > usableHeight) {
+      final next = _excelFontSizes.lastWhere(
+        (size) => size < fontSize,
+        orElse: () => _excelFontSizes.first,
+      );
+      if (next == fontSize) break;
+      fontSize = next;
+      painter = layout(fontSize);
+    }
+    return fontSize;
   }
 
   void _pushCommand(DrawCommand command) {
