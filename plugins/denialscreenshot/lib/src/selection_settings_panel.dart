@@ -472,7 +472,44 @@ class _SelectionSettingsPanelState extends State<SelectionSettingsPanel> {
         (value) => _apply(_settings.copyWith(translateTarget: value)),
       ),
       if (_settings.translateBackend == 'local') _localTargetHint(),
+      ..._windowPickSection(),
       ..._scrollCaptureSection(),
+    ];
+  }
+
+  /// 智能选窗（框选阶段）：开→悬停高亮窗口、单击整窗成区，拖动仍是自由
+  /// 框选；关→纯拖动框选（老行为）。
+  List<Widget> _windowPickSection() {
+    return [
+      Padding(
+        padding: const EdgeInsets.only(top: 10, bottom: 2),
+        child: Text(
+          L.pick(context, '智能选窗', 'Smart window pick'),
+          style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600),
+        ),
+      ),
+      _group(
+        L.pick(context, '框选时按窗口吸附', 'Snap selection to windows'),
+        _settings.windowPick ? 'on' : 'off',
+        const [('on', '开（默认）', 'On (default)'), ('off', '关', 'Off')],
+        (value) => _apply(_settings.copyWith(windowPick: value == 'on')),
+      ),
+      Padding(
+        padding: const EdgeInsets.only(top: 4),
+        child: Text(
+          L.pick(
+            context,
+            '开启后：未拖拽时鼠标悬停会高亮光标下的窗口，单击即把整个窗口'
+                '取为选区（QQ / 微信截图式）；按住并拖动仍是自由框选，'
+                '选区确定后照旧可以拖边微调。',
+            'When on: hovering highlights the window under the cursor and a '
+                'single click takes the whole window as the selection (QQ / '
+                'WeChat style); press-and-drag still draws a free region, and '
+                'the selection stays resizable as before.',
+          ),
+          style: const TextStyle(fontSize: 11, color: Colors.white60),
+        ),
+      ),
     ];
   }
 

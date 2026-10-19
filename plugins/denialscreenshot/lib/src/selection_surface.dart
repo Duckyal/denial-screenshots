@@ -7,6 +7,8 @@ import 'dart:ui' as ui;
 import 'package:denial_flutter_sdk/input.dart';
 import 'package:denial_flutter_sdk/state.dart'
     show denialBridgeProvider, screenshotSelectionProvider;
+import 'package:denial_flutter_sdk/surfaces.dart'
+    show ShellSurfaceContext, ShellSurfaceEnvironment;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart' show KeyDownEvent, LogicalKeyboardKey;
 import 'package:flutter_localizations/flutter_localizations.dart';
@@ -25,6 +27,7 @@ import 'scroll_capture.dart';
 import 'scroll_stitch.dart' show eraseRegionInPlace;
 import 'selection_save_panel.dart';
 import 'selection_settings_panel.dart';
+import 'window_pick.dart';
 
 /// 「框选 → 工具栏」截图的 surface 宿主。
 ///
@@ -33,7 +36,11 @@ import 'selection_settings_panel.dart';
 /// 取图用 `grim`（wlr-screencopy）截活画面，不经过合成器的选区流程；截取前
 /// 先把本 surface 的遮罩藏掉一拍，避免把压暗层也截进图里。
 final class CaptureFlowHost extends ConsumerStatefulWidget {
-  const CaptureFlowHost({super.key});
+  const CaptureFlowHost({super.key, this.surface});
+
+  /// 本 surface 的壳层上下文：输出几何（窗口全局坐标→输出内坐标的平移）
+  /// 与工作区过滤由智能选窗用到。
+  final ShellSurfaceContext? surface;
 
   @override
   ConsumerState<CaptureFlowHost> createState() => _CaptureFlowHostState();
@@ -76,6 +83,21 @@ class _CaptureFlowHostState extends ConsumerState<CaptureFlowHost> {
 
   /// 当前选区（surface 逻辑坐标 == 输出坐标）。
   Rect? _region;
+
+  /// 智能选窗：空闲（未拖出选区）时悬停命中的窗口矩形，输出内逻辑坐标。
+  /// 单击即整窗成区；按下并拖动仍是自由框选。
+  Rect? _hoverWindow;
+  final WindowPickStore _windowPick = WindowPickStore();
+
+  /// 最近一次指针位置（Listener local，即输出内逻辑坐标）。
+  Offset? _lastPointer;
+
+  /// 按下时命中的候选窗口；抬起未拖动就直接整窗成区。
+  Rect? _windowCandidate;
+
+  /// 本 surface 当前环境（输出几何/工作区），供智能选窗做坐标平移与过滤。
+  ShellSurfaceEnvironment? _environment;
+  StreamSubscription<ShellSurfaceEnvironment>? _environmentEvents;
 
   /// 一次手势用的快照：按下点、按下时的选区、命中边（0=移动/新建）。
   Offset? _pressStart;
@@ -133,6 +155,14 @@ class _CaptureFlowHostState extends ConsumerState<CaptureFlowHost> {
         .read(denialBridgeProvider)
         .cursorPositions
         .listen((position) => _cursorPosition.value = position);
+    // 智能选窗：本 surface 独立跟踪窗口快照，变化时刷新悬停高亮。
+    _windowPick.addListener(_recomputeWindowHover);
+    _windowPick.start(ref);
+    final surface = widget.surface;
+    _environment = surface?.environment;
+    _environmentEvents = surface?.events.listen((environment) {
+      if (mounted) setState(() => _environment = environment);
+    });
     ScreenshotSettings.load().then((settings) {
       if (mounted) {
         final homeDir = Platform.environment['HOME'] ?? '/';
@@ -153,6 +183,11 @@ class _CaptureFlowHostState extends ConsumerState<CaptureFlowHost> {
   void dispose() {
     _requests?.cancel();
     _cursorSub?.cancel();
+    _environmentEvents?.cancel();
+    _windowPick
+      ..removeListener(_recomputeWindowHover)
+      ..stop()
+      ..dispose();
     _cursorPosition.dispose();
     _resultSelectFocus.dispose();
     _translateService.dispose();
@@ -243,6 +278,9 @@ class _CaptureFlowHostState extends ConsumerState<CaptureFlowHost> {
       behavior: HitTestBehavior.opaque,
       onPointerDown: (event) => _handleDown(event.localPosition, size),
       onPointerMove: (event) => _handleMove(event.localPosition, size),
+      // 空闲悬停：Flutter 只在按住时发 move，未按键的指针移动走 hover 事件；
+      // 智能选窗的预览高亮靠它驱动。
+      onPointerHover: (event) => _notePointer(event.localPosition),
       onPointerUp: (_) => _handleUp(),
       child: Stack(
         fit: StackFit.expand,
@@ -251,7 +289,9 @@ class _CaptureFlowHostState extends ConsumerState<CaptureFlowHost> {
           // 那一帧，不会出现“看着画面在变、截下来的却是旧帧”的错位。
           if (_keyFrame case final keyFrame?)
             CustomPaint(painter: _KeyFramePainter(image: keyFrame)),
-          CustomPaint(painter: _DimPainter(region: _region)),
+          CustomPaint(
+            painter: _DimPainter(region: _region, hover: _hoverWindow),
+          ),
           if (_region != null) _buildRegionOverlay(size, _region!),
           if (_resultOpen && _region != null)
             _buildResultWindow(size, _region!),
@@ -774,23 +814,33 @@ class _CaptureFlowHostState extends ConsumerState<CaptureFlowHost> {
           _pressBox = region;
           _dragging = true;
           _freshSelection = false;
+          _windowCandidate = null;
         });
         return;
       }
     }
+    // 智能选窗：按下时命中窗口就先记为候选；只要不拖动，抬起就整窗成区
+    // （QQ / 微信截图式）；一旦拖出自由框，候选作废。
+    final candidate = _windowHit(position);
     setState(() {
       _edge = 0;
       _pressStart = position;
       _pressBox = region;
       _freshSelection = true;
       _dragging = true;
+      _moved = false;
+      _windowCandidate = candidate;
       _region = null;
     });
   }
 
   void _handleMove(Offset position, Size size) {
-    if (!_dragging ||
-        _capturing ||
+    // 空闲态：记录指针位置，驱动智能选窗的悬停高亮。
+    if (!_dragging) {
+      _notePointer(position);
+      return;
+    }
+    if (_capturing ||
         _resultOpen ||
         _settingsOpen ||
         _savePanelOpen ||
@@ -798,7 +848,10 @@ class _CaptureFlowHostState extends ConsumerState<CaptureFlowHost> {
       return;
     final start = _pressStart;
     if (start == null) return;
-    if ((position - start).distance > 2) _moved = true;
+    if ((position - start).distance > 2) {
+      _moved = true;
+      _windowCandidate = null;
+    }
     setState(() {
       if (_freshSelection) {
         _region = _clampRect(Rect.fromPoints(start, position), size);
@@ -823,12 +876,21 @@ class _CaptureFlowHostState extends ConsumerState<CaptureFlowHost> {
         _savePanelOpen ||
         _toolbarHit)
       return;
+    final candidate = _windowCandidate;
+    var committedByWindow = false;
     setState(() {
       _dragging = false;
       _edge = 0;
       _pressStart = null;
+      _windowCandidate = null;
       if (!_moved) {
-        _region = _pressBox;
+        // 智能选窗：未拖动就抬起，命中窗口则整窗成区，否则恢复原选区。
+        if (candidate != null) {
+          _region = candidate;
+          committedByWindow = true;
+        } else {
+          _region = _pressBox;
+        }
         _freshSelection = false;
         _moved = false;
         return;
@@ -849,9 +911,43 @@ class _CaptureFlowHostState extends ConsumerState<CaptureFlowHost> {
       unawaited(_startScrollCapture());
       return;
     }
+    if (committedByWindow) {
+      // 整窗成区：立刻预定抓帧（和拖动框选收尾一致）。
+      unawaited(_captureNow());
+      return;
+    }
     // 普通模式：选区一确定就在后台预定抓帧，这样点复制/保存/置顶时直接命中
     // 缓存，不用再藏一次浮层重截。
     unawaited(_captureNow());
+  }
+
+  /// 空闲态指针位置：驱动悬停高亮；null 表示指针离开画面，清掉高亮。
+  void _notePointer(Offset? position) {
+    if (position == _lastPointer && position != null) return;
+    _lastPointer = position;
+    _recomputeWindowHover();
+  }
+
+  /// 智能选窗命中：开关关 / 无环境 / 无快照时返回 null。
+  Rect? _windowHit(Offset position) {
+    if (!_settings.windowPick) return null;
+    final environment = _environment;
+    if (environment == null) return null;
+    return _windowPick.windowAt(
+      position,
+      outputRect: environment.output.logicalRect,
+      workspaceId: environment.workspaceId,
+    );
+  }
+
+  /// 重算悬停高亮：只在空闲（可见、未拖拽、无选区）时命中窗口；结果没变
+  /// 就不重绘。窗口快照变化与指针移动都汇到这里。
+  void _recomputeWindowHover() {
+    if (!mounted) return;
+    final idle = _visible && !_dragging && _region == null;
+    final next = idle ? _windowHit(_lastPointer ?? Offset.infinite) : null;
+    if (next == _hoverWindow) return;
+    setState(() => _hoverWindow = next);
   }
 
   int _hitTestEdge(Rect region, Offset position) {
@@ -941,6 +1037,8 @@ class _CaptureFlowHostState extends ConsumerState<CaptureFlowHost> {
       _settingsOpen = false;
       _savePanelOpen = false;
       _resultWindowHeight = null;
+      _hoverWindow = null;
+      _windowCandidate = null;
     });
     _beginBusy = false;
   }
@@ -1140,6 +1238,8 @@ class _CaptureFlowHostState extends ConsumerState<CaptureFlowHost> {
       _settingsOpen = false;
       _savePanelOpen = false;
       _resultWindowHeight = null;
+      _hoverWindow = null;
+      _windowCandidate = null;
     });
   }
 
@@ -1815,19 +1915,44 @@ class _KeyFramePainter extends CustomPainter {
 }
 
 class _DimPainter extends CustomPainter {
-  _DimPainter({required this.region});
+  _DimPainter({required this.region, this.hover});
 
   final Rect? region;
+
+  /// 智能选窗的悬停高亮（输出内逻辑坐标）：仅在还没有选区时生效，把光标
+  /// 下的窗口像已选中一样"擦亮"，并描一圈强调色边。
+  final Rect? hover;
 
   @override
   void paint(Canvas canvas, Size size) {
     canvas.saveLayer(Offset.zero & size, Paint());
     canvas.drawRect(Offset.zero & size, Paint()..color = Colors.black45);
     final current = region;
+    final hoverRect = current == null ? hover : null;
     if (current != null && current.width >= 1 && current.height >= 1) {
       canvas.drawRect(current, Paint()..blendMode = ui.BlendMode.clear);
     }
+    if (hoverRect != null && hoverRect.width >= 1 && hoverRect.height >= 1) {
+      // 半擦亮：比选区暗一点、比压暗亮一点，和"单击即可成区"的预期一致。
+      canvas.drawRect(hoverRect, Paint()..blendMode = ui.BlendMode.clear);
+      canvas.drawRect(
+        hoverRect,
+        Paint()..color = Colors.black.withValues(alpha: 0.12),
+      );
+    }
     canvas.restore();
+    if (hoverRect != null) {
+      final accent = Paint()
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = 2.4
+        ..color = const Color(0xFF4C9AFF);
+      canvas.drawRect(hoverRect, accent);
+      final inner = Paint()
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = 1
+        ..color = Colors.white.withValues(alpha: 0.9);
+      canvas.drawRect(hoverRect.deflate(1.6), inner);
+    }
     if (current == null) return;
     final stroke = Paint()
       ..style = PaintingStyle.stroke
@@ -1850,5 +1975,5 @@ class _DimPainter extends CustomPainter {
 
   @override
   bool shouldRepaint(covariant _DimPainter oldDelegate) =>
-      oldDelegate.region != region;
+      oldDelegate.region != region || oldDelegate.hover != hover;
 }

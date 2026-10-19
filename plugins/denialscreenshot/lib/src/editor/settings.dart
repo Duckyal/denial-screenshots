@@ -26,6 +26,7 @@ class ScreenshotSettings {
     this.ocrApiKey = '',
     this.translateEngine = 'argos',
     this.translateModelsDir = '',
+    this.windowPick = true,
     this.autoScroll = true,
     this.autoScrollKey = 'Down',
     this.scrollInjector = 'denial',
@@ -71,6 +72,10 @@ class ScreenshotSettings {
   /// 长截图是否自动滚动。开启后按 [autoScrollKey] 向聚焦的客户端注入
   /// 键盘按键来翻页，无需手动滚动（依赖目标应用认可该按键为滚动）。
   final bool autoScroll;
+
+  /// 框选阶段的「智能选窗」：未拖拽时悬停高亮光标下的窗口，单击即把整个
+  /// 窗口取为选区（QQ / 微信截图式）；按下并拖动仍是自由框选。默认开。
+  final bool windowPick;
 
   /// 自动滚动注入的按键：'Down'（逐行，重叠更稳）| 'space'（翻页，步幅大）。
   /// 仅识别 denial 软件键盘支持的键名。
@@ -185,6 +190,7 @@ class ScreenshotSettings {
     String? ocrApiKey,
     String? translateEngine,
     String? translateModelsDir,
+    bool? windowPick,
     bool? autoScroll,
     String? autoScrollKey,
     String? scrollInjector,
@@ -212,6 +218,7 @@ class ScreenshotSettings {
       ocrApiKey: ocrApiKey ?? this.ocrApiKey,
       translateEngine: translateEngine ?? this.translateEngine,
       translateModelsDir: translateModelsDir ?? this.translateModelsDir,
+      windowPick: windowPick ?? this.windowPick,
       autoScroll: autoScroll ?? this.autoScroll,
       autoScrollKey: autoScrollKey ?? this.autoScrollKey,
       scrollInjector: scrollInjector ?? this.scrollInjector,
@@ -240,6 +247,7 @@ class ScreenshotSettings {
     'ocrApiKey': ocrApiKey,
     'translateEngine': translateEngine,
     'translateModelsDir': translateModelsDir,
+    'windowPick': windowPick,
     'autoScroll': autoScroll,
     'autoScrollKey': autoScrollKey,
     'scrollInjector': scrollInjector,
@@ -282,6 +290,7 @@ class ScreenshotSettings {
       ocrApiKey: json['ocrApiKey'] as String? ?? '',
       translateEngine: json['translateEngine'] as String? ?? 'argos',
       translateModelsDir: json['translateModelsDir'] as String? ?? '',
+      windowPick: json['windowPick'] as bool? ?? true,
       autoScroll: json['autoScroll'] as bool? ?? true,
       autoScrollKey: json['autoScrollKey'] as String? ?? 'Down',
       scrollInjector: switch (json['scrollInjector'] as String?) {
