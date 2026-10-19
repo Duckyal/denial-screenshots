@@ -1,8 +1,8 @@
 name: denial_screenshot
 description: >-
-  QQ-style screenshot annotation plugin for Denial. Opens the compositor's
-  newest capture in an in-shell editor with brush, arrow, shape, text,
-  mask and eraser tools.
+  QQ-style screenshot annotation plugin for Denial. Region capture with smart
+  window picking, scrolling capture, clipboard pin, and an in-shell editor with
+  brush, arrow, shape, highlighter, mask and eraser tools.
 publish_to: none
 version: 0.1.0
 
@@ -29,6 +29,6 @@ denial_plugin:
   name: Screenshot Tool
   provides:
     - contract: package:denial_flutter_sdk/actions.dart#ShellAction
-      count: 4
+      count: 3
     - contract: package:denial_flutter_sdk/surfaces.dart#ShellSurface
-      count: 2
+      count: 3
