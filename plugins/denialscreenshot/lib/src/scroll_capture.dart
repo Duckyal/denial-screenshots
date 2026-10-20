@@ -19,6 +19,17 @@ import 'scroll_stitch.dart';
 /// 侧不直接依赖 `denial_flutter_sdk`，保持本文件可用纯 Dart 校验。
 typedef ScrollInjector = void Function();
 
+/// 长截图会话期间的「无鼠标」钩子，由调用方注入（保持本文件不依赖 SDK）：
+/// [begin] 请求宿主隐藏系统光标，成功返回会话句柄，借不到返回 null；
+/// [end] 用句柄释放。自动滚动模式下句柄有效 = 连拍全程画面里没有鼠标，
+/// 逐帧抹除停用；手动滚动不请求（用户要靠光标定位滚轮目标）。
+final class ScrollCursorHide {
+  const ScrollCursorHide({required this.begin, required this.end});
+
+  final int? Function() begin;
+  final void Function(int?) end;
+}
+
 /// 长截图的实时预览快照：当前长图缩略图 + 源图尺寸（用于显示进度）。
 ///
 /// [image] 是已下采样的小图，直接交给 `RawImage` 即可；所有权归
@@ -101,6 +112,9 @@ final class ScrollCaptureManager {
   ScrollStitcher? _stitcher;
   Future<void>? _sessionTask;
   ValueListenable<Offset?>? _cursor;
+  ScrollCursorHide? _cursorHide;
+  int? _hideHandle;
+  bool _cursorHidden = false;
   bool _autoMode = false;
   bool _stopRequested = false;
   bool _finalizing = false;
@@ -117,17 +131,24 @@ final class ScrollCaptureManager {
   /// 开始会话：[region] 是编辑器/选区里框定图像在屏幕上的矩形（逻辑坐标）。
   /// [injector] 非空时进入自动滚动模式。[cursor] 是实时的系统指针位置
   /// （输出逻辑坐标），用于把合成进画面的鼠标指针抹掉，避免它破坏帧匹配。
+  /// [cursorHide] 在自动滚动模式下于会话开始时请求宿主隐藏系统光标：拿到
+  /// 句柄则连拍全程画面里没有鼠标，逐帧抹除停用（抹除是克隆补块，没有鼠标
+  /// 时反而会把正常内容糊掉）；借不到自动退回逐帧抹除。会话结束释放句柄。
   Future<void> start(
     Rect rect, {
     ScrollInjector? injector,
     ValueListenable<Offset?>? cursor,
     Duration? autoDelay,
+    ScrollCursorHide? cursorHide,
   }) async {
     if (isActive || rect.isEmpty || rect.width < 8 || rect.height < 8) {
       return;
     }
     _region = rect;
     _cursor = cursor;
+    _cursorHide = cursorHide;
+    _hideHandle = (injector != null) ? cursorHide?.begin() : null;
+    _cursorHidden = _hideHandle != null;
     _stitcher = ScrollStitcher();
     _captured = 0;
     _stagnant = 0;
@@ -221,6 +242,13 @@ final class ScrollCaptureManager {
     region.value = null;
     captured.value = 0;
     _cursor = null;
+    // 先释放光标句柄再拼接写盘：拼接不再抓帧，光标早点回来。
+    final hideHandle = _hideHandle;
+    final hide = _cursorHide;
+    _hideHandle = null;
+    _cursorHide = null;
+    if (hideHandle != null) hide?.end(hideHandle);
+    _cursorHidden = false;
     _disposePreview();
     final stitcher = _stitcher;
     _stitcher = null;
@@ -336,7 +364,10 @@ final class ScrollCaptureManager {
     }
     final frame = await _decodeRgbaBytes(png);
     if (frame == null) return null;
-    _eraseCursor(frame.$1, frame.$2, frame.$3, cursorAtCapture);
+    // 光标已整体隐藏时跳过抹除：画面本没有鼠标，抹除反而会糊掉正常内容。
+    if (!_cursorHidden) {
+      _eraseCursor(frame.$1, frame.$2, frame.$3, cursorAtCapture);
+    }
     _captured++;
     captured.value = _captured;
     final step = stitcher.push(frame.$1, frame.$2, frame.$3);

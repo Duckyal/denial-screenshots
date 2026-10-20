@@ -3,7 +3,8 @@ import 'dart:io';
 import 'dart:math' as math;
 import 'dart:ui' as ui;
 
-import 'package:denial_flutter_sdk/state.dart' show denialBridgeProvider;
+import 'package:denial_flutter_sdk/state.dart'
+    show denialBridgeProvider, screenshotSelectionProvider;
 import 'package:flutter/gestures.dart'
     show PointerSignalEvent, PointerScrollEvent;
 import 'package:flutter/material.dart';
@@ -342,6 +343,13 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
     ScreenshotSettings.load().then((settings) {
       if (mounted) setState(() => _settings = settings);
     });
+    // 系统光标位置流：长截图手动模式的逐帧抹除兜底要读它。
+    _editorCursorSub = ProviderScope.containerOf(context, listen: false)
+        .read(denialBridgeProvider)
+        .cursorPositions
+        .listen((position) {
+          _editorCursorPosition.value = position;
+        });
     _decodeCapturedImage(_currentImageBytes);
     // Listen for system-level scroll capture trigger.
     _scrollCaptureSubscription = EditorScrollCaptureNotifier
@@ -527,6 +535,8 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
   void dispose() {
     HardwareKeyboard.instance.removeHandler(_handleKeyEvent);
     _scrollCaptureSubscription?.cancel();
+    _editorCursorSub?.cancel();
+    _editorCursorPosition.dispose();
     _settingsCaptureFocus.dispose();
     // 关掉常驻翻译/OCR 进程，避免留下孤儿 python。
     _translateService.dispose();
@@ -6542,6 +6552,45 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
     await ScrollCaptureManager.instance.start(
       region,
       injector: _autoScrollInjector(),
+      // 自动滚动全程借 shell 隐藏软件光标，长图里没有鼠标（逐帧抹除随之
+      // 停用）；手动滚动或借不到时，靠 _editorCursorPosition 逐帧抹除兜底
+      // ——编辑器路径此前没传 cursor，光标点其实一直留在长图里，这里顺带
+      // 修复。
+      cursor: _editorCursorPosition,
+      cursorHide: _settings.autoScroll ? _scrollCursorHide() : null,
+    );
+  }
+
+  /// 编辑器侧的系统光标位置流（与框选层同源：bridge cursorPositions），
+  /// 供长截图手动模式的逐帧抹除兜底。
+  final ValueNotifier<Offset?> _editorCursorPosition = ValueNotifier(null);
+  StreamSubscription<Offset>? _editorCursorSub;
+  static int _cursorHideSeq = 0;
+
+  /// 借 shell 的「截图准备」相隐藏软件光标（与框选层 _beginCursorHide 同
+  /// 机制）。notifier 在构造时捕获：会话结束时编辑器可能已经卸载。
+  ScrollCursorHide _scrollCursorHide() {
+    final notifier = ProviderScope.containerOf(
+      context,
+      listen: false,
+    ).read(screenshotSelectionProvider.notifier);
+    return ScrollCursorHide(
+      begin: () {
+        try {
+          final id = ++_cursorHideSeq;
+          return notifier.prepare(id) ? id : null;
+        } on Object {
+          return null;
+        }
+      },
+      end: (id) {
+        if (id == null) return;
+        try {
+          notifier.done(id);
+        } on Object {
+          // 恢复失败不致命：下一次光标移动会重绘。
+        }
+      },
     );
   }
 
