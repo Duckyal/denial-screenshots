@@ -1006,8 +1006,18 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
                                   clipBehavior: Clip.hardEdge,
                                   child: Transform(
                                     transform: Matrix4.identity()
-                                      ..translate(_canvasPan.dx, _canvasPan.dy)
-                                      ..scale(_canvasZoom, _canvasZoom, 1),
+                                      ..translateByDouble(
+                                        _canvasPan.dx,
+                                        _canvasPan.dy,
+                                        0.0,
+                                        1.0,
+                                      )
+                                      ..scaleByDouble(
+                                        _canvasZoom,
+                                        _canvasZoom,
+                                        1.0,
+                                        1.0,
+                                      ),
                                     child: SizedBox(
                                       width: _worldSize.width,
                                       height: _worldSize.height,
@@ -1634,12 +1644,20 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
       divider(),
       dockButton(
         Icons.undo,
-        L.pick(context, '撤销 (Ctrl+Z)', 'Undo (Ctrl+Z)'),
+        L.pick(
+          context,
+          '撤销 (${_prettyBinding('undo')})',
+          'Undo (${_prettyBinding('undo')})',
+        ),
         _undo,
       ),
       dockButton(
         Icons.redo,
-        L.pick(context, '重做 (Ctrl+Shift+Z)', 'Redo (Ctrl+Shift+Z)'),
+        L.pick(
+          context,
+          '重做 (${_prettyBinding('redo')})',
+          'Redo (${_prettyBinding('redo')})',
+        ),
         _redo,
       ),
       dockButton(
@@ -2997,74 +3015,7 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
   }
 
   /// 翻译配色的色板行：一圈圆形色块，点选即应用。
-  Widget _colorRow(String label, String current, ValueChanged<String> onPick) {
-    const options = [
-      ('FFFFFF', '白'),
-      ('000000', '黑'),
-      ('FFEB3B', '黄'),
-      ('90CAF9', '蓝'),
-      ('EF5350', '红'),
-      ('66BB6A', '绿'),
-    ];
-    return Padding(
-      padding: const EdgeInsets.only(top: 6),
-      child: Row(
-        children: [
-          Text(
-            label,
-            style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600),
-          ),
-          const SizedBox(width: 12),
-          for (final (hex, _) in options)
-            GestureDetector(
-              onTap: () => onPick(hex),
-              child: Container(
-                width: 24,
-                height: 24,
-                margin: const EdgeInsets.only(right: 6),
-                decoration: BoxDecoration(
-                  color: ScreenshotSettings.colorValueFromHex(hex, 0xFF000000),
-                  shape: BoxShape.circle,
-                  border: Border.all(
-                    color: current == hex
-                        ? Colors.blue
-                        : Colors.black.withValues(alpha: 0.25),
-                    width: current == hex ? 2.5 : 1,
-                  ),
-                ),
-              ),
-            ),
-        ],
-      ),
-    );
-  }
-
   /// 设置对话框里的单行文本配置项。
-  Widget _apiField(
-    String label,
-    String value,
-    String hint,
-    ValueChanged<String> onChanged, {
-    bool obscure = false,
-  }) {
-    return Padding(
-      padding: const EdgeInsets.only(top: 4),
-      child: TextField(
-        controller: TextEditingController(text: value)
-          ..selection = TextSelection.collapsed(offset: value.length),
-        obscureText: obscure,
-        style: const TextStyle(fontSize: 13),
-        decoration: InputDecoration(
-          isDense: true,
-          labelText: label,
-          hintText: hint,
-          border: const OutlineInputBorder(),
-        ),
-        onChanged: onChanged,
-      ),
-    );
-  }
-
   /// 打开本地语言包管理浮层：列出目录里的候选包，已装的给删除，没装的给下载。
   Future<void> _showModelManager() async {
     setState(() {
@@ -6574,23 +6525,6 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
     return () => bridge.sendKeyboardKey(key);
   }
 
-  Future<void> _save() async {
-    final png = await _renderCanvas();
-    if (png == null) return;
-    final path = await _choosePath([
-      '--file-selection',
-      '--save',
-      '--confirm-overwrite',
-      '--title=${L.s('保存截图', 'Save screenshot')}',
-      '--filename=Screenshot.png',
-      '--file-filter=${L.s('PNG 图片', 'PNG image')} | *.png',
-    ]);
-    if (path == null) return;
-    await File(path).writeAsBytes(png);
-    _ffi.save();
-    _showMessage('${L.s('已保存：', 'Saved: ')}$path');
-  }
-
   /// 复制按钮状态：working 沙漏、done 绿勾、failed 红叹号，除”done 且
   /// 即将关窗”外都自动回 idle——复制是异步的，按钮必须给出过程反馈。
   _CopyState _copyState = _CopyState.idle;
@@ -6673,35 +6607,6 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
       });
     }
   }
-
-  Future<void> _openImage() async {
-    final path = await _choosePath([
-      '--file-selection',
-      '--title=${L.s('打开图片', 'Open image')}',
-      '--file-filter=${L.s('图片', 'Images')} | *.png *.jpg *.jpeg *.webp',
-    ]);
-    if (path == null) return;
-    final bytes = await File(path).readAsBytes();
-    setState(() {
-      _currentImageBytes = bytes;
-      _imageWidget = _buildImageWidget();
-      _frozenBackdrop = _buildFrozenBackdrop();
-      history.clear();
-      currentStep = -1;
-      selectionRect = null;
-      // 旧图的文字块立刻失效，等后台 OCR 出新图的结果。
-      _ocrBlocks = const [];
-      _hasTextSelection = false;
-      _ocrGeneration++;
-    });
-    _invalidateCommands();
-    await _decodeCapturedImage(bytes);
-  }
-
-  /// 插件运行在合成器的最上层，zenity 这类外部窗口会被本层盖住，因此改用
-  /// shell 内置的对话框（参数仍沿用原来的 zenity 命令行数组）。
-  Future<String?> _choosePath(List<String> arguments) =>
-      choosePathWithDialog(context: context, arguments: arguments);
 
   void _showMessage(String message, {int seconds = 3}) {
     ScaffoldMessenger.of(context).showSnackBar(
@@ -7033,10 +6938,6 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
           ? currentMaskStyle
           : MaskStyle.solid,
     );
-  }
-
-  int? _findMovableCommandIndex(Offset position) {
-    return findManipulableCommandIndex(history, position);
   }
 
   /// 按手柄把原对象改成新大小：直线/箭头换端点，盒子对象换包围框并同步
