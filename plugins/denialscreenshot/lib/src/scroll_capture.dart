@@ -19,17 +19,6 @@ import 'scroll_stitch.dart';
 /// 侧不直接依赖 `denial_flutter_sdk`，保持本文件可用纯 Dart 校验。
 typedef ScrollInjector = void Function();
 
-/// 长截图会话期间的「无鼠标」钩子，由调用方注入（保持本文件不依赖 SDK）：
-/// [begin] 请求宿主隐藏系统光标，成功返回会话句柄，借不到返回 null；
-/// [end] 用句柄释放。自动滚动模式下句柄有效 = 连拍全程画面里没有鼠标，
-/// 逐帧抹除停用；手动滚动不请求（用户要靠光标定位滚轮目标）。
-final class ScrollCursorHide {
-  const ScrollCursorHide({required this.begin, required this.end});
-
-  final int? Function() begin;
-  final void Function(int?) end;
-}
-
 /// 长截图的实时预览快照：当前长图缩略图 + 源图尺寸（用于显示进度）。
 ///
 /// [image] 是已下采样的小图，直接交给 `RawImage` 即可；所有权归
@@ -77,11 +66,17 @@ final class ScrollCaptureManager {
   /// 实时拼接预览（缩略图）；会话结束后置空。
   final ValueNotifier<ScrollPreview?> preview = ValueNotifier(null);
 
-  /// 手动模式连拍间隔：静止时省资源；一旦发现页面还在滚动（有新内容追加，
-  /// 或有帧因重叠不足被丢弃），就切到更短的间隔，尽量让快滚时相邻帧仍重叠，
-  /// 避免丢帧后整段内容接不上。
-  static const _intervalIdle = Duration(milliseconds: 150);
-  static const _intervalMoving = Duration(milliseconds: 50);
+  /// 手动模式连拍：探针轮询间隔与静止判定。
+  /// 动时快轮（80ms）盯停歇沿；完全静止时放慢（200ms）省开销。
+  static const _probeInterval = Duration(milliseconds: 80);
+  static const _probeIdleInterval = Duration(milliseconds: 200);
+
+  /// 探针连续 N 次不变（此前在动）判定为"刚停稳"，触发抓帧。
+  static const _manualSettleHits = 2;
+
+  /// 平滑滚动一直不停（触摸板惯性、动画页面）时，距上次全帧超过这个
+  /// 窗口就强制抓一帧，保证相邻帧重叠足够、拼接不断层。
+  static const _manualMaxMoving = Duration(milliseconds: 500);
 
   /// 自动模式：注入一档后等待惯性滚动停稳，再抓帧。
   static const _autoSettleDefault = Duration(milliseconds: 450);
@@ -112,9 +107,6 @@ final class ScrollCaptureManager {
   ScrollStitcher? _stitcher;
   Future<void>? _sessionTask;
   ValueListenable<Offset?>? _cursor;
-  ScrollCursorHide? _cursorHide;
-  int? _hideHandle;
-  bool _cursorHidden = false;
   bool _autoMode = false;
   bool _stopRequested = false;
   bool _finalizing = false;
@@ -130,25 +122,19 @@ final class ScrollCaptureManager {
 
   /// 开始会话：[region] 是编辑器/选区里框定图像在屏幕上的矩形（逻辑坐标）。
   /// [injector] 非空时进入自动滚动模式。[cursor] 是实时的系统指针位置
-  /// （输出逻辑坐标），用于把合成进画面的鼠标指针抹掉，避免它破坏帧匹配。
-  /// [cursorHide] 在自动滚动模式下于会话开始时请求宿主隐藏系统光标：拿到
-  /// 句柄则连拍全程画面里没有鼠标，逐帧抹除停用（抹除是克隆补块，没有鼠标
-  /// 时反而会把正常内容糊掉）；借不到自动退回逐帧抹除。会话结束释放句柄。
+  /// （输出逻辑坐标），用于把合成进画面的鼠标指针逐帧抹掉——光标必须全程
+  /// 可见，用户要靠它点预览小窗上的「结束」按钮。
   Future<void> start(
     Rect rect, {
     ScrollInjector? injector,
     ValueListenable<Offset?>? cursor,
     Duration? autoDelay,
-    ScrollCursorHide? cursorHide,
   }) async {
     if (isActive || rect.isEmpty || rect.width < 8 || rect.height < 8) {
       return;
     }
     _region = rect;
     _cursor = cursor;
-    _cursorHide = cursorHide;
-    _hideHandle = (injector != null) ? cursorHide?.begin() : null;
-    _cursorHidden = _hideHandle != null;
     _stitcher = ScrollStitcher();
     _captured = 0;
     _stagnant = 0;
@@ -183,27 +169,136 @@ final class ScrollCaptureManager {
     }
   }
 
+  /// 手动模式：探针带轮询 + 静止沿抓帧。
+  ///
+  /// 旧版是定时轮询整区抓帧：空闲白抓（费电），快速/不平滑滚动时总在动画
+  /// 中途抓（帧糊、重叠不足 → noMatch 丢段）。现在改为：
+  ///  1. 高频只抓一条 4px 高的探针带（开销近乎零），与上一探针比对；
+  ///  2. 探针在变 = 页面在滚 → 不抓全帧（避开运动中的糊帧）；
+  ///  3. 探针由动转静（连续 N 次不变）= 刚停稳 → 抓一张稳定全帧喂拼接器；
+  ///  4. 兜底：平滑惯性滚动迟迟没有停歇沿时，距上次全帧超窗就强制补拍，
+  ///     保证相邻帧重叠足够；完全静止若干轮后探针放慢档省电。
+  /// Wayland 客户端拿不到别人的滚轮事件（轴事件只投焦点客户端），探针就
+  /// 是"滚轮触发了没"的等价信号。
   Future<void> _runManual() async {
-    var interval = _intervalIdle;
+    Uint8List? prevProbe;
+    var settleHits = 0;
+    var wasMoving = false;
+    var idleRounds = 0;
+    var lastFullAt = DateTime.now();
     while (!_stopRequested && _captured < _maxFrames && _canvasRoom()) {
-      final started = DateTime.now();
-      final droppedBefore = _stitcher?.droppedFrames ?? 0;
-      final step = await _captureFrame();
+      final started = Stopwatch()..start();
+      final probe = await _grabProbe();
       if (_stopRequested) break;
-      // 有新内容追加（页面在滚）或这一拍丢了帧（滚太快、重叠不足）都说明页面
-      // 还在动，下一拍加快；只有真正静止时才放慢。
-      final droppedNow = _stitcher?.droppedFrames ?? droppedBefore;
-      final moving =
-          droppedNow > droppedBefore ||
-          step == ScrollStitchStep.firstFrame ||
-          step == ScrollStitchStep.appended;
-      interval = moving ? _intervalMoving : _intervalIdle;
-      final wait = interval - DateTime.now().difference(started);
+      var interval = _probeInterval;
+      if (probe == null) {
+        // 探针抓取失败（grim 抖动）：退回全帧保底，不让会话卡死。
+        await _captureFrame();
+        lastFullAt = DateTime.now();
+      } else {
+        final prev = prevProbe;
+        prevProbe = probe;
+        final changed = prev != null && !_probeSame(prev, probe);
+        if (changed) {
+          wasMoving = true;
+          settleHits = 0;
+          idleRounds = 0;
+          if (DateTime.now().difference(lastFullAt) >= _manualMaxMoving) {
+            // 一直在滑没有停歇沿：强制补拍维持重叠。
+            await _captureFrame();
+            lastFullAt = DateTime.now();
+            if (_stopRequested) break;
+          }
+        } else if (wasMoving) {
+          settleHits++;
+          if (settleHits >= _manualSettleHits) {
+            final step = await _captureFrame();
+            lastFullAt = DateTime.now();
+            if (_stopRequested) break;
+            // 停稳帧仍拼不上（一次跳太大）：页面可能还在滑，继续盯沿。
+            if (step != ScrollStitchStep.noMatch) {
+              wasMoving = false;
+              settleHits = 0;
+              idleRounds = 0;
+            }
+          }
+        } else {
+          idleRounds++;
+          if (idleRounds >= 5) interval = _probeIdleInterval;
+        }
+      }
+      final wait = interval - started.elapsed;
       if (wait > Duration.zero) {
         await Future<void>.delayed(wait);
       }
     }
     await _finish();
+  }
+
+  /// 探针带：选区中部一条 4px 高的横带（纵向滚动必扫过它；避开首尾以免
+  /// 撞上吸顶/吸底栏）。
+  Rect get _probeRect {
+    final y = _region.top + _region.height * 0.55;
+    final left = _region.left + 2;
+    final width = math.max(8.0, _region.width - 4);
+    return Rect.fromLTWH(left, y, width, 4);
+  }
+
+  /// 抓探针带并抹掉光标覆盖段，返回原始 RGBA 字节；失败返回 null。
+  /// 光标闪烁会让探针"永远在变"，比对前必须抹掉；手动模式光标可见，
+  /// 隐藏模式下天然没有光标。
+  Future<Uint8List?> _grabProbe() async {
+    final rect = _probeRect;
+    final cursorAtCapture = _cursor?.value;
+    final png = await _grabPng(rect);
+    if (png == null) return null;
+    final frame = await _decodeRgbaBytes(png);
+    if (frame == null) return null;
+    if (cursorAtCapture != null) {
+      _eraseProbeCursor(frame.$1, frame.$2, frame.$3, rect, cursorAtCapture);
+    }
+    return frame.$1;
+  }
+
+  /// 探针带上的光标抹除：换算逻辑与全帧版一致，但探针只有 4px 高，
+  /// 指针热点落在带内时整段覆盖列都会被擦掉。
+  void _eraseProbeCursor(
+    Uint8List rgba,
+    int width,
+    int height,
+    Rect probe,
+    Offset cursor,
+  ) {
+    final scale = width / probe.width;
+    if (!scale.isFinite || scale <= 0) return;
+    final local = (cursor - probe.topLeft) * scale;
+    if (!local.dx.isFinite || !local.dy.isFinite) return;
+    final box = (_cursorBoxLogical * scale).ceil();
+    if (local.dx + box < 0 ||
+        local.dx > width ||
+        local.dy + box < 0 ||
+        local.dy > height) {
+      return;
+    }
+    const pad = 4;
+    final px = (local.dx - pad)
+        .floor()
+        .clamp(0, math.max(0, width - 1))
+        .toInt();
+    final py = (local.dy - pad)
+        .floor()
+        .clamp(0, math.max(0, height - 1))
+        .toInt();
+    eraseRegionInPlace(rgba, width, height, px, py, box + pad, box + pad);
+  }
+
+  /// 探针字节比较：长度与逐字节全等。
+  static bool _probeSame(Uint8List a, Uint8List b) {
+    if (a.length != b.length) return false;
+    for (var i = 0; i < a.length; i++) {
+      if (a[i] != b[i]) return false;
+    }
+    return true;
   }
 
   Future<void> _runAuto(ScrollInjector inject) async {
@@ -242,13 +337,6 @@ final class ScrollCaptureManager {
     region.value = null;
     captured.value = 0;
     _cursor = null;
-    // 先释放光标句柄再拼接写盘：拼接不再抓帧，光标早点回来。
-    final hideHandle = _hideHandle;
-    final hide = _cursorHide;
-    _hideHandle = null;
-    _cursorHide = null;
-    if (hideHandle != null) hide?.end(hideHandle);
-    _cursorHidden = false;
     _disposePreview();
     final stitcher = _stitcher;
     _stitcher = null;
@@ -330,44 +418,18 @@ final class ScrollCaptureManager {
     final stitcher = _stitcher;
     if (!isActive || stitcher == null) return null;
     if (_captured >= _maxFrames) return null;
-    final geometry =
-        '${_region.left.round()},${_region.top.round()} '
-        '${_region.width.round()}x${_region.height.round()}';
-    Uint8List png;
-    Offset? cursorAtCapture;
-    try {
-      // grim 直接输出到 stdout（`-`），免去每帧临时文件的写+读。
-      final process = await Process.start('grim', [
-        '-g',
-        geometry,
-        '-t',
-        'png',
-        '-',
-      ], environment: childProcessEnvironment());
-      // 抓帧有几十毫秒延迟，指针位置要在 grim 一起跑（画面即将被采样）时就取，
-      // 不能等解码完再读——否则抹除框会滞后于画面里的指针，快速划动时尤其明显。
-      cursorAtCapture = _cursor?.value;
-      final outFuture = _drainBytes(process.stdout);
-      final code = await process.exitCode.timeout(
-        const Duration(seconds: 4),
-        onTimeout: () {
-          process.kill();
-          return -1;
-        },
-      );
-      final bytes = await outFuture;
-      if (code != 0 || bytes.isEmpty) return null;
-      png = bytes;
-    } on Object {
+    // 抓帧有几十毫秒延迟，指针位置要在 grim 一起跑（画面即将被采样）时就取，
+    // 不能等解码完再读——否则抹除框会滞后于画面里的指针，快速划动时尤其明显。
+    final cursorAtCapture = _cursor?.value;
+    final png = await _grabPng(_region);
+    if (png == null) {
       // grim 缺失或连接失败：跳过这一帧，下一拍再试。
       return null;
     }
     final frame = await _decodeRgbaBytes(png);
     if (frame == null) return null;
-    // 光标已整体隐藏时跳过抹除：画面本没有鼠标，抹除反而会糊掉正常内容。
-    if (!_cursorHidden) {
-      _eraseCursor(frame.$1, frame.$2, frame.$3, cursorAtCapture);
-    }
+    // 光标全程可见（用户要凭它点「结束」），画面里的鼠标逐帧抹掉。
+    _eraseCursor(frame.$1, frame.$2, frame.$3, cursorAtCapture);
     _captured++;
     captured.value = _captured;
     final step = stitcher.push(frame.$1, frame.$2, frame.$3);
@@ -379,6 +441,36 @@ final class ScrollCaptureManager {
       _requestPreview();
     }
     return step;
+  }
+
+  /// 用 grim 抓指定矩形（逻辑坐标）的 PNG 字节；失败返回 null。
+  /// 直接输出 stdout（`-`），免去临时文件的写+读。
+  Future<Uint8List?> _grabPng(Rect rect) async {
+    final geometry =
+        '${rect.left.round()},${rect.top.round()} '
+        '${rect.width.round()}x${rect.height.round()}';
+    try {
+      final process = await Process.start('grim', [
+        '-g',
+        geometry,
+        '-t',
+        'png',
+        '-',
+      ], environment: childProcessEnvironment());
+      final outFuture = _drainBytes(process.stdout);
+      final code = await process.exitCode.timeout(
+        const Duration(seconds: 4),
+        onTimeout: () {
+          process.kill();
+          return -1;
+        },
+      );
+      final bytes = await outFuture;
+      if (code != 0 || bytes.isEmpty) return null;
+      return bytes;
+    } on Object {
+      return null;
+    }
   }
 
   /// 把画面里的鼠标指针抹掉。[cursor] 是抓帧时刻的指针位置（输出逻辑坐标），

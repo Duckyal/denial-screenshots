@@ -1774,11 +1774,6 @@ class _CaptureFlowHostState extends ConsumerState<CaptureFlowHost> {
       injector: _autoScrollInjector(),
       cursor: _cursorPosition,
       autoDelay: autoDelay,
-      // 自动滚动全程借 shell 隐藏软件光标：画面里没有鼠标，连拍跳过逐帧
-      // 抹除，得到真正干净的长图；借不到（已有原生截图会话）自动退回抹除。
-      cursorHide: _settings.autoScroll
-          ? ScrollCursorHide(begin: _beginCursorHide, end: _endCursorHide)
-          : null,
     );
   }
 
