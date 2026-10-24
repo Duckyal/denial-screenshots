@@ -19,6 +19,9 @@ import 'scroll_stitch.dart';
 /// 侧不直接依赖 `denial_flutter_sdk`，保持本文件可用纯 Dart 校验。
 typedef ScrollInjector = void Function();
 
+/// 自动模式一档注入的探针观测结果：按键没生效/到底、页面动了、探针失效。
+enum _AutoStep { stuck, advanced, probeFailed }
+
 /// 长截图的实时预览快照：当前长图缩略图 + 源图尺寸（用于显示进度）。
 ///
 /// [image] 是已下采样的小图，直接交给 `RawImage` 即可；所有权归
@@ -301,26 +304,90 @@ final class ScrollCaptureManager {
     return true;
   }
 
+  /// 自动模式注入后等待停稳的总预算上限：动画页面迟迟不停也强制抓帧，
+  /// 保证推进不被无限期挂起。
+  static const _autoSettleTimeout = Duration(milliseconds: 2000);
+
+  /// 自动模式：注入一档 → 探针观测"动没动" → 动了等停稳沿再抓帧。
+  ///
+  /// 旧版是注入后固定傻等 `_autoSettle` 再抓全帧：等早了抓到惯性中的糊帧
+  /// （noMatch 断层/错位），等晚了白耗；到底后每轮还各白抓两张必然相同的全帧
+  /// （insideKnown 噪声 + 解码开销）。现在用与手动模式同源的探针：
+  ///  - 响应窗口内探针毫无变化 = 按键没生效或到底 → 直接计停滞，不抓帧；
+  ///  - 探针变了 = 页面动了 → 等连续 [settleHits] 次不变的停稳沿再抓，
+  ///    抓到的必是停稳帧；迟迟不停（长惯性）按预算超时强抓，保推进节奏。
+  /// 探针失效（grim 抖动）退回旧版傻等+抓帧路径，不让会话卡死。
   Future<void> _runAuto(ScrollInjector inject) async {
     while (!_stopRequested &&
         _captured < _maxFrames &&
         _stagnant < _autoStagnantLimit &&
         _canvasRoom()) {
-      inject();
-      await Future<void>.delayed(_autoSettle);
+      final outcome = await _injectAndProbe(inject);
       if (_stopRequested) break;
+      if (outcome == _AutoStep.stuck) {
+        _stagnant++;
+        continue;
+      }
+      if (outcome == _AutoStep.probeFailed) {
+        await Future<void>.delayed(_autoSettle);
+        if (_stopRequested) break;
+      }
       final step = await _captureFrame();
-      if (step == null) {
+      if (step == null ||
+          step == ScrollStitchStep.noMatch ||
+          step == ScrollStitchStep.insideKnown) {
         _stagnant++;
-      } else if (step == ScrollStitchStep.appended ||
-          step == ScrollStitchStep.firstFrame) {
-        _stagnant = 0;
       } else {
-        // insideKnown / noMatch：这一档没推进（到底、按键无效或页面纯色）。
-        _stagnant++;
+        _stagnant = 0;
       }
     }
     await _finish();
+  }
+
+  /// 取探针基线 → 注入一档 → 盯探针。基线必须在注入前取：注入后第一拍
+  /// 画面可能已滑走，拿它当基准就永远"看不出变化"了。
+  Future<_AutoStep> _injectAndProbe(ScrollInjector inject) async {
+    final baseline = await _grabProbe();
+    if (baseline == null) return _AutoStep.probeFailed;
+    inject();
+    final startAt = DateTime.now();
+    var last = baseline;
+    // 阶段 1：响应窗口内等"第一次变化"。窗口 = 停稳等待 + 两拍探针余量，
+    // 不早于旧版的固定等待判停滞。
+    while (DateTime.now().difference(startAt) <
+        _autoSettle + _probeInterval * 2) {
+      await Future<void>.delayed(_probeInterval);
+      if (_stopRequested) return _AutoStep.stuck;
+      final probe = await _grabProbe();
+      if (probe == null) return _AutoStep.probeFailed;
+      if (!_probeSame(probe, last)) {
+        return _waitForSettle(probe, startAt);
+      }
+      last = probe;
+    }
+    return _AutoStep.stuck;
+  }
+
+  /// 阶段 2：页面已动，等连续 [_manualSettleHits] 次不变的停稳沿。
+  Future<_AutoStep> _waitForSettle(Uint8List first, DateTime startAt) async {
+    var last = first;
+    var hits = 0;
+    while (hits < _manualSettleHits) {
+      if (DateTime.now().difference(startAt) > _autoSettleTimeout) {
+        break; // 长惯性/动画不停：强抓这一档，保节奏
+      }
+      await Future<void>.delayed(_probeInterval);
+      if (_stopRequested) return _AutoStep.advanced;
+      final probe = await _grabProbe();
+      if (probe == null) break; // 抖动：已确认动过，直接去抓帧
+      if (_probeSame(probe, last)) {
+        hits++;
+      } else {
+        hits = 0;
+      }
+      last = probe;
+    }
+    return _AutoStep.advanced;
   }
 
   bool _canvasRoom() {
