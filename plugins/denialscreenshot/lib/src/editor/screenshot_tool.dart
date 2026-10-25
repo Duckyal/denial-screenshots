@@ -111,6 +111,11 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
   final TextEditingController _textController = TextEditingController();
   final FocusNode _textFocusNode = FocusNode();
   final GlobalKey _canvasKey = GlobalKey();
+
+  /// 实时编辑层的稳定身份：世界栈的兄弟层（OCR 选区层等）会在后台识别
+  /// 完成时动态插入，children 索引平移会重建无 key 的子树，EditableText
+  /// 随之丢焦点、丢选区——"识别完成瞬间正在打的字输不进去"的根因。
+  final GlobalKey _liveEditorKey = GlobalKey();
   bool _showTextDialog = false;
 
   /// 就地编辑中的文字命令下标（null = 新建草稿）。
@@ -1211,6 +1216,9 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
                                           // 事件，其它工具正常画图不受影响。
                                           if (_ocrBlocks.isNotEmpty)
                                             Positioned.fill(
+                                              key: const ValueKey(
+                                                'ocr-select-layer',
+                                              ),
                                               child: IgnorePointer(
                                                 child:
                                                     _buildTextSelectOverlay(),
@@ -2044,8 +2052,18 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
           for (final font in fontFamilies)
             GestureDetector(
               onTap: () {
+                final family = font == defaultFontLabel ? '' : font;
+                // 实时编辑已有文字：字体写回命令，草稿即时重排。
+                if (_mutateEditingText((c) => c.copyWith(fontFamily: family))) {
+                  setState(() {
+                    textFontFamily = family;
+                    _fontFamilyVisible = false;
+                  });
+                  _refreshDraftIfEditing();
+                  return;
+                }
                 setState(() {
-                  textFontFamily = font == defaultFontLabel ? '' : font;
+                  textFontFamily = family;
                   _fontFamilyVisible = false;
                 });
                 _refreshDraftIfEditing();
@@ -2413,17 +2431,27 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
   /// 加粗开关。有选中文字对象时直接改对象（与移动/改色同级语义）；
   /// 否则只切工具栏默认值，作用于后续新建与当前编辑中的草稿。
   Widget _optionBoldButton() {
+    // 高亮态跟随对象：编辑中的命令 > 光标选中的命令 > 工具栏默认。
     final selected = _selectedCommandIndex;
+    final target = _showTextDialog ? _editingTextIndex : _selectedCommandIndex;
     final active =
-        selected != null &&
-            selected < history.length &&
-            history[selected].type == ScreenshotToolType.text
-        ? history[selected].textBold
+        target != null &&
+            target < history.length &&
+            history[target].type == ScreenshotToolType.text
+        ? history[target].textBold
         : textBold;
     return Tooltip(
       message: L.s('加粗', 'Bold'),
       child: GestureDetector(
         onTap: () {
+          // 实时编辑已有文字：加粗写回该命令，草稿即时重排。
+          if (_showTextDialog && _editingTextIndex != null) {
+            final next = !history[_editingTextIndex!].textBold;
+            _mutateEditingText((c) => c.copyWith(textBold: next));
+            setState(() => textBold = next);
+            _refreshDraftIfEditing();
+            return;
+          }
           if (selected != null &&
               selected < history.length &&
               history[selected].type == ScreenshotToolType.text) {
@@ -2902,6 +2930,16 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
   }
 
   void _switchColor(Color color) {
+    // 实时编辑已有文字：改色直接写回该命令，草稿即时变色。
+    if (_mutateEditingText((c) => c.copyWith(color: color))) {
+      setState(() {
+        currentColor = color;
+        maskColor = color;
+        showColorPicker = false;
+      });
+      _refreshDraftIfEditing();
+      return;
+    }
     if (_editingSelectedObject) {
       final index = _selectedCommandIndex!;
       final isMask = history[index].type == ScreenshotToolType.mask;
@@ -2979,6 +3017,20 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
   }
 
   void _adjustSize(double size) {
+    // 实时编辑已有文字：字号写回命令（strokeWidth 语义 = 字号/4）。
+    if (currentTool == ScreenshotToolType.text &&
+        _mutateEditingText(
+          (c) => c.copyWith(
+            strokeWidth: size.clamp(_activeSizeMin, _activeSizeMax),
+          ),
+        )) {
+      setState(() {
+        textFontSize = size.clamp(_activeSizeMin, _activeSizeMax);
+        showSizeSlider = false;
+      });
+      _refreshDraftIfEditing();
+      return;
+    }
     if (_editingSelectedObject) {
       _mutateSelected(
         (command) => command.copyWith(
@@ -7193,11 +7245,30 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
   bool _draftBoldCache = true;
 
   /// 工具栏改字号/颜色/字体时：实时编辑会话里的草稿要立刻重排。签名含
-  /// 样式，无变化时是空操作；编辑已有文字的会话里样式钉在原命令上，
-  /// 重排结果不变（与提交行为一致），仅新建会话会真的变。
+  /// 样式，无变化时是空操作。
   void _refreshDraftIfEditing() {
     if (!_showTextDialog) return;
     _rebuildDraftLayout();
+  }
+
+  /// 实时编辑已有文字中：工具栏的样式变更直接写回被编辑的命令（文字
+  /// 包围框随排版同步重算），返回 true = 已在编辑路径消费。草稿排版
+  /// 从命令读样式，写回即所见即所得；提交（_updateTextCommand）也走
+  /// 同一命令，不再出现"编辑时改色无效、提交才生效"的割裂。
+  bool _mutateEditingText(DrawCommand Function(DrawCommand) mutate) {
+    final index = _editingTextIndex;
+    if (!_showTextDialog || index == null || index >= history.length) {
+      return false;
+    }
+    _undoSnapshots.add(List<DrawCommand>.from(history));
+    _redoSnapshots.clear();
+    var next = mutate(history[index]);
+    if (next.type == ScreenshotToolType.text) {
+      next = next.copyWith(rect: commandDisplayBounds(next));
+    }
+    setState(() => history[index] = next);
+    _invalidateCommands();
+    return true;
   }
 
   /// 实时文本编辑层：世界坐标里，草稿由 [LiveTextPainter] 按提交渲染的
@@ -7283,6 +7354,7 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
       ),
     );
     return Positioned.fill(
+      key: _liveEditorKey,
       child: Stack(
         clipBehavior: Clip.none,
         children: [
