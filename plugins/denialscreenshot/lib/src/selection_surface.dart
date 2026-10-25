@@ -25,7 +25,6 @@ import 'panel_nav.dart';
 import 'pin_surface.dart';
 import 'scroll_capture.dart';
 import 'scroll_stitch.dart' show eraseRegionInPlace;
-import 'selection_save_panel.dart';
 import 'selection_settings_panel.dart';
 import 'window_pick.dart';
 
@@ -406,15 +405,17 @@ class _CaptureFlowHostState extends ConsumerState<CaptureFlowHost> {
     final belowRoom = size.height - region.bottom - gap;
     final aboveRoom = region.top - gap;
 
-    final panel = ConstrainedBox(
-      constraints: BoxConstraints(maxHeight: maxHeight),
-      child: SelectionSavePanel(
-        initialDirectory: _saveDirectory,
-        initialFileName: _saveFileName,
-        onConfirm: _confirmSave,
-        nav: _saveNav,
-        onClose: () => setState(() => _savePanelOpen = false),
-      ),
+    final panel = PathChooserPanel(
+      title: L.pick(context, '保存截图', 'Save screenshot'),
+      save: true,
+      initialDirectory: _saveDirectory,
+      initialFileName: _saveFileName,
+      patterns: const ['.png'],
+      // 宽度走统一默认值（kPathChooserWidth）；高度按选区周围实际余量夹取。
+      height: maxHeight,
+      nav: _saveNav,
+      onSelected: _confirmSave,
+      onCancel: () => setState(() => _savePanelOpen = false),
     );
 
     final resultSide = _resultOpen ? _resultSide(size, region) : null;

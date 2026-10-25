@@ -118,6 +118,7 @@ class StaticDrawPainter extends CustomPainter {
     required this.version,
     this.backgroundImage,
     this.annotationImage,
+    this.skipIndex,
   });
 
   final List<DrawCommand> commands;
@@ -127,13 +128,18 @@ class StaticDrawPainter extends CustomPainter {
   /// 即图像像素坐标，整图直接映射到画布即可对齐。
   final ui.Image? backgroundImage;
 
+  /// 就地编辑中的文字命令下标：编辑层用实时草稿替换它，静态层必须跳过
+  /// 原对象（位图与重放两条路径都跳），否则旧字和草稿会重叠闪跳。
+  final int? skipIndex;
+
   /// 已提交命令的栅格化位图（世界尺寸）。由编辑器状态在命令变化时重建，
   /// 橡皮拖动擦除时增量更新。
   final ui.Image? annotationImage;
 
   @override
   void paint(Canvas canvas, Size size) {
-    final raster = annotationImage;
+    final skip = skipIndex;
+    final raster = skip == null ? annotationImage : null;
     if (raster != null) {
       canvas.drawImage(
         raster,
@@ -143,10 +149,11 @@ class StaticDrawPainter extends CustomPainter {
     } else {
       // BlendMode.clear（橡皮）只在独立图层里才能擦掉本层已画的内容；没有
       // 橡皮命令时省掉这张与画布等大的离屏图层——4K 截图下它是几十 MB。
-      final needsLayer = _hasEraser;
+      final needsLayer = _hasEraser || skip != null;
       if (needsLayer) canvas.saveLayer(Offset.zero & size, Paint());
-      for (final command in commands) {
-        drawCommand(canvas, command, backgroundImage: backgroundImage);
+      for (var i = 0; i < commands.length; i++) {
+        if (i == skip) continue;
+        drawCommand(canvas, commands[i], backgroundImage: backgroundImage);
       }
       if (needsLayer) canvas.restore();
     }
@@ -164,7 +171,25 @@ class StaticDrawPainter extends CustomPainter {
       oldDelegate.commands != commands ||
       oldDelegate.version != version ||
       oldDelegate.backgroundImage != backgroundImage ||
-      oldDelegate.annotationImage != annotationImage;
+      oldDelegate.annotationImage != annotationImage ||
+      oldDelegate.skipIndex != skipIndex;
+}
+
+/// 实时文字编辑层：把正在输入的草稿按提交规则画进世界坐标。排版来自
+/// layoutTextBlock（与提交渲染同一实现），落位偏移也由编辑器按同一规则
+/// 算好传入——编辑中长什么样，提交后就长什么样。
+class LiveTextPainter extends CustomPainter {
+  const LiveTextPainter({required this.painter, required this.offset});
+
+  final TextPainter painter;
+  final Offset offset;
+
+  @override
+  void paint(Canvas canvas, Size size) => painter.paint(canvas, offset);
+
+  @override
+  bool shouldRepaint(LiveTextPainter oldDelegate) =>
+      oldDelegate.painter != painter || oldDelegate.offset != offset;
 }
 
 /// 光标模式选中对象的高亮框 + 缩放手柄。
@@ -239,9 +264,21 @@ class PreviewDrawPainter extends CustomPainter {
 /// 算好（world 坐标），这里只负责画。整层在 `_canvasKey` 重绘边界之外，
 /// 保存/置顶不会带上。
 class OcrSelectionPainter extends CustomPainter {
-  const OcrSelectionPainter({required this.rects});
+  const OcrSelectionPainter({
+    required this.rects,
+    this.handles = const [],
+    this.anchorRadius = 7,
+  });
 
   final List<Rect> rects;
+
+  /// Ctrl 多选关闭锚点：每个固化选段起点旁的 ✕ 钮，点它 = 释放该段。
+  final List<Offset> handles;
+
+  /// 锚点半径（世界像素），由编辑器按当前显示缩放换算传入：固定世界半径
+  /// 在缩小适配下只剩两三个屏幕像素，✕ 的两条斜线会被抗锯齿糊成一个点、
+  /// 看着就不是叉了——换算后屏幕上锚点恒定大小、✕ 永远清晰。
+  final double anchorRadius;
 
   @override
   void paint(Canvas canvas, Size size) {
@@ -255,11 +292,88 @@ class OcrSelectionPainter extends CustomPainter {
       canvas.drawRect(rect, fill);
       canvas.drawRect(rect, border);
     }
+    if (handles.isNotEmpty) {
+      // 关闭锚点：实心圆 + 白色 ✕。Ctrl+点它 = 释放对应选段。
+      final r = anchorRadius;
+      final bg = Paint()..color = const Color(0xFF1E88C9);
+      final ring = Paint()
+        ..color = Colors.white
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = r * 0.16;
+      final cross = Paint()
+        ..color = Colors.white
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = math.max(1.0, r * 0.22)
+        ..strokeCap = StrokeCap.round;
+      final arm = r * 0.45;
+      for (final center in handles) {
+        canvas.drawCircle(center, r, bg);
+        canvas.drawCircle(center, r, ring);
+        canvas.drawLine(
+          center - Offset(arm, arm),
+          center + Offset(arm, arm),
+          cross,
+        );
+        // 右上 → 左下（+arm,-arm 到 -arm,+arm），与上一条对角线交叉成 ✕。
+        canvas.drawLine(
+          center + Offset(arm, -arm),
+          center - Offset(arm, -arm),
+          cross,
+        );
+      }
+    }
   }
 
   @override
   bool shouldRepaint(OcrSelectionPainter oldDelegate) =>
-      !listEquals(oldDelegate.rects, rects);
+      !listEquals(oldDelegate.rects, rects) ||
+      !listEquals(oldDelegate.handles, handles) ||
+      oldDelegate.anchorRadius != anchorRadius;
+}
+
+/// 文本框编辑态的高亮层：高对比虚线描边 + 半透明底 + 四角实心角标，
+/// 在任意截图底色上都能把编辑区域显式圈出来。
+class TextBoxHighlightPainter extends CustomPainter {
+  @override
+  void paint(Canvas canvas, Size size) {
+    final rect = Offset.zero & size;
+    final fill = Paint()..color = const Color(0x1F4C9AFF);
+    final dash = Paint()
+      ..color = const Color(0xFFFFFFFF)
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 1.6;
+    final halo = Paint()
+      ..color = const Color(0xFF0A84FF)
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 4.5
+      ..strokeCap = StrokeCap.round;
+    canvas.drawRect(rect, fill);
+    // 3px 划线 + 4.5px 间隔的虚线：先画蓝色宽晕，再叠白色细线，形成描边
+    // 对比；halo 用圆头避免短线头生硬。
+    final path = Path()
+      ..moveTo(rect.left, rect.top)
+      ..lineTo(rect.right, rect.top)
+      ..lineTo(rect.right, rect.bottom)
+      ..lineTo(rect.left, rect.bottom)
+      ..close();
+    _drawDashed(canvas, path, dash, halo);
+  }
+
+  static void _drawDashed(Canvas canvas, Path path, Paint line, Paint halo) {
+    for (final metrics in path.computeMetrics()) {
+      double distance = 0;
+      while (distance < metrics.length) {
+        final next = math.min(distance + 3.5, metrics.length);
+        final seg = metrics.extractPath(distance, next);
+        canvas.drawPath(seg, halo);
+        canvas.drawPath(seg, line);
+        distance = next + 4.5;
+      }
+    }
+  }
+
+  @override
+  bool shouldRepaint(covariant CustomPainter oldDelegate) => false;
 }
 
 void drawCommand(
@@ -358,14 +472,15 @@ void drawCommand(
       break;
     case ScreenshotToolType.text:
       // 排版结果缓存在命令上：字号随粗细变化，变了才重新 layout。
-      // 有文本框（拖框创建）时内容在框内水平、垂直居中——PPT 文本框观感。
+      // 有文本框（拖框创建）时逐行左对齐、整块垂直居中——与实时编辑的
+      // EditableText 约束完全同构（框内区宽度 + 起始对齐），所见即所得。
       final layout = command.textLayout();
       final box = command.textBox;
       final offset = box == null
           ? command.start
           : Offset(
-              box.left + (box.width - layout.width) / 2,
-              box.top + (box.height - layout.height) / 2,
+              box.deflate(4).left,
+              box.deflate(4).top + (box.deflate(4).height - layout.height) / 2,
             );
       layout.paint(canvas, offset);
       break;

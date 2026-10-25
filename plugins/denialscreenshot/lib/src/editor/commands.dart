@@ -6,6 +6,54 @@ import 'dart:ui';
 
 import 'tools.dart';
 
+/// 文字排版的唯一实现：命令渲染、实时编辑器（草稿还不是命令）都走它，
+/// 保证"所见即所得"——编辑中长什么样，提交后就长什么样。
+///
+/// 有文本框（[box]）：内容按框宽换行，塞不下逐级缩字号（×0.9），下限
+/// [_kMinBoxFontSize]；自由文字（无框）按 [baseFontSize] 原样排，不缩。
+/// 返回排版结果与实际生效的字号。
+({TextPainter painter, double fontSize}) layoutTextBlock({
+  required String text,
+  required double baseFontSize,
+  required Color color,
+  String fontFamily = '',
+  FontWeight fontWeight = FontWeight.bold,
+  Rect? box,
+  double textMaxWidth = double.infinity,
+}) {
+  // 文本框留一圈内边距，文字不贴框边（PPT 默认内边距观感）。
+  final inner = box?.deflate(4);
+  TextPainter build(double fontSize) => TextPainter(
+    text: TextSpan(
+      text: text,
+      style: TextStyle(
+        color: color,
+        fontSize: fontSize,
+        fontFamily: fontFamily.isEmpty ? null : fontFamily,
+        fontWeight: fontWeight,
+      ),
+    ),
+    textDirection: TextDirection.ltr,
+  )..layout(maxWidth: inner?.width ?? textMaxWidth);
+  // 自由文字（无文本框）：字号优先，按用户设定值渲染，不缩放。
+  if (inner == null) {
+    return (painter: build(baseFontSize), fontSize: baseFontSize);
+  }
+  // 文本框：换行后仍塞不下（高或宽超出内框）就逐级缩小字号，直到完整放进
+  // 框内；缩到下限仍放不下则停在最小字号、允许溢出。
+  var fontSize = baseFontSize;
+  var painter = build(fontSize);
+  while ((painter.height > inner.height || painter.width > inner.width) &&
+      fontSize > _kMinBoxFontSize) {
+    fontSize = math.max(_kMinBoxFontSize, fontSize * 0.9);
+    painter = build(fontSize);
+  }
+  return (painter: painter, fontSize: fontSize);
+}
+
+/// 文本框自适应缩小的字号下限（渲染像素），低于此值基本不可读。
+const double _kMinBoxFontSize = 6;
+
 /// 图形对象当前实际占据的包围框。
 ///
 /// 文字的字号 = strokeWidth * 4，改粗细后视觉范围随之变化，必须按当前
@@ -82,6 +130,9 @@ class DrawCommand {
   /// 文字字体族名称，空字符串表示使用默认字体。
   final String fontFamily;
 
+  /// 文字是否加粗渲染（文本与译文都默认加粗，可关）。
+  final bool textBold;
+
   /// 文字命令的排版缓存。绘制与命中测试都用它，避免每帧重新 layout；
   /// 字号（strokeWidth * 4）、颜色或文本框变化时自动失效。
   TextPainter? _textLayout;
@@ -90,6 +141,7 @@ class DrawCommand {
   double? _textLayoutMaxWidth;
   Rect? _textLayoutBox;
   String? _textLayoutFontFamily;
+  bool? _textLayoutBold;
 
   TextPainter textLayout() {
     final fontSize = strokeWidth * 4;
@@ -99,7 +151,8 @@ class DrawCommand {
         _textLayoutColor == color &&
         _textLayoutMaxWidth == textMaxWidth &&
         _textLayoutBox == textBox &&
-        _textLayoutFontFamily == fontFamily) {
+        _textLayoutFontFamily == fontFamily &&
+        _textLayoutBold == textBold) {
       return cached;
     }
     final painter = _layoutText(fontSize);
@@ -109,41 +162,19 @@ class DrawCommand {
     _textLayoutMaxWidth = textMaxWidth;
     _textLayoutBox = textBox;
     _textLayoutFontFamily = fontFamily;
+    _textLayoutBold = textBold;
     return painter;
   }
 
-  TextPainter _layoutText(double baseFontSize) {
-    final box = textBox;
-    // 文本框留一圈内边距，文字不贴框边（PPT 默认内边距观感）。
-    final inner = box?.deflate(4);
-    TextPainter build(double fontSize) => TextPainter(
-      text: TextSpan(
-        text: text,
-        style: TextStyle(
-          color: color,
-          fontSize: fontSize,
-          fontFamily: fontFamily.isEmpty ? null : fontFamily,
-          fontWeight: FontWeight.bold,
-        ),
-      ),
-      textDirection: TextDirection.ltr,
-    )..layout(maxWidth: inner?.width ?? textMaxWidth);
-    // 自由文字（无文本框）：字号优先，按用户设定值渲染，不缩放。
-    if (inner == null) return build(baseFontSize);
-    // 文本框：换行后仍塞不下（高或宽超出内框）就逐级缩小字号，直到完整放进
-    // 框内；缩到下限仍放不下则停在最小字号、允许溢出。
-    var fontSize = baseFontSize;
-    var painter = build(fontSize);
-    while ((painter.height > inner.height || painter.width > inner.width) &&
-        fontSize > _minBoxFontSize) {
-      fontSize = math.max(_minBoxFontSize, fontSize * 0.9);
-      painter = build(fontSize);
-    }
-    return painter;
-  }
-
-  /// 文本框自适应缩小的字号下限（渲染像素），低于此值基本不可读。
-  static const double _minBoxFontSize = 6;
+  TextPainter _layoutText(double baseFontSize) => layoutTextBlock(
+    text: text,
+    baseFontSize: baseFontSize,
+    color: color,
+    fontFamily: fontFamily,
+    fontWeight: textBold ? FontWeight.bold : FontWeight.normal,
+    box: textBox,
+    textMaxWidth: textMaxWidth,
+  ).painter;
 
   DrawCommand({
     required this.type,
@@ -159,6 +190,7 @@ class DrawCommand {
     this.textMaxWidth = double.infinity,
     this.textBox,
     this.fontFamily = '',
+    this.textBold = true,
   });
 
   /// 光标模式拖动选中对象（整体平移）。
@@ -177,6 +209,7 @@ class DrawCommand {
       textMaxWidth: textMaxWidth,
       textBox: textBox?.shift(delta),
       fontFamily: fontFamily,
+      textBold: textBold,
     );
   }
 
@@ -197,6 +230,7 @@ class DrawCommand {
       textMaxWidth: textMaxWidth,
       textBox: textBox ?? this.textBox,
       fontFamily: fontFamily,
+      textBold: textBold,
     );
   }
 
@@ -209,6 +243,7 @@ class DrawCommand {
     String? text,
     MaskStyle? maskStyle,
     String? fontFamily,
+    bool? textBold,
   }) {
     return DrawCommand(
       type: type,
@@ -225,6 +260,7 @@ class DrawCommand {
       textMaxWidth: textMaxWidth,
       textBox: textBox,
       fontFamily: fontFamily ?? this.fontFamily,
+      textBold: textBold ?? this.textBold,
     );
   }
 }

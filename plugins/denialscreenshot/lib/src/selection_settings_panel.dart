@@ -1065,7 +1065,6 @@ class _SelectionSettingsPanelState extends State<SelectionSettingsPanel> {
                       }
                     },
                     anchorRect: _panelRect(),
-                    background: _panelBg,
                     initialDirectory: _translateInitialDirectory(),
                     onSelected: (path) async {
                       // 选本地目录时把引擎一起定对：目录里有 Argos 语言包就用
@@ -1260,7 +1259,6 @@ class _SelectionSettingsPanelState extends State<SelectionSettingsPanel> {
                         directoryMode: true,
                         requiresOcrModels: true,
                         anchorRect: _panelRect(),
-                        background: _panelBg,
                         initialDirectory: _ocrInitialDirectory(),
                         onSelected: (path) =>
                             _apply(_settings.copyWith(ocrLocalPath: path)),
