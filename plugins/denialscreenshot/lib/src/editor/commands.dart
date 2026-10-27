@@ -133,6 +133,10 @@ class DrawCommand {
   /// 文字是否加粗渲染（文本与译文都默认加粗，可关）。
   final bool textBold;
 
+  /// 文本背景色（工具栏「A」面板选的色，可带透明度）；null = 无背景。
+  /// 文本框画整框、自由文字画排版包围盒外扩一圈。
+  final Color? textBackground;
+
   /// 文字命令的排版缓存。绘制与命中测试都用它，避免每帧重新 layout；
   /// 字号（strokeWidth * 4）、颜色或文本框变化时自动失效。
   TextPainter? _textLayout;
@@ -191,6 +195,7 @@ class DrawCommand {
     this.textBox,
     this.fontFamily = '',
     this.textBold = true,
+    this.textBackground,
   });
 
   /// 光标模式拖动选中对象（整体平移）。
@@ -210,6 +215,7 @@ class DrawCommand {
       textBox: textBox?.shift(delta),
       fontFamily: fontFamily,
       textBold: textBold,
+      textBackground: textBackground,
     );
   }
 
@@ -231,6 +237,7 @@ class DrawCommand {
       textBox: textBox ?? this.textBox,
       fontFamily: fontFamily,
       textBold: textBold,
+      textBackground: textBackground,
     );
   }
 
@@ -244,6 +251,7 @@ class DrawCommand {
     MaskStyle? maskStyle,
     String? fontFamily,
     bool? textBold,
+    Color? textBackground,
   }) {
     return DrawCommand(
       type: type,
@@ -261,6 +269,29 @@ class DrawCommand {
       textBox: textBox,
       fontFamily: fontFamily ?? this.fontFamily,
       textBold: textBold ?? this.textBold,
+      textBackground: textBackground ?? this.textBackground,
+    );
+  }
+
+  /// 设置/清除文本背景色。copyWith 的 null 是"不改"语义，表达不了
+  /// "清除"，单独开这个方法。
+  DrawCommand withTextBackground(Color? background) {
+    return DrawCommand(
+      type: type,
+      start: start,
+      end: end,
+      path: path,
+      text: text,
+      rect: rect,
+      color: color,
+      strokeWidth: strokeWidth,
+      fillColor: fillColor,
+      maskStyle: maskStyle,
+      textMaxWidth: textMaxWidth,
+      textBox: textBox,
+      fontFamily: fontFamily,
+      textBold: textBold,
+      textBackground: background,
     );
   }
 }

@@ -198,10 +198,18 @@ class LiveTextPainter extends CustomPainter {
 /// 保存/置顶快照不会把选中框和手柄烙进图片。手柄尺寸按屏幕像素给定，
 /// 由调用方按当前显示比例换算成世界单位，缩放时观感大小恒定。
 class SelectionPainter extends CustomPainter {
-  const SelectionPainter({required this.command, required this.handleSize});
+  const SelectionPainter({
+    required this.command,
+    required this.handleSize,
+    this.showHandles = true,
+  });
 
   final DrawCommand? command;
   final double handleSize;
+
+  /// 缩放手柄开关：文字工具下的选中只画蓝框（手柄拖拽逻辑归光标模式，
+  /// 画了也拖不动，反而误导）。
+  final bool showHandles;
 
   @override
   void paint(Canvas canvas, Size size) {
@@ -220,20 +228,24 @@ class SelectionPainter extends CustomPainter {
       ..color = Colors.blue
       ..style = PaintingStyle.stroke
       ..strokeWidth = 1.5;
-    for (final (_, point) in commandHandlePoints(target)) {
-      final rect = Rect.fromCenter(
-        center: point,
-        width: handleSize,
-        height: handleSize,
-      );
-      canvas.drawRect(rect, fill);
-      canvas.drawRect(rect, border);
+    if (showHandles) {
+      for (final (_, point) in commandHandlePoints(target)) {
+        final rect = Rect.fromCenter(
+          center: point,
+          width: handleSize,
+          height: handleSize,
+        );
+        canvas.drawRect(rect, fill);
+        canvas.drawRect(rect, border);
+      }
     }
   }
 
   @override
   bool shouldRepaint(SelectionPainter oldDelegate) =>
-      oldDelegate.command != command || oldDelegate.handleSize != handleSize;
+      oldDelegate.command != command ||
+      oldDelegate.handleSize != handleSize ||
+      oldDelegate.showHandles != showHandles;
 }
 
 /// 正在绘制的那一笔（预览层）。
@@ -329,6 +341,27 @@ class OcrSelectionPainter extends CustomPainter {
       !listEquals(oldDelegate.rects, rects) ||
       !listEquals(oldDelegate.handles, handles) ||
       oldDelegate.anchorRadius != anchorRadius;
+}
+
+/// 文本背景层：实时编辑时画在草稿底下，与静态渲染同一圆角/外扩规则
+/// （由调用方算好矩形，这里只画圆角色块）。
+class TextBackgroundPainter extends CustomPainter {
+  const TextBackgroundPainter({required this.color, required this.radius});
+
+  final Color color;
+  final double radius;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    canvas.drawRRect(
+      RRect.fromRectAndRadius(Offset.zero & size, Radius.circular(radius)),
+      Paint()..color = color,
+    );
+  }
+
+  @override
+  bool shouldRepaint(TextBackgroundPainter oldDelegate) =>
+      oldDelegate.color != color || oldDelegate.radius != radius;
 }
 
 /// 文本框编辑态的高亮层：高对比虚线描边 + 半透明底 + 四角实心角标，
@@ -476,6 +509,24 @@ void drawCommand(
       // EditableText 约束完全同构（框内区宽度 + 起始对齐），所见即所得。
       final layout = command.textLayout();
       final box = command.textBox;
+      final bg = command.textBackground;
+      if (bg != null) {
+        // 背景：文本框画整框；自由文字画排版包围盒按字号外扩一圈。
+        final fontSize = command.strokeWidth * 4;
+        final pad = fontSize * 0.22;
+        final bgRect =
+            box ??
+            Rect.fromLTWH(
+              command.start.dx - pad,
+              command.start.dy - pad,
+              layout.width + pad * 2,
+              layout.height + pad * 2,
+            );
+        canvas.drawRRect(
+          RRect.fromRectAndRadius(bgRect, Radius.circular(fontSize * 0.18)),
+          Paint()..color = bg,
+        );
+      }
       final offset = box == null
           ? command.start
           : Offset(
