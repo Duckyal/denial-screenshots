@@ -84,7 +84,7 @@ final class DenialScreenshotCaptureSurface implements ShellSurface {
 
   @override
   Widget build(BuildContext context, {required ShellSurfaceContext surface}) =>
-      const CaptureFlowHost();
+      CaptureFlowHost(surface: surface);
 }
 
 /// Floating pin plane: the annotated snapshot as a small draggable card.

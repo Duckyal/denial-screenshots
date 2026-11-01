@@ -16,6 +16,7 @@ import '../api_config_field.dart';
 import '../clipboard.dart';
 import '../editor_bus.dart';
 import '../l10n.dart';
+import '../panel_nav.dart';
 import '../scroll_capture.dart';
 import 'dialog_style.dart';
 import 'ffi.dart';
@@ -93,6 +94,21 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
   /// 文字工具独立字号。
   double textFontSize = 8;
   String textFontFamily = '';
+
+  /// 文字工具加粗开关（新建文字 / 编辑中草稿的基准值）。
+  bool textBold = true;
+
+  /// 新建文字的背景色默认值（null = 无背景）；编辑已有文字/选中对象时
+  /// 面板操作直接写回命令。
+  Color? textBackground;
+  bool _textBgVisible = false;
+  final GlobalKey _textBgButtonKey = GlobalKey();
+  final GlobalKey _textBgPanelKey = GlobalKey();
+
+  /// 快捷键提示面板：也是"编辑配套设施"，点它不该提交文字。
+  final GlobalKey _hintsPanelKey = GlobalKey();
+  Offset? _textBgPanelOffset;
+  bool _textBgPanelVisible = false;
   final List<DrawCommand> history = [];
   final List<List<DrawCommand>> _undoSnapshots = [];
   final List<List<DrawCommand>> _redoSnapshots = [];
@@ -107,15 +123,25 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
   final TextEditingController _textController = TextEditingController();
   final FocusNode _textFocusNode = FocusNode();
   final GlobalKey _canvasKey = GlobalKey();
+
+  /// 实时编辑层的稳定身份：世界栈的兄弟层（OCR 选区层等）会在后台识别
+  /// 完成时动态插入，children 索引平移会重建无 key 的子树，EditableText
+  /// 随之丢焦点、丢选区——"识别完成瞬间正在打的字输不进去"的根因。
+  final GlobalKey _liveEditorKey = GlobalKey();
   bool _showTextDialog = false;
 
-  /// 弹窗改的是哪条文字命令（null = 新建）。
+  /// 就地编辑中的文字命令下标（null = 新建草稿）。
   int? _editingTextIndex;
   Offset _textDialogPosition = Offset.zero;
 
-  /// 弹窗是窗口坐标定位的 UI，而 [_textDialogPosition] 是 world 坐标
-  /// （落在命令里）；两者经画布 RenderBox 的变换互转。
-  Offset _textDialogWindowAnchor = Offset.zero;
+  /// 实时草稿的排版结果：每敲一个字都按提交渲染的同一套规则（含文本框
+  /// 缩字号）重排，静态层跳过原命令、这一份盖在原位置——所见即所得。
+  TextPainter? _draftPainter;
+  double _draftFontSize = 0;
+  Rect? _draftBox;
+
+  /// 上次草稿排版对应的输入指纹（文本+样式+框），相同则跳过重排。
+  String _draftSignature = '';
   bool showToolbar = true;
   bool showColorPicker = false;
   bool showSizeSlider = false;
@@ -238,8 +264,18 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
   int? _ocrSelFocusOffset;
   bool _ocrSelecting = false;
 
+  /// 本段选择是否按住 Ctrl 拖出（松手时按增量语义固化）。
+  bool _ocrSelectingCtrl = false;
+
+  /// 起选点（global）：Ctrl 单击切换释放要按它命中已有段。
+  Offset _lastOcrPressGlobal = Offset.zero;
+
   /// 当前是否有选中的 OCR 文字：决定 Ctrl+C 是复制所选文字还是复制整图。
   bool _hasTextSelection = false;
+
+  /// Ctrl 多选的已固化选段（每段 = 起块,起偏移,止块,止偏移）；正在拖的
+  /// 活动段仍存在 anchor/focus 字段里，松手后并入这里。
+  final List<(int, int, int, int)> _ocrSelRanges = [];
 
   /// The canvas hides the system cursor for freehand tools; the drawn ring
   /// in [ToolCursorPainter] becomes the cursor instead.
@@ -342,6 +378,13 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
     ScreenshotSettings.load().then((settings) {
       if (mounted) setState(() => _settings = settings);
     });
+    // 系统光标位置流：长截图手动模式的逐帧抹除兜底要读它。
+    _editorCursorSub = ProviderScope.containerOf(context, listen: false)
+        .read(denialBridgeProvider)
+        .cursorPositions
+        .listen((position) {
+          _editorCursorPosition.value = position;
+        });
     _decodeCapturedImage(_currentImageBytes);
     // Listen for system-level scroll capture trigger.
     _scrollCaptureSubscription = EditorScrollCaptureNotifier
@@ -527,6 +570,8 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
   void dispose() {
     HardwareKeyboard.instance.removeHandler(_handleKeyEvent);
     _scrollCaptureSubscription?.cancel();
+    _editorCursorSub?.cancel();
+    _editorCursorPosition.dispose();
     _settingsCaptureFocus.dispose();
     // 关掉常驻翻译/OCR 进程，避免留下孤儿 python。
     _translateService.dispose();
@@ -785,9 +830,14 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
       }
       return false;
     }
-    // 文字弹窗打开时：回车确认、Esc 取消，其余按键交给输入框。
+    // 实时文字编辑打开时：回车提交、Esc 取消；Shift+回车放行给输入框
+    // 插换行（多行文本框编辑）；其余按键照常下发。
     if (_showTextDialog) {
-      if (event.logicalKey == LogicalKeyboardKey.enter) {
+      final isEnter =
+          event.logicalKey == LogicalKeyboardKey.enter ||
+          event.logicalKey == LogicalKeyboardKey.numpadEnter;
+      // Enter = 插换行（放行给输入框），Ctrl+Enter = 提交；Esc 取消。
+      if (isEnter && HardwareKeyboard.instance.isControlPressed) {
         _confirmTextInput();
         return true;
       }
@@ -816,9 +866,14 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
       }
       return false;
     }
-    // 文件面板打开时：Esc 先关闭文件面板，其余键照常。
+    // 文件面板打开时：Esc 先在面板里返回上一级目录，到顶才关面板（与框选
+    // 保存面板同一套 nav 桥）。
     if (_filePanelOpen) {
       if (event.logicalKey == LogicalKeyboardKey.escape) {
+        if (_fileNav.canGoBack?.call() ?? false) {
+          _fileNav.goBack?.call();
+          return true;
+        }
         setState(() => _filePanelOpen = false);
         return true;
       }
@@ -945,6 +1000,7 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
               _updateOptionsPlacement(placement);
               _updatePalettePlacement(placement);
               _updateFontFamilyPlacement(placement);
+              _updateTextBgPlacement(placement);
               _updateSettingsPanelPlacement(placement);
               _updateFilePanelPlacement(placement);
               _updateModelManagerPlacement(placement);
@@ -997,8 +1053,18 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
                                   clipBehavior: Clip.hardEdge,
                                   child: Transform(
                                     transform: Matrix4.identity()
-                                      ..translate(_canvasPan.dx, _canvasPan.dy)
-                                      ..scale(_canvasZoom, _canvasZoom, 1),
+                                      ..translateByDouble(
+                                        _canvasPan.dx,
+                                        _canvasPan.dy,
+                                        0.0,
+                                        1.0,
+                                      )
+                                      ..scaleByDouble(
+                                        _canvasZoom,
+                                        _canvasZoom,
+                                        1.0,
+                                        1.0,
+                                      ),
                                     child: SizedBox(
                                       width: _worldSize.width,
                                       height: _worldSize.height,
@@ -1047,9 +1113,13 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
                                                               _decodedImage,
                                                           annotationImage:
                                                               _editingCommandIndex ==
-                                                                  null
+                                                                      null &&
+                                                                  _editingTextIndex ==
+                                                                      null
                                                               ? _annotationImage
                                                               : null,
+                                                          skipIndex:
+                                                              _editingTextIndex,
                                                         ),
                                                       ),
                                                     ),
@@ -1159,6 +1229,9 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
                                           // 事件，其它工具正常画图不受影响。
                                           if (_ocrBlocks.isNotEmpty)
                                             Positioned.fill(
+                                              key: const ValueKey(
+                                                'ocr-select-layer',
+                                              ),
                                               child: IgnorePointer(
                                                 child:
                                                     _buildTextSelectOverlay(),
@@ -1168,8 +1241,12 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
                                           // 在世界坐标里、但在 RepaintBoundary
                                           // 之外，保存/置顶不会带上，也不会
                                           // 因为进光标模式而被烙进图片。
-                                          if (currentTool ==
-                                                  ScreenshotToolType.select &&
+                                          if ((currentTool ==
+                                                      ScreenshotToolType
+                                                          .select ||
+                                                  currentTool ==
+                                                      ScreenshotToolType
+                                                          .text) &&
                                               _selectedCommandIndex != null &&
                                               _selectedCommandIndex! <
                                                   _visibleCommands.length)
@@ -1181,6 +1258,13 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
                                                         _visibleCommands[_selectedCommandIndex!],
                                                     handleSize:
                                                         _resizeHandleWorldSize,
+                                                    // 文字工具只画框：改色
+                                                    // 要有"作用在哪个对象"
+                                                    // 的视觉反馈。
+                                                    showHandles:
+                                                        currentTool ==
+                                                        ScreenshotToolType
+                                                            .select,
                                                   ),
                                                 ),
                                               ),
@@ -1220,6 +1304,12 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
                                                 ),
                                               ),
                                             ),
+                                          // 实时文本编辑层：世界坐标、图像随
+                                          // 缩放平移，草稿按提交渲染的同一
+                                          // 规则排版；在 RepaintBoundary 之外，
+                                          // 保存/置顶快照不会带上光标和选区。
+                                          if (_showTextDialog)
+                                            _buildLiveTextEditor(),
                                         ],
                                       ),
                                     ),
@@ -1247,6 +1337,8 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
                   _buildPaletteOverlay(dockShown: showToolbar),
                   // 字体选择三级面板。
                   _buildFontFamilyOverlay(dockShown: showToolbar),
+                  // 文本背景色三级面板。
+                  _buildTextBgOverlay(dockShown: showToolbar),
                   // 设置面板：锚在停靠条的设置按钮旁，分页见
                   // _buildSettingsPanel。
                   _buildSettingsPanelOverlay(dockShown: showToolbar),
@@ -1304,9 +1396,7 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
                         ),
                       ),
                     ),
-                  if (_showHints)
-                    Positioned(bottom: 20, right: 20, child: _buildShortcuts()),
-                  if (_showTextDialog) _buildTextDialog(),
+                  if (_showHints) _buildHintsPlacement(),
                 ],
               ],
             );
@@ -1316,145 +1406,29 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
     );
   }
 
-  /// 文本输入弹窗：左上角锚定在点击插入的位置（可视化定位），紧凑尺寸，
-  /// 打开即聚焦可直接打字；确认 = 确定按钮或回车，Esc = 取消。
-  Widget _buildTextDialog() {
-    final media = MediaQuery.of(context).size;
-    const popupWidth = 260.0;
-    final popupHeight = 120.0;
-    final left = (_textDialogWindowAnchor.dx).clamp(
-      0.0,
-      (media.width - popupWidth - 8).clamp(0.0, double.infinity),
-    );
-    final top = (_textDialogWindowAnchor.dy).clamp(
-      0.0,
-      (media.height - popupHeight - 8).clamp(0.0, double.infinity),
-    );
-
-    return Stack(
-      children: [
-        // 插入点标记：小十字锚点，直观显示文字将从这里开始。
-        Positioned(
-          left: _textDialogWindowAnchor.dx - 5,
-          top: _textDialogWindowAnchor.dy - 5,
-          width: 10,
-          height: 10,
-          child: const IgnorePointer(
-            child: Icon(Icons.add, size: 12, color: Colors.red),
-          ),
-        ),
-        Positioned(
-          left: left,
-          top: top,
-          child: Material(
-            type: MaterialType.transparency,
-            child: Container(
-              width: popupWidth,
-              padding: const EdgeInsets.all(8),
-              decoration: BoxDecoration(
-                color: Colors.white,
-                borderRadius: BorderRadius.circular(8),
-                boxShadow: [
-                  BoxShadow(
-                    color: Colors.black.withValues(alpha: 0.35),
-                    blurRadius: 12,
-                    offset: const Offset(0, 3),
-                  ),
-                ],
-              ),
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                crossAxisAlignment: CrossAxisAlignment.stretch,
-                children: [
-                  TextField(
-                    controller: _textController,
-                    focusNode: _textFocusNode,
-                    style: const TextStyle(fontSize: 13),
-                    decoration: InputDecoration(
-                      isDense: true,
-                      border: const OutlineInputBorder(),
-                      hintText: _editingTextIndex == null
-                          ? L.pick(
-                              context,
-                              '输入文字，回车确认',
-                              'Type text, Enter to confirm',
-                            )
-                          : L.pick(
-                              context,
-                              '修改文字，回车确认（清空即删除）',
-                              'Edit text, Enter to confirm (clear to delete)',
-                            ),
-                      contentPadding: const EdgeInsets.symmetric(
-                        horizontal: 8,
-                        vertical: 8,
-                      ),
-                    ),
-                    maxLines: 1,
-                    onSubmitted: (_) => _confirmTextInput(),
-                  ),
-                  const SizedBox(height: 6),
-                  Row(
-                    mainAxisAlignment: MainAxisAlignment.end,
-                    children: [
-                      TextButton(
-                        style: TextButton.styleFrom(
-                          visualDensity: VisualDensity.compact,
-                          textStyle: const TextStyle(fontSize: 12),
-                        ),
-                        onPressed: _hideTextDialog,
-                        child: Text(L.pick(context, '取消', 'Cancel')),
-                      ),
-                      const SizedBox(width: 4),
-                      FilledButton(
-                        style: FilledButton.styleFrom(
-                          visualDensity: VisualDensity.compact,
-                          textStyle: const TextStyle(fontSize: 12),
-                        ),
-                        onPressed: _confirmTextInput,
-                        child: Text(L.pick(context, '确定', 'OK')),
-                      ),
-                    ],
-                  ),
-                ],
-              ),
-            ),
-          ),
-        ),
-      ],
-    );
-  }
-
   void _addText(String text) {
-    // 拖拽圈定的是 PPT 式文本框：内容按框宽换行、超出时自动缩字号塞进框、
-    // 框内水平垂直居中；点击创建的是自由单行文字。两者都按工具栏设定字号起排。
+    // 拖拽圈定的是 PPT 式文本框：内容按框内区换行、超出时自动缩字号塞进
+    // 框、框内逐行左对齐整块垂直居中；点击创建的是自由单行文字。实时层
+    // 已按同一套规则（layoutTextBlock）排好草稿，这里直接消费它的结果，
+    // 保证提交后与编辑中所见逐像素一致。
     final box = _textBoxRect;
-    final maxWidth = box == null
-        ? double.infinity
-        : math.max(12.0, box.width - 8);
+    final base = textFontSize * 4;
+    final result = layoutTextBlock(
+      text: text,
+      baseFontSize: base,
+      color: currentColor,
+      fontFamily: textFontFamily,
+      box: box,
+    );
     final origin = box?.topLeft ?? _textDialogPosition;
-    Rect rect;
-    if (box != null) {
-      rect = box;
-    } else {
-      final textPainter = TextPainter(
-        text: TextSpan(
-          text: text,
-          style: TextStyle(
-            color: currentColor,
-            fontSize: textFontSize,
-            fontFamily: textFontFamily.isEmpty ? null : textFontFamily,
-            fontWeight: FontWeight.bold,
-          ),
-        ),
-        textDirection: TextDirection.ltr,
-      )..layout(maxWidth: maxWidth);
-      rect = Rect.fromLTWH(
-        origin.dx,
-        origin.dy,
-        textPainter.width,
-        textPainter.height,
-      );
-    }
+    final rect =
+        box ??
+        Rect.fromLTWH(
+          origin.dx,
+          origin.dy,
+          result.painter.width,
+          result.painter.height,
+        );
 
     final command = DrawCommand(
       type: ScreenshotToolType.text,
@@ -1465,9 +1439,11 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
       rect: rect,
       color: currentColor,
       strokeWidth: textFontSize,
-      textMaxWidth: maxWidth,
+      textMaxWidth: box == null ? double.infinity : box.deflate(4).width,
       textBox: box,
       fontFamily: textFontFamily,
+      textBold: textBold,
+      textBackground: textBackground,
     );
     _textBoxRect = null;
 
@@ -1625,12 +1601,20 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
       divider(),
       dockButton(
         Icons.undo,
-        L.pick(context, '撤销 (Ctrl+Z)', 'Undo (Ctrl+Z)'),
+        L.pick(
+          context,
+          '撤销 (${_prettyBinding('undo')})',
+          'Undo (${_prettyBinding('undo')})',
+        ),
         _undo,
       ),
       dockButton(
         Icons.redo,
-        L.pick(context, '重做 (Ctrl+Shift+Z)', 'Redo (Ctrl+Shift+Z)'),
+        L.pick(
+          context,
+          '重做 (${_prettyBinding('redo')})',
+          'Redo (${_prettyBinding('redo')})',
+        ),
         _redo,
       ),
       dockButton(
@@ -1782,6 +1766,8 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
         ...standardColorCells(),
         _optionPaletteButton(),
         _optionFontFamilyButton(),
+        _optionBoldButton(),
+        _optionTextBackgroundButton(),
         divider(),
         _optionFontSizeControl(),
       ];
@@ -2094,10 +2080,21 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
           for (final font in fontFamilies)
             GestureDetector(
               onTap: () {
+                final family = font == defaultFontLabel ? '' : font;
+                // 实时编辑已有文字：字体写回命令，草稿即时重排。
+                if (_mutateEditingText((c) => c.copyWith(fontFamily: family))) {
+                  setState(() {
+                    textFontFamily = family;
+                    _fontFamilyVisible = false;
+                  });
+                  _refreshDraftIfEditing();
+                  return;
+                }
                 setState(() {
-                  textFontFamily = font == defaultFontLabel ? '' : font;
+                  textFontFamily = family;
                   _fontFamilyVisible = false;
                 });
+                _refreshDraftIfEditing();
               },
               child: Container(
                 padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
@@ -2459,6 +2456,65 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
     return Row(mainAxisSize: MainAxisSize.min, children: children);
   }
 
+  /// 加粗开关。有选中文字对象时直接改对象（与移动/改色同级语义）；
+  /// 否则只切工具栏默认值，作用于后续新建与当前编辑中的草稿。
+  Widget _optionBoldButton() {
+    // 高亮态跟随对象：编辑中的命令 > 光标选中的命令 > 工具栏默认。
+    final selected = _selectedCommandIndex;
+    final target = _showTextDialog ? _editingTextIndex : _selectedCommandIndex;
+    final active =
+        target != null &&
+            target < history.length &&
+            history[target].type == ScreenshotToolType.text
+        ? history[target].textBold
+        : textBold;
+    return Tooltip(
+      message: L.s('加粗', 'Bold'),
+      child: GestureDetector(
+        onTap: () {
+          // 实时编辑已有文字：加粗写回该命令，草稿即时重排。
+          if (_showTextDialog && _editingTextIndex != null) {
+            final next = !history[_editingTextIndex!].textBold;
+            _mutateEditingText((c) => c.copyWith(textBold: next));
+            setState(() => textBold = next);
+            _refreshDraftIfEditing();
+            return;
+          }
+          if (selected != null &&
+              selected < history.length &&
+              history[selected].type == ScreenshotToolType.text) {
+            final next = !history[selected].textBold;
+            _mutateSelected((command) => command.copyWith(textBold: next));
+            return;
+          }
+          setState(() => textBold = !textBold);
+          _refreshDraftIfEditing();
+        },
+        child: Container(
+          width: 34,
+          height: 34,
+          margin: const EdgeInsets.all(2),
+          decoration: BoxDecoration(
+            color: active
+                ? Colors.blue.withValues(alpha: 0.6)
+                : Colors.white.withValues(alpha: 0.06),
+            borderRadius: BorderRadius.circular(8),
+          ),
+          child: const Center(
+            child: Text(
+              'B',
+              style: TextStyle(
+                color: Colors.white,
+                fontWeight: FontWeight.bold,
+                fontSize: 15,
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
   Widget _optionFontFamilyButton() {
     return Tooltip(
       message: L.s('选择字体', 'Select font'),
@@ -2483,6 +2539,303 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
         ),
       ),
     );
+  }
+
+  /// 文本背景色按钮：图标下方色条预览当前背景（无背景 = 斜线空框）。
+  Widget _optionTextBackgroundButton() {
+    final bg = _activeTextBackground;
+    return Tooltip(
+      message: L.pick(context, '文本背景色', 'Text background'),
+      child: GestureDetector(
+        key: _textBgButtonKey,
+        onTap: () => setState(() {
+          _textBgVisible = !_textBgVisible;
+        }),
+        child: Container(
+          width: 34,
+          height: 34,
+          margin: const EdgeInsets.all(2),
+          decoration: BoxDecoration(
+            color: _textBgVisible
+                ? Colors.blue.withValues(alpha: 0.6)
+                : Colors.white.withValues(alpha: 0.06),
+            borderRadius: BorderRadius.circular(8),
+          ),
+          child: Column(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              const Icon(Icons.title, color: Colors.white70, size: 16),
+              Container(
+                width: 18,
+                height: 5,
+                decoration: BoxDecoration(
+                  color: bg ?? Colors.transparent,
+                  borderRadius: BorderRadius.circular(2),
+                  border: bg == null
+                      ? Border.all(color: Colors.white38, width: 1)
+                      : null,
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  /// 背景色预览/默认值的目标态：编辑中命令 > 选中文字命令 > 工具栏默认。
+  Color? get _activeTextBackground {
+    if (_showTextDialog && _editingTextIndex != null) {
+      final i = _editingTextIndex!;
+      if (i < history.length) return history[i].textBackground;
+    }
+    final selected = _selectedCommandIndex;
+    if (selected != null &&
+        selected < history.length &&
+        history[selected].type == ScreenshotToolType.text) {
+      return history[selected].textBackground;
+    }
+    return textBackground;
+  }
+
+  /// 应用文本背景色：null = 清除。优先级与颜色按钮一致——编辑中的命令
+  /// 即时写回，其次光标选中的文字命令，最后作为新建文字的默认值。
+  void _applyTextBackground(Color? background) {
+    if (_mutateEditingText((c) => c.withTextBackground(background))) {
+      setState(() => textBackground = background);
+      _refreshDraftIfEditing();
+      return;
+    }
+    final selected = _selectedCommandIndex;
+    if (selected != null &&
+        selected < history.length &&
+        history[selected].type == ScreenshotToolType.text) {
+      _mutateSelected((c) => c.withTextBackground(background));
+      setState(() => textBackground = background);
+      return;
+    }
+    setState(() => textBackground = background);
+    // 新建文字的实时编辑态（无编辑索引）：默认背景变了要立刻重排草稿，
+    // 否则面板选完色看不到反馈，提交才生效——"有时不改"的主因。
+    _refreshDraftIfEditing();
+  }
+
+  /// 背景面板的候选色：半透明底 + 实色各一排（纯黑与半透明黑重复，不设）。
+  /// 半透明是标注场景的主诉求（盖住原图杂色又不完全遮死）。
+  static const List<Color> _textBgPresets = [
+    Color(0xB3000000), // 黑 70%
+    Color(0xB3FFFFFF), // 白 70%
+    Color(0xB3FFF176), // 黄 70%
+    Color(0xB34FC3F7), // 青 70%
+    Color(0xB3A5D6A7), // 绿 70%
+    Color(0xB3F48FB1), // 粉 70%
+    Color(0xFFFFFFFF),
+    Color(0xFFFFEB3B),
+    Color(0xFF00BCD4),
+    Color(0xFF4CAF50),
+    Color(0xFFE91E63),
+  ];
+
+  Widget _buildTextBgPanel() {
+    return Container(
+      key: _textBgPanelKey,
+      padding: const EdgeInsets.fromLTRB(10, 8, 10, 10),
+      decoration: BoxDecoration(
+        color: Colors.black.withValues(alpha: 0.82),
+        borderRadius: BorderRadius.circular(10),
+        boxShadow: const [
+          BoxShadow(
+            color: Colors.black38,
+            blurRadius: 10,
+            offset: Offset(0, 2),
+          ),
+        ],
+      ),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Padding(
+            padding: const EdgeInsets.only(bottom: 4),
+            child: Text(
+              L.pick(context, '文本背景', 'Text background'),
+              style: const TextStyle(fontSize: 11, color: Colors.white60),
+            ),
+          ),
+          // 列数跟随工具栏停靠方向：横排 2 行 6 列，竖排 2 列 6 行
+          // （竖条工具栏旁要的是高块不是宽条）。12 格（含「无」）整除。
+          ConstrainedBox(
+            constraints: BoxConstraints(
+              maxWidth: (_lastDockPlacement?.vertical ?? false)
+                  ? 2 * 30 + 4
+                  : 6 * 30 + 4,
+            ),
+            child: Wrap(
+              spacing: 0,
+              runSpacing: 0,
+              children: [
+                // 「无」格：斜线空框，点击清除背景。
+                GestureDetector(
+                  onTap: () => _applyTextBackground(null),
+                  child: Container(
+                    width: 27,
+                    height: 27,
+                    margin: const EdgeInsets.all(1.5),
+                    decoration: BoxDecoration(
+                      borderRadius: BorderRadius.circular(3),
+                      border: Border.all(
+                        color: _activeTextBackground == null
+                            ? const Color(0xFF4C9AFF)
+                            : Colors.white38,
+                        width: _activeTextBackground == null ? 2 : 1,
+                      ),
+                    ),
+                    child: const CustomPaint(painter: _SlashPainter()),
+                  ),
+                ),
+                for (final color in _textBgPresets)
+                  GestureDetector(
+                    onTap: () => _applyTextBackground(color),
+                    child: Container(
+                      width: 27,
+                      height: 27,
+                      margin: const EdgeInsets.all(1.5),
+                      decoration: BoxDecoration(
+                        color: color,
+                        borderRadius: BorderRadius.circular(3),
+                        border: Border.all(
+                          color:
+                              _activeTextBackground?.toARGB32() ==
+                                  color.toARGB32()
+                              ? const Color(0xFF4C9AFF)
+                              : Colors.black.withValues(alpha: 0.18),
+                          width:
+                              _activeTextBackground?.toARGB32() ==
+                                  color.toARGB32()
+                              ? 2
+                              : 1,
+                        ),
+                      ),
+                    ),
+                  ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildTextBgOverlay({required bool dockShown}) {
+    final visible =
+        dockShown && _textBgVisible && _buildOptionsPanelContent() != null;
+    if (_textBgPanelVisible != visible) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted && _textBgPanelVisible != visible) {
+          setState(() => _textBgPanelVisible = visible);
+        }
+      });
+    }
+    return Positioned(
+      left: _textBgPanelOffset?.dx ?? 0,
+      top: _textBgPanelOffset?.dy ?? 0,
+      child: IgnorePointer(
+        ignoring: !visible,
+        child: AnimatedOpacity(
+          opacity: visible ? 1 : 0,
+          duration: const Duration(milliseconds: 120),
+          child: _buildTextBgPanel(),
+        ),
+      ),
+    );
+  }
+
+  /// 背景面板摆位：与字体面板同规则（锚在按钮外侧，随停靠方向展开）。
+  void _updateTextBgPlacement(
+    ({bool vertical, bool atStart, bool hidden, bool reserved}) placement,
+  ) {
+    if (!mounted) return;
+    final shouldShow =
+        showToolbar &&
+        (!placement.hidden || _dockRevealed) &&
+        _textBgVisible &&
+        _buildOptionsPanelContent() != null;
+    if (!shouldShow) {
+      if (_textBgPanelVisible) {
+        setState(() => _textBgPanelVisible = false);
+      }
+      return;
+    }
+    final barBox = _dockBarKey.currentContext?.findRenderObject() as RenderBox?;
+    final anchorBox =
+        _textBgButtonKey.currentContext?.findRenderObject() as RenderBox?;
+    final panelBox =
+        _textBgPanelKey.currentContext?.findRenderObject() as RenderBox?;
+    final optionsBox =
+        _optionsPanelKey.currentContext?.findRenderObject() as RenderBox?;
+    if (barBox == null ||
+        anchorBox == null ||
+        !barBox.attached ||
+        !anchorBox.attached ||
+        !barBox.hasSize) {
+      return;
+    }
+    final anchorCenter = anchorBox.localToGlobal(
+      anchorBox.size.center(Offset.zero),
+    );
+    final barOrigin = barBox.localToGlobal(Offset.zero);
+    final barSize = barBox.size;
+    final verticalDock = placement.vertical;
+    final panelSize =
+        (panelBox != null && panelBox.attached && panelBox.hasSize)
+        ? panelBox.size
+        : (verticalDock ? const Size(80, 220) : const Size(190, 170));
+    final window = MediaQuery.sizeOf(context);
+    final optionsVisible =
+        _optionsPanelVisible &&
+        optionsBox != null &&
+        optionsBox.attached &&
+        optionsBox.hasSize;
+    final optionsOrigin = optionsVisible
+        ? optionsBox.localToGlobal(Offset.zero)
+        : Offset.zero;
+    final optionsSize = optionsVisible ? optionsBox.size : Size.zero;
+
+    double left;
+    double top;
+    if (!verticalDock) {
+      left = (anchorCenter.dx - panelSize.width / 2).clamp(
+        8.0,
+        math.max(8.0, window.width - panelSize.width - 8),
+      );
+      if (placement.atStart) {
+        final base = optionsVisible
+            ? optionsOrigin.dy + optionsSize.height
+            : barOrigin.dy + barSize.height;
+        top = base + 6;
+      } else {
+        final base = optionsVisible ? optionsOrigin.dy : barOrigin.dy;
+        top = base - panelSize.height - 6;
+      }
+    } else {
+      top = (anchorCenter.dy - panelSize.height / 2).clamp(
+        8.0,
+        math.max(8.0, window.height - panelSize.height - 8),
+      );
+      if (placement.atStart) {
+        final base = optionsVisible
+            ? optionsOrigin.dx + optionsSize.width
+            : barOrigin.dx + barSize.width;
+        left = base + 6;
+      } else {
+        final base = optionsVisible ? optionsOrigin.dx : barOrigin.dx;
+        left = base - panelSize.width - 6;
+      }
+    }
+    final offset = Offset(left, top);
+    if (_textBgPanelOffset != offset) {
+      setState(() => _textBgPanelOffset = offset);
+    }
   }
 
   Widget _maskModeButton(MaskStyle style, String label) {
@@ -2598,8 +2951,41 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
         .join('+');
   }
 
+  /// 快捷键面板摆位：不压工具栏。垂直停靠放对侧（左栏→右，右栏→左），
+  /// 水平停靠贴工具栏那一侧、靠右让开画面中心；超高时内部滚动。
+  Widget _buildHintsPlacement() {
+    const edge = 20.0;
+    const dockReserve = 56.0;
+    final panel = _buildShortcuts();
+    final placement = _lastDockPlacement;
+    final maxHeight =
+        MediaQuery.of(context).size.height - (edge + dockReserve) * 2;
+    final boxed = ConstrainedBox(
+      constraints: BoxConstraints(maxHeight: maxHeight),
+      child: SingleChildScrollView(child: panel),
+    );
+    if (placement != null && placement.vertical) {
+      return Positioned(
+        bottom: edge,
+        right: placement.atStart ? edge : null,
+        left: placement.atStart ? null : edge,
+        child: boxed,
+      );
+    }
+    if (placement != null) {
+      return Positioned(
+        top: placement.atStart ? edge + dockReserve : null,
+        bottom: placement.atStart ? null : edge + dockReserve,
+        right: edge,
+        child: boxed,
+      );
+    }
+    return Positioned(bottom: edge, right: edge, child: boxed);
+  }
+
   Widget _buildShortcuts() {
     return Container(
+      key: _hintsPanelKey,
       padding: const EdgeInsets.all(12),
       decoration: BoxDecoration(
         color: Colors.black.withValues(alpha: 0.9),
@@ -2619,7 +3005,11 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
           ),
           const SizedBox(height: 8),
           _buildShortcutRow(context, L.pick(context, '保存', 'Save'), 'Enter'),
-          _buildShortcutRow(context, L.pick(context, '复制', 'Copy'), 'Ctrl+C'),
+          _buildShortcutRow(
+            context,
+            L.pick(context, '复制整图（选中文字时复制文字）', 'Copy image (or text)'),
+            'Ctrl+C',
+          ),
           _buildShortcutRow(
             context,
             L.pick(context, '撤销', 'Undo'),
@@ -2697,6 +3087,75 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
           ),
           _buildShortcutRow(context, L.pick(context, '粗细减小', 'Thinner'), '['),
           _buildShortcutRow(context, L.pick(context, '粗细增大', 'Thicker'), ']'),
+          _buildShortcutRow(
+            context,
+            L.pick(context, '删除选中对象', 'Delete selected'),
+            'Delete',
+          ),
+          _buildShortcutRow(
+            context,
+            L.pick(context, '显示/隐藏本提示', 'Toggle this panel'),
+            _prettyBinding('hints'),
+          ),
+          const Divider(height: 12, color: Colors.white24),
+          _buildShortcutRow(
+            context,
+            L.pick(
+              context,
+              '文字：拖框=多行框 / 单击=单行',
+              'Text: drag = box / click = line',
+            ),
+            L.pick(context, '文字工具 + 画布', 'Text tool on canvas'),
+          ),
+          _buildShortcutRow(
+            context,
+            L.pick(context, '双击文字就地改', 'Double-click text to edit'),
+            L.pick(context, '光标 + 双击', 'Cursor + double-click'),
+          ),
+          _buildShortcutRow(
+            context,
+            L.pick(context, '文字：换行', 'Text: newline'),
+            'Enter',
+          ),
+          _buildShortcutRow(
+            context,
+            L.pick(context, '文字：提交（或点画布）', 'Text: commit (or click canvas)'),
+            'Ctrl+Enter',
+          ),
+          _buildShortcutRow(
+            context,
+            L.pick(context, '文字：取消', 'Text: cancel'),
+            'Esc',
+          ),
+          const Divider(height: 12, color: Colors.white24),
+          _buildShortcutRow(
+            context,
+            L.pick(context, '拖拽选识别文字', 'Drag to select OCR text'),
+            L.pick(context, '光标 + 拖拽', 'Cursor + drag'),
+          ),
+          _buildShortcutRow(
+            context,
+            L.pick(
+              context,
+              '多选：Ctrl+拖拽追加，同行覆盖',
+              'Multi-select: Ctrl+drag adds, same line replaces',
+            ),
+            'Ctrl',
+          ),
+          _buildShortcutRow(
+            context,
+            L.pick(
+              context,
+              '释放一段：Ctrl+点选段上 ✕',
+              'Drop a range: Ctrl+click its ✕',
+            ),
+            'Ctrl',
+          ),
+          _buildShortcutRow(
+            context,
+            L.pick(context, '复制所选文字', 'Copy selected text'),
+            'Ctrl+C',
+          ),
           const Divider(height: 12, color: Colors.white24),
           _buildShortcutRow(
             context,
@@ -2759,6 +3218,7 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
       showSizeSlider = false;
       _paletteVisible = false;
       _fontFamilyVisible = false;
+      _textBgVisible = false;
       // 一次只跟随一个按钮展开：切工具就收起设置/文件面板。
       _settingsOpen = false;
       _filePanelOpen = false;
@@ -2797,7 +3257,23 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
   }
 
   void _switchColor(Color color) {
-    if (_editingSelectedObject) {
+    // 实时编辑已有文字：改色直接写回该命令，草稿即时变色。
+    if (_mutateEditingText((c) => c.copyWith(color: color))) {
+      setState(() {
+        currentColor = color;
+        maskColor = color;
+        showColorPicker = false;
+      });
+      _refreshDraftIfEditing();
+      return;
+    }
+    // 有选中对象就写回对象——不限光标模式：文字工具下刚点选未编辑、
+    // 或编辑取消后残留选中时，"改色"理应作用在那个对象上。
+    final hasSelectedTarget =
+        _editingSelectedObject ||
+        (_selectedCommandIndex != null &&
+            _selectedCommandIndex! < history.length);
+    if (hasSelectedTarget) {
       final index = _selectedCommandIndex!;
       final isMask = history[index].type == ScreenshotToolType.mask;
       _mutateSelected(
@@ -2824,6 +3300,7 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
       (color.g * 255.0).round().clamp(0, 255).toInt(),
       (color.b * 255.0).round().clamp(0, 255).toInt(),
     );
+    _refreshDraftIfEditing();
   }
 
   /// 选中对象的颜色（光标模式），供色板高亮判断。
@@ -2873,6 +3350,20 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
   }
 
   void _adjustSize(double size) {
+    // 实时编辑已有文字：字号写回命令（strokeWidth 语义 = 字号/4）。
+    if (currentTool == ScreenshotToolType.text &&
+        _mutateEditingText(
+          (c) => c.copyWith(
+            strokeWidth: size.clamp(_activeSizeMin, _activeSizeMax),
+          ),
+        )) {
+      setState(() {
+        textFontSize = size.clamp(_activeSizeMin, _activeSizeMax);
+        showSizeSlider = false;
+      });
+      _refreshDraftIfEditing();
+      return;
+    }
     if (_editingSelectedObject) {
       _mutateSelected(
         (command) => command.copyWith(
@@ -2893,6 +3384,7 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
       }
       showSizeSlider = false;
     });
+    _refreshDraftIfEditing();
     _ffi.adjustSize(size);
   }
 
@@ -2988,74 +3480,7 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
   }
 
   /// 翻译配色的色板行：一圈圆形色块，点选即应用。
-  Widget _colorRow(String label, String current, ValueChanged<String> onPick) {
-    const options = [
-      ('FFFFFF', '白'),
-      ('000000', '黑'),
-      ('FFEB3B', '黄'),
-      ('90CAF9', '蓝'),
-      ('EF5350', '红'),
-      ('66BB6A', '绿'),
-    ];
-    return Padding(
-      padding: const EdgeInsets.only(top: 6),
-      child: Row(
-        children: [
-          Text(
-            label,
-            style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600),
-          ),
-          const SizedBox(width: 12),
-          for (final (hex, _) in options)
-            GestureDetector(
-              onTap: () => onPick(hex),
-              child: Container(
-                width: 24,
-                height: 24,
-                margin: const EdgeInsets.only(right: 6),
-                decoration: BoxDecoration(
-                  color: ScreenshotSettings.colorValueFromHex(hex, 0xFF000000),
-                  shape: BoxShape.circle,
-                  border: Border.all(
-                    color: current == hex
-                        ? Colors.blue
-                        : Colors.black.withValues(alpha: 0.25),
-                    width: current == hex ? 2.5 : 1,
-                  ),
-                ),
-              ),
-            ),
-        ],
-      ),
-    );
-  }
-
   /// 设置对话框里的单行文本配置项。
-  Widget _apiField(
-    String label,
-    String value,
-    String hint,
-    ValueChanged<String> onChanged, {
-    bool obscure = false,
-  }) {
-    return Padding(
-      padding: const EdgeInsets.only(top: 4),
-      child: TextField(
-        controller: TextEditingController(text: value)
-          ..selection = TextSelection.collapsed(offset: value.length),
-        obscureText: obscure,
-        style: const TextStyle(fontSize: 13),
-        decoration: InputDecoration(
-          isDense: true,
-          labelText: label,
-          hintText: hint,
-          border: const OutlineInputBorder(),
-        ),
-        onChanged: onChanged,
-      ),
-    );
-  }
-
   /// 打开本地语言包管理浮层：列出目录里的候选包，已装的给删除，没装的给下载。
   Future<void> _showModelManager() async {
     setState(() {
@@ -3716,6 +4141,9 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
   bool _settingsPanelVisible = false;
 
   bool _filePanelOpen = false;
+
+  /// 文件面板的 ESC 逐级返回桥：上级目录可回就先回，到顶才关面板。
+  final SelectionPanelNav _fileNav = SelectionPanelNav();
   bool _filePanelSave = false;
   final GlobalKey _dockFileOpenKey = GlobalKey();
   final GlobalKey _dockFileSaveKey = GlobalKey();
@@ -4029,38 +4457,23 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
 
   Widget _buildFilePanel() {
     final home = Platform.environment['HOME'] ?? '/';
-    return Theme(
-      data: ThemeData.dark(useMaterial3: true),
-      child: Container(
-        key: _filePanelKey,
-        padding: const EdgeInsets.all(10),
-        decoration: BoxDecoration(
-          color: Colors.black.withValues(alpha: 0.82),
-          borderRadius: BorderRadius.circular(12),
-          boxShadow: const [
-            BoxShadow(
-              color: Colors.black38,
-              blurRadius: 10,
-              offset: Offset(0, 2),
-            ),
-          ],
-        ),
-        child: PathChooserPanel(
-          title: _filePanelSave
-              ? L.pick(context, '保存截图', 'Save screenshot')
-              : L.pick(context, '打开图片', 'Open image'),
-          save: _filePanelSave,
-          initialDirectory: _filePanelSave
-              ? '$home/Pictures/Screenshots'
-              : '$home/Pictures',
-          initialFileName: _filePanelSave ? 'Screenshot.png' : '',
-          patterns: _filePanelSave
-              ? const ['.png']
-              : const ['.png', '.jpg', '.jpeg', '.webp'],
-          onSelected: _onFilePanelSelected,
-          onCancel: () => setState(() => _filePanelOpen = false),
-        ),
-      ),
+    return PathChooserPanel(
+      // 卡片外壳（深色/圆角/阴影）由面板自带，这里只管摆放尺寸。
+      key: _filePanelKey,
+      title: _filePanelSave
+          ? L.pick(context, '保存截图', 'Save screenshot')
+          : L.pick(context, '打开图片', 'Open image'),
+      save: _filePanelSave,
+      initialDirectory: _filePanelSave
+          ? '$home/Pictures/Screenshots'
+          : '$home/Pictures',
+      initialFileName: _filePanelSave ? 'Screenshot.png' : '',
+      patterns: _filePanelSave
+          ? const ['.png']
+          : const ['.png', '.jpg', '.jpeg', '.webp'],
+      nav: _fileNav,
+      onSelected: _onFilePanelSelected,
+      onCancel: () => setState(() => _filePanelOpen = false),
     );
   }
 
@@ -4146,6 +4559,7 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
       _settingsTab = tab;
       _paletteVisible = false;
       _fontFamilyVisible = false;
+      _textBgVisible = false;
       _filePanelOpen = false;
       _modelManagerOpen = false;
       _apiConfigOpen = false;
@@ -5640,7 +6054,11 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
     // 光标模式的选字/选对象命中全部收敛到画布手势（见 _onPanStart），
     // 从而让绘图对象优先于文本高亮。
     return CustomPaint(
-      painter: OcrSelectionPainter(rects: _ocrSelectionRects()),
+      painter: OcrSelectionPainter(
+        rects: _ocrSelectionRects(),
+        handles: _ocrSelectionHandles(),
+        anchorRadius: _ocrAnchorWorldRadius,
+      ),
     );
   }
 
@@ -5704,16 +6122,30 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
 
   /// 规范化选区：保证 (anchorBlock, anchorOffset) <= (focusBlock, focusOffset)，
   /// 列表本身已按阅读顺序排列，直接比下标即可。
-  void _beginOcrSelection(Offset globalPosition) {
+  void _beginOcrSelection(Offset globalPosition, {required bool ctrl}) {
+    _lastOcrPressGlobal = globalPosition;
     final index = _ocrIndexAt(globalPosition, nearest: true);
-    if (index == null) return;
-    _ocrSelecting = true;
+    if (index == null) {
+      // Ctrl 点空白 = 不碰已有选段；普通点空白 = 清空全部。
+      if (!ctrl) _clearOcrSelection();
+      return;
+    }
     setState(() {
+      // Ctrl = 增量多选：先把正在拖的活动段固化，再开新段；普通按下 =
+      // 全部清空重新来（清场会连带复位选择标志，所以举旗必须放在清场
+      // 之后——否则没有锚点时普通拖选永远起不来，只能靠 Ctrl）。
+      if (ctrl) {
+        _commitActiveOcrRange();
+      } else {
+        _resetOcrSelectionState();
+      }
+      _ocrSelecting = true;
+      _ocrSelectingCtrl = ctrl;
       _ocrSelAnchorBlock = index.$1;
       _ocrSelAnchorOffset = index.$2;
       _ocrSelFocusBlock = index.$1;
       _ocrSelFocusOffset = index.$2;
-      _hasTextSelection = false;
+      _hasTextSelection = _ocrSelRanges.isNotEmpty;
     });
   }
 
@@ -5724,13 +6156,49 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
     setState(() {
       _ocrSelFocusBlock = index.$1;
       _ocrSelFocusOffset = index.$2;
-      _hasTextSelection = _ocrSelectionRange() != null;
+      _hasTextSelection = _ocrAllRanges.isNotEmpty;
     });
   }
 
   void _finishOcrSelection() {
     _ocrSelecting = false;
-    setState(() => _hasTextSelection = _ocrSelectionRange() != null);
+    setState(() {
+      final range = _ocrSelectionRange();
+      if (_ocrSelectingCtrl && range == null) {
+        // Ctrl 单击（没拖出范围）：只认选段旁的 ✕ 关闭锚点 = 释放该段。
+        final hit = _ocrCloseAnchorAt(_lastOcrPressGlobal);
+        if (hit != null) _ocrSelRanges.removeAt(hit);
+      } else {
+        _commitActiveOcrRange();
+      }
+      _resetActiveOcrPointers();
+      _hasTextSelection = _ocrAllRanges.isNotEmpty;
+    });
+  }
+
+  /// 把当前活动段固化进多段列表。
+  void _commitActiveOcrRange() {
+    final range = _ocrSelectionRange();
+    if (range == null) return;
+    _addOcrRangeCovering(range);
+    _resetActiveOcrPointers();
+  }
+
+  /// 追加选段，带覆盖语义：与它共享任一文字块的旧段被替换（同一行重新
+  /// Ctrl+拖拽 = 新选区覆盖旧选区，而不是两段叠着越来越乱）。
+  void _addOcrRangeCovering((int, int, int, int) range) {
+    final (startBlock, _, endBlock, _) = range;
+    _ocrSelRanges.removeWhere(
+      (old) => old.$1 <= endBlock && startBlock <= old.$3,
+    );
+    _ocrSelRanges.add(range);
+  }
+
+  void _resetActiveOcrPointers() {
+    _ocrSelAnchorBlock = null;
+    _ocrSelAnchorOffset = null;
+    _ocrSelFocusBlock = null;
+    _ocrSelFocusOffset = null;
   }
 
   void _clearOcrSelection() {
@@ -5743,10 +6211,13 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
   }
 
   void _resetOcrSelectionState() {
+    _ocrSelecting = false;
+    _ocrSelectingCtrl = false;
     _ocrSelAnchorBlock = null;
     _ocrSelAnchorOffset = null;
     _ocrSelFocusBlock = null;
     _ocrSelFocusOffset = null;
+    _ocrSelRanges.clear();
     _hasTextSelection = false;
   }
 
@@ -5771,13 +6242,17 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
         : (focusBlock, focusOffset, anchorBlock, anchorOffset);
   }
 
-  /// 选区高亮矩形：起止块内按字符比例截取，中间块整块高亮。
-  List<Rect> _ocrSelectionRects() {
-    final range = _ocrSelectionRange();
-    if (range == null) return const [];
+  /// 全部选段 = 已固化的多段 + 正在拖的活动段。
+  List<(int, int, int, int)> get _ocrAllRanges => [
+    ..._ocrSelRanges,
+    if (_ocrSelectionRange() case final range?) range,
+  ];
+
+  /// 单个选段的高亮矩形：起止块内按字符比例截取，中间块整块高亮。
+  void _ocrRangeRectsInto((int, int, int, int) range, List<Rect> out) {
     final (startBlock, startOffset, endBlock, endOffset) = range;
-    final rects = <Rect>[];
     for (var i = startBlock; i <= endBlock; i++) {
+      if (i < 0 || i >= _ocrBlocks.length) continue;
       final block = _ocrBlocks[i];
       final length = block.region.source.length;
       if (length == 0) continue;
@@ -5786,24 +6261,108 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
       if (to <= from) continue;
       final left = block.rect.left + block.rect.width * (from / length);
       final right = block.rect.left + block.rect.width * (to / length);
-      rects.add(Rect.fromLTRB(left, block.rect.top, right, block.rect.bottom));
+      out.add(Rect.fromLTRB(left, block.rect.top, right, block.rect.bottom));
+    }
+  }
+
+  /// 选区高亮矩形（多段聚合）。
+  List<Rect> _ocrSelectionRects() {
+    final rects = <Rect>[];
+    for (final range in _ocrAllRanges) {
+      _ocrRangeRectsInto(range, rects);
     }
     return rects;
   }
 
-  /// 选区文字：块内切片，跨块用换行连接（与图片里一行一段对应）。
+  /// 每个固化选段起点旁的 ✕ 关闭锚点（与命中判定共用 _ocrAnchorCenter）。
+  List<Offset> _ocrSelectionHandles() {
+    final points = <Offset>[];
+    for (final range in _ocrSelRanges) {
+      final rects = <Rect>[];
+      _ocrRangeRectsInto(range, rects);
+      if (rects.isEmpty) continue;
+      points.add(_ocrAnchorCenter(rects.first));
+    }
+    return points;
+  }
+
+  /// 选区文字：块内切片，跨块用换行连接（与图片里一行一段对应）；
+  /// Ctrl 多段之间用换行连接，顺序 = 选取顺序。
   String _ocrSelectedText() {
-    final range = _ocrSelectionRange();
-    if (range == null) return '';
-    final (startBlock, startOffset, endBlock, endOffset) = range;
     final parts = <String>[];
-    for (var i = startBlock; i <= endBlock; i++) {
-      final source = _ocrBlocks[i].region.source;
-      final from = i == startBlock ? startOffset : 0;
-      final to = i == endBlock ? endOffset : source.length;
-      if (to > from) parts.add(source.substring(from, to));
+    for (final range in _ocrAllRanges) {
+      final (startBlock, startOffset, endBlock, endOffset) = range;
+      final segments = <String>[];
+      for (var i = startBlock; i <= endBlock; i++) {
+        if (i < 0 || i >= _ocrBlocks.length) continue;
+        final source = _ocrBlocks[i].region.source;
+        final from = i == startBlock ? startOffset : 0;
+        final to = i == endBlock ? endOffset : source.length;
+        if (to > from) segments.add(source.substring(from, to));
+      }
+      if (segments.isNotEmpty) parts.add(segments.join('\n'));
     }
     return parts.join('\n');
+  }
+
+  /// 锚点世界半径：屏幕目标 9px ÷ 当前显示缩放。固定世界半径在缩小适配
+  /// 下只剩两三个屏幕像素，✕ 的两条斜线会被抗锯齿糊成一个点——看着就
+  /// 不是叉了（上一轮"显示不全"的真根因是糊，不是裁）。
+  double get _ocrAnchorWorldRadius {
+    final scale = _canvasDisplayScale <= 0 ? 1.0 : _canvasDisplayScale;
+    return 9.0 / scale;
+  }
+
+  /// ✕ 关闭锚点圆心：挂在选段首矩形左缘外（不遮正文），但整圆夹进世界
+  /// 框——贴图像边缘的段会把锚点挤出可视区被 FittedBox 裁掉，夹边时宁
+  /// 可压在首个字上也保证完整可见。绘制与命中都走这个函数。
+  Offset _ocrAnchorCenter(Rect first) {
+    final r = _ocrAnchorWorldRadius;
+    final world = _worldSize;
+    final x = (first.left - r - 1)
+        .clamp(r + 1.0, math.max(r + 1.0, world.width - r - 1.0))
+        .toDouble();
+    final y = first.center.dy
+        .clamp(r + 1.0, math.max(r + 1.0, world.height - r - 1.0))
+        .toDouble();
+    return Offset(x, y);
+  }
+
+  /// ✕ 关闭锚点命中：按圆心距判定，容差 1.6 倍半径（点比钮大点也算按到）。
+  int? _ocrCloseAnchorAtWorld(Offset world) {
+    final hitTol = _ocrAnchorWorldRadius * 1.6;
+    for (var r = _ocrSelRanges.length - 1; r >= 0; r--) {
+      final rects = <Rect>[];
+      _ocrRangeRectsInto(_ocrSelRanges[r], rects);
+      if (rects.isEmpty) continue;
+      if ((world - _ocrAnchorCenter(rects.first)).distanceSquared <=
+          hitTol * hitTol) {
+        return r;
+      }
+    }
+    return null;
+  }
+
+  int? _ocrCloseAnchorAt(Offset globalPosition) {
+    final world = _ocrToWorld(globalPosition);
+    if (world == null) return null;
+    return _ocrCloseAnchorAtWorld(world);
+  }
+
+  /// 命中某个固化选段（Ctrl 起选门禁用）：✕ 关闭锚点优先，其次段矩形。
+  int? _ocrRangeAt(Offset globalPosition) {
+    final world = _ocrToWorld(globalPosition);
+    if (world == null) return null;
+    final anchorHit = _ocrCloseAnchorAtWorld(world);
+    if (anchorHit != null) return anchorHit;
+    for (var r = _ocrSelRanges.length - 1; r >= 0; r--) {
+      final rects = <Rect>[];
+      _ocrRangeRectsInto(_ocrSelRanges[r], rects);
+      for (final rect in rects) {
+        if (rect.inflate(3).contains(world)) return r;
+      }
+    }
+    return null;
   }
 
   Future<void> _copyOcrSelection() async {
@@ -6542,8 +7101,17 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
     await ScrollCaptureManager.instance.start(
       region,
       injector: _autoScrollInjector(),
+      // 光标全程可见（用户要凭它点预览小窗的「结束」），画面里的鼠标逐帧
+      // 抹掉——编辑器路径此前没传 cursor，光标点其实一直留在长图里，这里
+      // 顺带保留这个修复。
+      cursor: _editorCursorPosition,
     );
   }
+
+  /// 编辑器侧的系统光标位置流（与框选层同源：bridge cursorPositions），
+  /// 供长截图连拍的逐帧抹除。
+  final ValueNotifier<Offset?> _editorCursorPosition = ValueNotifier(null);
+  StreamSubscription<Offset>? _editorCursorSub;
 
   /// 自动滚动模式的键盘注入器（向聚焦客户端发滚动键）；未开启返回 null。
   ScrollInjector? _autoScrollInjector() {
@@ -6554,23 +7122,6 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
     ).read(denialBridgeProvider);
     final key = _settings.autoScrollKey == 'space' ? 'space' : 'Down';
     return () => bridge.sendKeyboardKey(key);
-  }
-
-  Future<void> _save() async {
-    final png = await _renderCanvas();
-    if (png == null) return;
-    final path = await _choosePath([
-      '--file-selection',
-      '--save',
-      '--confirm-overwrite',
-      '--title=${L.s('保存截图', 'Save screenshot')}',
-      '--filename=Screenshot.png',
-      '--file-filter=${L.s('PNG 图片', 'PNG image')} | *.png',
-    ]);
-    if (path == null) return;
-    await File(path).writeAsBytes(png);
-    _ffi.save();
-    _showMessage('${L.s('已保存：', 'Saved: ')}$path');
   }
 
   /// 复制按钮状态：working 沙漏、done 绿勾、failed 红叹号，除”done 且
@@ -6655,35 +7206,6 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
       });
     }
   }
-
-  Future<void> _openImage() async {
-    final path = await _choosePath([
-      '--file-selection',
-      '--title=${L.s('打开图片', 'Open image')}',
-      '--file-filter=${L.s('图片', 'Images')} | *.png *.jpg *.jpeg *.webp',
-    ]);
-    if (path == null) return;
-    final bytes = await File(path).readAsBytes();
-    setState(() {
-      _currentImageBytes = bytes;
-      _imageWidget = _buildImageWidget();
-      _frozenBackdrop = _buildFrozenBackdrop();
-      history.clear();
-      currentStep = -1;
-      selectionRect = null;
-      // 旧图的文字块立刻失效，等后台 OCR 出新图的结果。
-      _ocrBlocks = const [];
-      _hasTextSelection = false;
-      _ocrGeneration++;
-    });
-    _invalidateCommands();
-    await _decodeCapturedImage(bytes);
-  }
-
-  /// 插件运行在合成器的最上层，zenity 这类外部窗口会被本层盖住，因此改用
-  /// shell 内置的对话框（参数仍沿用原来的 zenity 命令行数组）。
-  Future<String?> _choosePath(List<String> arguments) =>
-      choosePathWithDialog(context: context, arguments: arguments);
 
   void _showMessage(String message, {int seconds = 3}) {
     ScaffoldMessenger.of(context).showSnackBar(
@@ -6856,17 +7378,20 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
     _switchColor(color);
   }
 
+  /// 打开实时文字编辑（新建）：草稿直接长在实际落位上，边打字边按提交
+  /// 规则排版（PPT 式所见即所得），不再有独立的输入弹窗。
   void _openTextDialog(Offset position, {Rect? textBox}) {
     _editingTextIndex = null;
     _textBoxRect = textBox;
     _textDialogPosition = position;
-    final box = _canvasKey.currentContext?.findRenderObject() as RenderBox?;
-    _textDialogWindowAnchor = box?.localToGlobal(position) ?? position;
+    _draftSignature = '';
+    _liveEditSession++;
     _textController.clear();
     setState(() {
       _showTextDialog = true;
     });
-    // 根 Focus(autofocus) 已持有焦点时 TextField.autofocus 不会生效，
+    _rebuildDraftLayout();
+    // 根 Focus(autofocus) 已持有焦点时 autofocus 不会生效，
     // 必须显式把焦点交给输入框才能直接打字。
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (mounted) _textFocusNode.requestFocus();
@@ -6874,7 +7399,8 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
     _ffi.showTextDialog(position.dx.toInt(), position.dy.toInt());
   }
 
-  /// 就地编辑已有文字（文本工具点击 / 光标模式双击）。
+  /// 就地编辑已有文字（文本工具点击 / 光标模式双击）：原对象从静态层
+  /// 摘出（skipIndex），由实时草稿原位替换，改一个字看一个字。
   void _beginTextEdit(int index) {
     if (index < 0 || index >= history.length) return;
     final command = history[index];
@@ -6882,68 +7408,68 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
     _editingTextIndex = index;
     _textBoxRect = null;
     _textDialogPosition = command.start;
-    final box = _canvasKey.currentContext?.findRenderObject() as RenderBox?;
-    _textDialogWindowAnchor =
-        box?.localToGlobal(command.start) ?? command.start;
+    _draftSignature = '';
+    _liveEditSession++;
     _textController.text = command.text;
     _textController.selection = TextSelection(
       baseOffset: 0,
       extentOffset: command.text.length,
     );
     setState(() => _showTextDialog = true);
+    _rebuildDraftLayout();
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (mounted) _textFocusNode.requestFocus();
     });
   }
 
-  /// 确认输入（弹窗确定按钮 / 回车）：新建或改掉已有文字。
+  /// 确认输入（回车 / 点到编辑区外）：新建或改掉已有文字。新建路径要在
+  /// 清理草稿状态前调用 _addText——它要读拖出来的 _textBoxRect。
   void _confirmTextInput() {
     final value = _textController.text;
     final editing = _editingTextIndex;
     if (editing != null && editing < history.length) {
+      _hideTextDialog();
       if (value.trim().isEmpty) {
         // 清空内容等于删掉这条文字，省得留一个看不见的空命令。
         _eraseCommandAt(editing);
       } else {
         _updateTextCommand(editing, value);
       }
-    } else if (value.isNotEmpty) {
+    } else if (value.trim().isNotEmpty) {
       _addText(value);
       _ffi.inputText(value);
+      _hideTextDialog();
+    } else {
+      _hideTextDialog();
     }
-    _hideTextDialog();
   }
 
   /// 改掉已有文字：保持原位置、原颜色、原字号，只换内容和包围框。
   /// 文本框文字换内容后框不动，字号按新内容重新自适应。
   void _updateTextCommand(int index, String text) {
     final old = history[index];
-    Rect rect;
+    final result = layoutTextBlock(
+      text: text,
+      baseFontSize: old.strokeWidth * 4,
+      color: old.color,
+      fontFamily: old.fontFamily,
+      box: old.textBox,
+      textMaxWidth: old.textMaxWidth,
+    );
     final box = old.textBox;
-    if (box != null) {
-      rect = box;
-    } else {
-      final painter = TextPainter(
-        text: TextSpan(
-          text: text,
-          style: TextStyle(
-            color: old.color,
-            fontSize: old.strokeWidth * 4,
-            fontWeight: FontWeight.bold,
-          ),
-        ),
-        textDirection: TextDirection.ltr,
-      )..layout(maxWidth: old.textMaxWidth);
-      rect = Rect.fromLTWH(
-        old.rect.left,
-        old.rect.top,
-        painter.width,
-        painter.height,
-      );
-    }
+    final rect =
+        box ??
+        Rect.fromLTWH(
+          old.rect.left,
+          old.rect.top,
+          result.painter.width,
+          result.painter.height,
+        );
     setState(() {
       _undoSnapshots.add(List<DrawCommand>.from(history));
       _redoSnapshots.clear();
+      // strokeWidth（基准字号）保留原值：框内自适应由渲染层每次现算，
+      // 内容改短后字号能回弹；回写缩小值会把它永久固化。
       history[index] = old.copyWith(text: text, rect: rect);
       _invalidateCommands();
     });
@@ -6951,6 +7477,8 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
 
   /// 光标模式双击：命中文字就就地改字（弹窗预填原文，可直接覆盖）。
   Future<void> _onCanvasDoubleTap(Offset position) async {
+    // 实时编辑中：编辑区内的双击归输入框选词，区外先提交再吞掉这一击。
+    if (_swallowCanvasGesture(position)) return;
     if (currentTool != ScreenshotToolType.select) return;
     final index = findManipulableCommandIndex(history, position);
     if (index == null) return;
@@ -6971,7 +7499,11 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
       _showTextDialog = false;
       _editingTextIndex = null;
       _textBoxRect = null;
+      _draftPainter = null;
+      _draftBox = null;
+      _draftSignature = '';
     });
+    _staticTick.value++;
     _ffi.hideTextDialog();
   }
 
@@ -6981,6 +7513,323 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
     math.max(first.dx, second.dx),
     math.max(first.dy, second.dy),
   );
+
+  /// 草稿文本框：编辑已有对象用它的框，新建用拖出来的框（点击新建为 null）。
+  Rect? get _draftTextBox {
+    final index = _editingTextIndex;
+    if (index != null && index < history.length) {
+      return history[index].textBox;
+    }
+    return _textBoxRect;
+  }
+
+  /// 按提交渲染的同一套规则重排草稿（文本框内自动缩字号）。指纹没变就
+  /// 复用上一次排版，避免每帧重复 layout。
+  ///
+  /// 样式来源：编辑已有文字时字体/颜色/字号基准都钉在原命令上（提交走
+  /// copyWith 保留原值，草稿必须与提交结果一致，工具栏样式不影响它）；
+  /// 新建草稿跟随工具栏实时值。
+  void _rebuildDraftLayout() {
+    final index = _editingTextIndex;
+    final editingExisting = index != null && index < history.length;
+    final box = _draftTextBox;
+    final double base;
+    final Color color;
+    final String family;
+    final bool bold;
+    Color? background;
+    if (editingExisting) {
+      final command = history[index];
+      base = command.strokeWidth * 4;
+      color = command.color;
+      family = command.fontFamily;
+      bold = command.textBold;
+      background = command.textBackground;
+    } else {
+      base = textFontSize * 4;
+      color = currentColor;
+      family = textFontFamily;
+      bold = textBold;
+      background = textBackground;
+    }
+    final text = _textController.text;
+    final signature =
+        '$text|${box?.toString()}|$base|${color.toARGB32()}|$family|$bold|${background?.toARGB32()}';
+    if (signature == _draftSignature) return;
+    _draftSignature = signature;
+    final result = layoutTextBlock(
+      text: text,
+      baseFontSize: base,
+      color: color,
+      fontFamily: family,
+      fontWeight: bold ? FontWeight.bold : FontWeight.normal,
+      box: box,
+    );
+    _draftPainter = result.painter;
+    _draftFontSize = result.fontSize;
+    _draftBox = box;
+    _draftBaseCache = base;
+    _draftColorCache = color;
+    _draftBgCache = background;
+    _draftFamilyCache = family;
+    _draftBoldCache = bold;
+  }
+
+  /// 与草稿排版同步缓存的样式：绘制层和输入框样式都从这里取，保证
+  /// 三者（草稿、光标、提交结果）永远一致。
+  Color _draftColorCache = Colors.white;
+  Color? _draftBgCache;
+  String _draftFamilyCache = '';
+  double _draftBaseCache = 32;
+  bool _draftBoldCache = true;
+
+  /// 工具栏改字号/颜色/字体时：实时编辑会话里的草稿要立刻重排。签名含
+  /// 样式，无变化时是空操作。
+  void _refreshDraftIfEditing() {
+    if (!_showTextDialog) return;
+    _rebuildDraftLayout();
+  }
+
+  /// 实时编辑已有文字中：工具栏的样式变更直接写回被编辑的命令（文字
+  /// 包围框随排版同步重算），返回 true = 已在编辑路径消费。草稿排版
+  /// 从命令读样式，写回即所见即所得；提交（_updateTextCommand）也走
+  /// 同一命令，不再出现"编辑时改色无效、提交才生效"的割裂。
+  bool _mutateEditingText(DrawCommand Function(DrawCommand) mutate) {
+    final index = _editingTextIndex;
+    if (!_showTextDialog || index == null || index >= history.length) {
+      return false;
+    }
+    _undoSnapshots.add(List<DrawCommand>.from(history));
+    _redoSnapshots.clear();
+    var next = mutate(history[index]);
+    if (next.type == ScreenshotToolType.text) {
+      next = next.copyWith(rect: commandDisplayBounds(next));
+    }
+    setState(() => history[index] = next);
+    _invalidateCommands();
+    return true;
+  }
+
+  /// 实时文本编辑层：世界坐标里，草稿由 [LiveTextPainter] 按提交渲染的
+  /// 同一套排版画出来，上面盖一个前景全透明的 EditableText——它的视口
+  /// 与草稿块同尺寸同落位，排版约束（框内区宽、生效字号、加粗、行高）
+  /// 完全一致，光标和草稿逐像素对齐。字号/颜色/字体改工具栏即时跟手。
+  Widget _buildLiveTextEditor() {
+    final painter = _draftPainter;
+    if (painter == null) return const SizedBox.shrink();
+    final session = _liveEditSession;
+    final box = _draftBox;
+    final color = _draftColorCache;
+    final Offset draftOffset;
+    final double viewportWidth;
+    if (box != null) {
+      // 框内：逐行左对齐、整块垂直居中；EditableText 用相同的 inner 宽
+      // 约束，换行点位与草稿一致。
+      final inner = box.deflate(4);
+      draftOffset = Offset(
+        inner.left,
+        inner.top + (inner.height - painter.height) / 2,
+      );
+      viewportWidth = inner.width;
+    } else {
+      draftOffset = _textDialogPosition;
+      // 自由文字不约束换行：视口给足前瞻宽度，逐字输入不会瞬间折行，
+      // 光标始终跟在草稿末尾。
+      viewportWidth = math.max(painter.width + _draftBaseCache * 8, 48);
+    }
+    final area = Rect.fromLTWH(
+      draftOffset.dx,
+      draftOffset.dy,
+      viewportWidth,
+      math.max(painter.height, _draftBaseCache * 1.4),
+    );
+    _liveEditorArea = area;
+    final style = TextStyle(
+      color: color,
+      fontSize: _draftFontSize,
+      fontFamily: _draftFamilyCache.isEmpty ? null : _draftFamilyCache,
+      fontWeight: _draftBoldCache ? FontWeight.bold : FontWeight.normal,
+    );
+    final bg = _draftBgCache;
+    final bgPad = _draftFontSize * 0.22;
+    final bgRect =
+        box ??
+        Rect.fromLTWH(
+          draftOffset.dx - bgPad,
+          draftOffset.dy - bgPad,
+          painter.width + bgPad * 2,
+          painter.height + bgPad * 2,
+        );
+    final editor = Positioned(
+      left: area.left,
+      top: area.top,
+      width: area.width,
+      height: area.height,
+      child: Stack(
+        clipBehavior: Clip.none,
+        children: [
+          if (bg != null && box == null)
+            Positioned.fromRect(
+              key: const ValueKey('live-text-bg'),
+              rect: bgRect.shift(-draftOffset),
+              child: IgnorePointer(
+                child: CustomPaint(
+                  painter: TextBackgroundPainter(
+                    color: bg,
+                    radius: _draftFontSize * 0.18,
+                  ),
+                ),
+              ),
+            ),
+          Positioned.fill(
+            key: const ValueKey('live-text-draft'),
+            child: IgnorePointer(
+              child: CustomPaint(
+                painter: LiveTextPainter(painter: painter, offset: Offset.zero),
+              ),
+            ),
+          ),
+          EditableText(
+            key: const ValueKey('live-text-input'),
+            controller: _textController,
+            focusNode: _textFocusNode,
+            // 前景全透明：字由草稿层画（与提交渲染同一 TextPainter），
+            // 这里只贡献光标、选区与键盘输入。
+            style: style.copyWith(color: Colors.transparent),
+            cursorColor: color,
+            backgroundCursorColor: const Color(0xFF3399FF),
+            selectionColor: const Color(0x554C9AFF),
+            maxLines: null,
+            textAlign: TextAlign.start,
+            textDirection: TextDirection.ltr,
+            textScaler: TextScaler.noScaling,
+            showSelectionHandles: false,
+            cursorRadius: const Radius.circular(1),
+            autofocus: true,
+            enableSuggestions: false,
+            spellCheckConfiguration: const SpellCheckConfiguration.disabled(),
+            onTapOutside: (event) => _commitLiveTextEdit(
+              session: session,
+              globalPosition: event.position,
+            ),
+            onChanged: (_) => setState(_rebuildDraftLayout),
+          ),
+        ],
+      ),
+    );
+    return Positioned.fill(
+      key: _liveEditorKey,
+      child: Stack(
+        clipBehavior: Clip.none,
+        children: [
+          // 文本框编辑态：高对比虚线描边 + 半透明底，把"当前在哪个框里
+          // 打字、边界到哪"显式圈出来（PPT 编辑态观感）。
+          if (box != null)
+            Positioned.fromRect(
+              key: const ValueKey('live-box-highlight'),
+              rect: box,
+              child: IgnorePointer(
+                child: CustomPaint(painter: TextBoxHighlightPainter()),
+              ),
+            ),
+          // 文本框背景：铺满整框，垫在虚线高亮与草稿之间。
+          if (box != null && bg != null)
+            Positioned.fromRect(
+              key: const ValueKey('live-box-bg'),
+              rect: box,
+              child: IgnorePointer(
+                child: CustomPaint(
+                  painter: TextBackgroundPainter(
+                    color: bg,
+                    radius: _draftFontSize * 0.18,
+                  ),
+                ),
+              ),
+            ),
+          // editor 用 key 固定身份：背景层插拔平移索引也不能重建输入框。
+          Positioned(
+            key: const ValueKey('live-text-editor'),
+            left: editor.left,
+            top: editor.top,
+            width: editor.width,
+            height: editor.height,
+            child: editor.child,
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// 点到编辑区外 = 提交（PPT 交互）。提交发生在 pointer-down，同一击
+  /// 随后会落到画布手势里：画布的 Listener 是原始事件、不吃手势竞技场，
+  /// 所以用「编辑区内忽略 + 提交后短窗口吞掉」两道门，避免点编辑器时
+  /// 落笔、或刚提交又被这同一击重新选中。
+  Rect? _liveEditorArea;
+  int _liveCommitAtUs = 0;
+
+  /// 每次打开编辑会话自增。onTapOutside 的提交只对它所属的那次会话有效：
+  /// 点击外部的 down/up 与画布重新打开编辑的先后顺序在不同手势路径下不
+  /// 固定，令牌能确保旧会话的回调不会把刚打开的新会话一起提交关掉。
+  int _liveEditSession = 0;
+
+  bool _swallowCanvasGesture(Offset position) {
+    if (_showTextDialog) {
+      final area = _liveEditorArea;
+      // 编辑区内的点击归 EditableText（放光标、拖选区），画布不响应。
+      if (area != null && area.contains(position)) return true;
+    }
+    final now = DateTime.now().microsecondsSinceEpoch;
+    return now - _liveCommitAtUs < 400000;
+  }
+
+  void _commitLiveTextEdit({required int session, Offset? globalPosition}) {
+    if (!_showTextDialog || session != _liveEditSession) return;
+    // 只有按在画布（图像显示区）上才算"点到编辑区外 = 提交"。工具栏、
+    // 选项面板、调色板、字体面板都是编辑的配套设施，点它们改颜色/字号/
+    // 字体不该顺手把文字提交了。
+    if (globalPosition != null && !_isCanvasGlobal(globalPosition)) return;
+    _liveCommitAtUs = DateTime.now().microsecondsSinceEpoch;
+    _confirmTextInput();
+  }
+
+  /// 全局点是否落在"真正的画布"上：在 _canvasKey 矩形内，且不在任何
+  /// 悬浮 UI（停靠条/选项行/调色板/字体/背景/提示/设置/文件面板）里。
+  /// 工具栏悬浮在图像区上方，只按画布矩形判会把点色板误判成"点画布
+  /// 提交"——这些配套设施都是编辑的一部分，点它们必须保持编辑态。
+  bool _isCanvasGlobal(Offset globalPosition) {
+    final box = _canvasKey.currentContext?.findRenderObject() as RenderBox?;
+    if (box == null || !box.hasSize) return false;
+    final toGlobal = box.localToGlobal(Offset.zero);
+    if (!(toGlobal & box.size).inflate(4).contains(globalPosition)) {
+      return false;
+    }
+    for (final key in _uiOverlayKeys) {
+      final uiBox = key.currentContext?.findRenderObject() as RenderBox?;
+      if (uiBox == null || !uiBox.attached || !uiBox.hasSize) continue;
+      final origin = uiBox.localToGlobal(Offset.zero);
+      if ((origin & uiBox.size).contains(globalPosition)) return false;
+    }
+    return true;
+  }
+
+  /// 编辑配套设施的浮层清单：出现在这些矩形里的点击不触发提交。
+  /// 只列"当前可见"的——三级面板常驻树里（隐藏只是透明度 0），不可见
+  /// 时它们的矩形还悬在画布上，会把正常点击误判进"面板区"。
+  List<GlobalKey> get _uiOverlayKeys {
+    final keys = <GlobalKey>[_dockBarKey];
+    if (_optionsPanelVisible) keys.add(_optionsPanelKey);
+    if (_palettePanelVisible) keys.add(_palettePanelKey);
+    if (_fontFamilyPanelVisible) keys.add(_fontFamilyPanelKey);
+    if (_textBgPanelVisible) keys.add(_textBgPanelKey);
+    if (_showHints) keys.add(_hintsPanelKey);
+    if (_settingsOpen) {
+      keys.add(_settingsPanelKey);
+      if (_modelManagerOpen) keys.add(_modelManagerPanelKey);
+      if (_apiConfigOpen) keys.add(_apiConfigPanelKey);
+    }
+    if (_filePanelOpen) keys.add(_filePanelKey);
+    return keys;
+  }
 
   DrawCommand? _buildPreviewCommand() {
     final start = _dragStart;
@@ -7015,10 +7864,6 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
           ? currentMaskStyle
           : MaskStyle.solid,
     );
-  }
-
-  int? _findMovableCommandIndex(Offset position) {
-    return findManipulableCommandIndex(history, position);
   }
 
   /// 按手柄把原对象改成新大小：直线/箭头换端点，盒子对象换包围框并同步
@@ -7060,6 +7905,7 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
     // 里复位会把 pan 刚设置的标志清掉。
     final handledByPan = _pointerHandledByPan;
     _pointerHandledByPan = false;
+    if (_swallowCanvasGesture(position)) return;
     if (handledByPan || _dragStart != null || _editingCommandIndex != null) {
       return;
     }
@@ -7072,6 +7918,20 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
           _commitTapDot(position);
         }
       case ScreenshotToolType.select:
+        // Ctrl 点按 = 文本多选语境：不取消对象选中、不清已有选段；若正好
+        // 点在某个选段的 ✕ 关闭锚点上则释放该段（pan 可能根本没起步，
+        // 这条原始事件通道兜底；pan 起步过 handledByPan 会提前 return，
+        // 两条路互斥不会双释放）。
+        if (HardwareKeyboard.instance.isControlPressed) {
+          final hit = _ocrCloseAnchorAtWorld(position);
+          if (hit != null) {
+            setState(() {
+              _ocrSelRanges.removeAt(hit);
+              _hasTextSelection = _ocrAllRanges.isNotEmpty;
+            });
+          }
+          break;
+        }
         final target = findManipulableCommandIndex(history, position);
         _clearOcrSelection();
         setState(() => _selectedCommandIndex = target);
@@ -7083,6 +7943,10 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
         if (target != null && history[target].type == ScreenshotToolType.text) {
           setState(() => _selectedCommandIndex = target);
           _beginTextEdit(target);
+        } else {
+          // 点空白/非文字：必须清掉旧选中。否则上一个文字对象"隐形残留"
+          // 选中态，用户以为没选、点色只改默认色，看起来就是"改色无效"。
+          setState(() => _selectedCommandIndex = null);
         }
         break;
       default:
@@ -7115,6 +7979,9 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
 
   void _onPanStart(DragStartDetails details) {
     final position = details.localPosition;
+    // 实时文字编辑期间的点击：编辑区内归输入框，编辑区外先提交再吞掉
+    // 这一笔（同一次点击不该既确认文字又开始画）。
+    if (_swallowCanvasGesture(position)) return;
     _pointerHandledByPan = true;
     // 开始绘图就立即收起唤出的工具栏，别挡住落笔区域。
     if (_dockRevealed) _hideDockTransient();
@@ -7151,8 +8018,9 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
       }
       // 光标模式命中优先：先抓绘图对象（内部空白也能抓住），按住拖动即移动；
       // 选中对象时清掉文字高亮，二者互斥。绘图对象优先于文本选区。
+      // 例外：Ctrl 按住 = 文本多选意图（切换/追加选段），不与对象抢。
       final target = findManipulableCommandIndex(history, position);
-      if (target != null) {
+      if (target != null && !HardwareKeyboard.instance.isControlPressed) {
         _clearOcrSelection();
         setState(() => _selectedCommandIndex = target);
         _editingCommandIndex = target;
@@ -7165,9 +8033,14 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
         return;
       }
       // 未命中对象：取消选中；若落在文字块上则起跨块选字（对象已让位）。
-      setState(() => _selectedCommandIndex = null);
-      if (_ocrIndexAt(details.globalPosition) != null) {
-        _beginOcrSelection(details.globalPosition);
+      // Ctrl 按住 = 多选语义：不取消对象、不清已有选段，走增量起选/切换。
+      final ctrlHeld = HardwareKeyboard.instance.isControlPressed;
+      if (!ctrlHeld) {
+        setState(() => _selectedCommandIndex = null);
+      }
+      if (_ocrIndexAt(details.globalPosition) != null ||
+          (ctrlHeld && _ocrRangeAt(details.globalPosition) != null)) {
+        _beginOcrSelection(details.globalPosition, ctrl: ctrlHeld);
       }
       return;
     }
@@ -7447,6 +8320,25 @@ class _EraserGlyphPainter extends CustomPainter {
 }
 
 /// 选色板里的一个色块：方格样式，点击即选中。
+/// 「无背景」格子的斜线：左上到右下的一条对角线。
+class _SlashPainter extends CustomPainter {
+  const _SlashPainter();
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    canvas.drawLine(
+      Offset.zero,
+      Offset(size.width, size.height),
+      Paint()
+        ..color = Colors.white38
+        ..strokeWidth = 1.5,
+    );
+  }
+
+  @override
+  bool shouldRepaint(_SlashPainter oldDelegate) => false;
+}
+
 class _SwatchCell extends StatelessWidget {
   const _SwatchCell({required this.color, this.onTap});
 

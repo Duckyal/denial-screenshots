@@ -1,6 +1,8 @@
 # AGENTS.md - Screenshot plugin
 
-Denial plugin that annotates the compositor's screenshots inside the shell.
+Denial plugin providing the full screenshot flow inside the shell:
+grim-based region capture with smart window picking, annotation editing,
+scrolling capture, pinned snapshots, and local OCR/translation.
 
 ## Repository workflow
 
@@ -18,7 +20,10 @@ collection format:
 - `compositor/` — legacy standalone editor app, kept for UI prototyping only
 
 The plugin is a plain Dart package. It contains no Rust, no FFI and no
-standalone Flutter application: capture belongs to `deniald`.
+standalone Flutter application. Region capture is plugin-owned (grim /
+wlr-screencopy); the compositor's own screenshot flow (write PNG to
+`~/Pictures/Screenshots`, publish clipboard) is supported as a compat path
+via the directory watcher.
 
 ## Validate
 
