@@ -5,16 +5,17 @@
 ## 拼图与拆图
 
 ### 多图多形状拼图
-- 打开/拖入多张图，按选定形状拼成一张：横排、竖排、网格、自由摆放（拖拽+缩放定位）。
-- 复用现成能力：`_decodeCapturedImage` 换底图、`_renderCanvas` 导出、文件面板多选（`PathChooserPanel` 需加 multi-select）。
-- 入口建议：工具栏「打开」旁加「拼图」，或编辑器内「叠加打开」进当前画布当新底。
-- 难点：不同 DPI/比例的对齐与留白策略；先做等比网格版，自由摆放二期。
+- **一期已完成**（2026-11-03，feature/collage-split）：工具栏网格按钮 →
+  `PathChooserPanel` 多选（跨目录、按勾选顺序）→ `editor/collage.dart`
+  等比网格合成（单元格取最大宽高、contain 居中、12px 白底留白）→ 新画布。
+- 二期候选：横排/竖排/自由摆放（拖拽+缩放定位）；留白背景色可选。
 
 ### 九宫格 / 四宫格拆分大图
-- 把当前图按 2×2 / 3×3 / 自定义 m×n 均分（或按 OCR 文字块行做智能切分），一次导出 N 张 PNG 到截图目录。
-- 复用现成能力：裁剪的像素缝合思路（`drawImageRect` 分块）、保存路径 `ScreenshotStore`。
-- 入口建议：保存按钮下拉加「拆分为九宫格…」，弹小面板选行列数与边距。
-- 难点：与标注的交互——拆分时标注是烙进每块还是只留原图？（默认烙进，所见即所拆。）
+- **均分版已完成**（2026-11-03，同上分支）：保存旁按钮 → 小面板（行列
+  步进器 + 2×2/3×3 预设 + 边距 0-64px）→ world 尺寸全分辨率重合成
+  （底图 + 可见命令，标注烙进每块）→ `splitGrid` 均分 → N 张
+  `Screenshot-split-<ts>-<i>.png` 落 `ScreenshotStore` 目录。
+- 二期候选：按 OCR 文字块行做智能切分（横条带定位）。
 
 ## 已尝试后回退的（stash 里有完整实现）
 
@@ -27,8 +28,13 @@
 
 ## 其他积压（等拍板）
 
-- `compositor/src/bin/deniald/` 孤儿 Rust 文件清理
-- `tools/*.sh` 遗留脚本去留
-- main 分支落后 dev 多个版本：dev 稳定期后一次性快进合并
-- `docs/*.md` 五份陈旧文档同步（README 故障表补"activate 报 No initial frame → 先确认屏幕亮"）
-- wallpaper-engine 2 处 riverpod 修复未提交
+- ~~`compositor/src/bin/deniald/` 孤儿 Rust 文件清理~~ **已完成**（2026-11-03，
+  d7b168f：整 crate 从未构建、连 manifest 都解析不了，连同悬空 CMakeLists 删除）
+- ~~`tools/*.sh` 遗留脚本去留~~ **已完成**（2026-11-03，a26e14d：钩子二脚本
+  删除——插件架构后作废且实测未安装；`sync-overrides.sh` 保留——仍有效）
+- ~~main 分支落后 dev 多个版本~~ **已完成**（c51459f：0.2.0 汇总单提交上 main）
+- ~~`docs/*.md` 五份陈旧文档同步~~ **已完成**（2026-11-03：QUICKSTART /
+  BUILD_GUIDE / DEVELOPMENT / FEATURES / PROJECT_SUMMARY 全部对齐插件架构，
+  IMPLEMENTATION_COMPLETE 并入 PROJECT_SUMMARY 后删除；README 中英故障表
+  补 "activate 报 No initial frame → 先确认屏幕亮"）
+- wallpaper-engine 2 处 riverpod 修复未提交（另一个仓，等拍板）

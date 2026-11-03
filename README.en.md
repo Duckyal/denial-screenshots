@@ -51,10 +51,13 @@ what you look for in **Settings → Shortcuts → Denial actions**):
 |---|---|
 | Capture | Dimmed full-output selection with edge/corner resizing; live pixels grabbed with `grim` (wlr-screencopy); still compatible with the compositor's capture directory |
 | Tools | Select, brush, line, arrow, rectangle, circle, text, **highlighter**, mosaic (blur / solid fill), eraser |
-| Editing | Undo / redo, select an existing shape to recolor or resize it, delete selection; in cursor mode **double-click a text to edit it in place** (clearing it deletes the text); `Alt+scroll` zooms the canvas, arrows pan when zoomed in |
+| Text engine | PPT-style **live editing, true to pixel**: drag a box = wrapping text frame (font auto-shrinks to fit), click = free line, double-click edits in place; color / size / font / bold / **background** apply instantly while editing; `Enter` = newline, `Ctrl+Enter` or clicking the canvas commits, `Esc` cancels |
+| Editing | Undo / redo, select an existing shape to recolor or resize it, delete selection; `Alt+scroll` zooms the canvas, arrows pan when zoomed in |
 | Selection toolbar | OCR / translate / scrolling capture / edit / copy / save / pin / settings, right where you selected |
 | Scrolling capture | Burst-captures the framed region and stitches it; scroll injection defaults to Denial's virtual keyboard and can switch to `wtype` / `ydotool` or manual scrolling — paging key (Down / Space) and speed are configurable; a live thumbnail window floats in the top-right corner |
 | Output | Save / save-as / open image via the in-editor file panel, `Enter` saves; the copy button is copy-and-close in one, reporting copying / copied / failed with icon and color; `Esc` closes without touching the clipboard; when no image clipboard is available it copies the file path as text instead |
+| Collage / split | Tick several images in the toolbar picker (across folders) and compose them into a new canvas as an **equal-ratio grid** to keep annotating; **split export** into 2×2 / 3×3 / custom m×n blocks (adjustable margin, annotations baked into each block), N PNGs land in the screenshot folder |
+| Text multi-select | Drag over recognized text in cursor mode; `Ctrl`+drag appends ranges (same line replaces), `Ctrl`+click the ✕ drops a range, `Ctrl+C` copies all ranges in selection order |
 | Pin | Turns the annotated snapshot — or clipboard content — into a draggable card, resized from the edges/corners **with a locked aspect ratio**; double-click returns to the editor, text cards allow selecting and copying individual words |
 | OCR | Local RapidOCR (PP-OCRv3 built in, zero download; v4/v5/v6 downloadable; the unified package's multilingual model; or your own local model directory), **or an online vision model** (reuses the translation API's endpoint/key, only needs its own model name) |
 | Translation | **Local offline** (Argos per-language packs / M2M-100) or online API (OpenAI-compatible / Baidu / DeepL / LibreTranslate); translations are painted back over the original text positions, with a blur or solid mask and auto-extracted or fixed text color |
@@ -281,6 +284,7 @@ cp pubspec_overrides.yaml.example pubspec_overrides.yaml   # replace /ABSOLUTE/R
 
 | Symptom | Fix |
 |---|---|
+| `activate` fails with "No initial frame arrived within 20 seconds" | **Check the screen is awake first**: with DPMS off the compositor has no new frame to wait for, activation always times out and falls back to the packaged shell. Wake the display (see `outputs…powered` in `denialctl --json status`) and retry; only if the screen is on and it still times out is it a genuinely slow cold start — see "If activate fails…" above |
 | No pixels after selecting | Make sure `grim` is installed and the compositor exposes wlr-screencopy (deniald does by default) |
 | Copy does not reach the clipboard | Check `/tmp/denial-screenshot-clipboard.log` (exit codes and stderr of every attempt). A common cause is the plugin process having no `WAYLAND_DISPLAY`; the code now falls back to `$XDG_RUNTIME_DIR/wayland-N` |
 | Long capture won't stitch / page | The target app may ignore the injected key: switch the paging key to `Space` in settings, change the injector (`wtype` / `ydotool`), or use manual scrolling |
