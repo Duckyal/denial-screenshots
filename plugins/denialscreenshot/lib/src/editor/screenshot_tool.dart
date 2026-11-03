@@ -20,7 +20,9 @@ import '../panel_nav.dart';
 import '../scroll_capture.dart';
 import 'dialog_style.dart';
 import 'ffi.dart';
+import 'collage.dart';
 import 'file_picker.dart';
+import '../screenshot_store.dart';
 import 'host_bridge.dart';
 import 'painter.dart';
 import 'settings.dart';
@@ -48,6 +50,9 @@ class ScreenshotTool extends StatefulWidget {
 }
 
 class _ScreenshotToolState extends State<ScreenshotTool> {
+  /// 截图目录解析（与长截图落盘同一套：DENIAL_SCREENSHOT_DIR → ~/Pictures/Screenshots）。
+  static const ScreenshotStore _store = ScreenshotStore();
+
   late ScreenshotFFI _ffi;
   final ScreenshotWindowControls _window = ScreenshotWindowControls();
   ScreenshotToolType currentTool = ScreenshotToolType.select;
@@ -1003,6 +1008,7 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
               _updateTextBgPlacement(placement);
               _updateSettingsPanelPlacement(placement);
               _updateFilePanelPlacement(placement);
+              _updateSplitPanelPlacement(placement);
               _updateModelManagerPlacement(placement);
               _updateApiConfigPlacement(placement);
             });
@@ -1344,6 +1350,8 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
                   _buildSettingsPanelOverlay(dockShown: showToolbar),
                   // 文件面板：锚在打开/保存按钮旁，替代弹窗。
                   _buildFilePanelOverlay(dockShown: showToolbar),
+                  // 拆图面板：锚在保存按钮外侧。
+                  _buildSplitPanelOverlay(dockShown: showToolbar),
                   // 本地翻译模型管理：贴着设置面板弹出的三级浮层。
                   _buildModelManagerOverlay(dockShown: showToolbar),
                   // 在线翻译 API 配置：同款式贴设置面板的三级浮层。
@@ -1579,6 +1587,12 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
         _openFilePanel,
         key: _dockFileOpenKey,
       ),
+      dockButton(
+        Icons.grid_view_rounded,
+        L.pick(context, '拼图（多选网格合成）', 'Collage (multi-select grid)'),
+        _openCollagePanel,
+        key: _dockCollageKey,
+      ),
       divider(),
       for (final (type, icon, zh, en) in [...standaloneTools, ...shapeTools])
         dockButton(
@@ -1639,6 +1653,16 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
         L.pick(context, '保存 (Enter)', 'Save (Enter)'),
         _saveFilePanel,
         key: _dockFileSaveKey,
+      ),
+      dockButton(
+        Icons.grid_on_outlined,
+        L.pick(context, '拆分导出（九宫格…）', 'Split export (grid)'),
+        () => setState(() {
+          _splitPanelOpen = !_splitPanelOpen;
+          _filePanelOpen = false;
+        }),
+        active: _splitPanelOpen,
+        key: _dockSplitKey,
       ),
       dockButton(
         Icons.push_pin,
@@ -4145,6 +4169,20 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
   /// 文件面板的 ESC 逐级返回桥：上级目录可回就先回，到顶才关面板。
   final SelectionPanelNav _fileNav = SelectionPanelNav();
   bool _filePanelSave = false;
+
+  /// 文件面板第三种形态：拼图多选（勾选 N 张 → 等比网格合成新底图）。
+  bool _filePanelCollage = false;
+  final GlobalKey _dockCollageKey = GlobalKey();
+
+  /// 拆图小面板：行列/间距选择后把当前画布均分导出 N 张 PNG。
+  bool _splitPanelOpen = false;
+  bool _splitPanelVisible = false;
+  Offset? _splitPanelOffset;
+  final GlobalKey _dockSplitKey = GlobalKey();
+  final GlobalKey _splitPanelKey = GlobalKey();
+  int _splitRows = 3;
+  int _splitCols = 3;
+  int _splitGap = 0;
   final GlobalKey _dockFileOpenKey = GlobalKey();
   final GlobalKey _dockFileSaveKey = GlobalKey();
   final GlobalKey _filePanelKey = GlobalKey();
@@ -4378,9 +4416,25 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
   }
 
   /// 打开文件面板（打开模式）。
+  /// 拼图多选面板：与打开/保存面板共用浮层与摆位，形态由
+  /// [_filePanelCollage] 决定（面板开多选、确认走合成）。
+  void _openCollagePanel() {
+    setState(() {
+      _filePanelSave = false;
+      _filePanelCollage = true;
+      _filePanelPendingBytes = null;
+      _filePanelOpen = true;
+      _settingsOpen = false;
+      _modelManagerOpen = false;
+      _apiConfigOpen = false;
+      _splitPanelOpen = false;
+    });
+  }
+
   void _openFilePanel() {
     setState(() {
       _filePanelSave = false;
+      _filePanelCollage = false;
       _filePanelPendingBytes = null;
       _filePanelOpen = true;
       _settingsOpen = false;
@@ -4395,12 +4449,129 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
     if (png == null || !mounted) return;
     setState(() {
       _filePanelSave = true;
+      _filePanelCollage = false;
       _filePanelPendingBytes = png;
       _filePanelOpen = true;
       _settingsOpen = false;
       _modelManagerOpen = false;
       _apiConfigOpen = false;
     });
+  }
+
+  /// 拼图多选确认：解码各图 → 等比网格合成（列数自动 ≈ 正方形布局）→
+  /// 合成图作为新底图进入编辑（压撤销快照，可 Ctrl+Z 回退）。
+  Future<void> _onCollageConfirmed(List<String> paths) async {
+    setState(() => _filePanelOpen = false);
+    final images = <ui.Image>[];
+    for (final path in paths) {
+      try {
+        final bytes = await File(path).readAsBytes();
+        final codec = await ui.instantiateImageCodec(bytes);
+        final frame = await codec.getNextFrame();
+        codec.dispose();
+        images.add(frame.image);
+      } on Object {
+        // 单张坏图不拦整批：跳过继续。
+        continue;
+      }
+    }
+    if (images.isEmpty) {
+      _showMessage(L.s('所选图片都读不出来', 'None of the images could be read'));
+      return;
+    }
+    final collage = await composeGridCollage(images);
+    for (final image in images) {
+      image.dispose();
+    }
+    if (collage == null || !mounted) return;
+    final data = await imageToPng(collage);
+    collage.dispose();
+    if (data == null || !mounted) return;
+    // 与「打开图片」同一语义：换底图即新画布，清空标注与撤销栈
+    // （现状 main 的 undo 只回滚命令不回滚底图，拼图不越这个界）。
+    _undoSnapshots.clear();
+    _redoSnapshots.clear();
+    setState(() {
+      history.clear();
+      currentStep = -1;
+      _selectedCommandIndex = null;
+      _filePanelCollage = false;
+      _currentImageBytes = data;
+      _imageWidget = _buildImageWidget();
+      _frozenBackdrop = _buildFrozenBackdrop();
+    });
+    _invalidateCommands();
+    await _decodeCapturedImage(data);
+    _showMessage(
+      L.pick(
+        context,
+        '已拼图 ${paths.length} 张，可继续标注',
+        'Collaged ${paths.length} images — keep annotating',
+      ),
+    );
+  }
+
+  /// 拆图确认：world 尺寸现场重合成（底图+标注全分辨率），按 m×n 均分
+  /// 导出 N 张 PNG 到截图目录。标注默认烙进每块（所见即所拆）。
+  Future<void> _confirmSplitExport() async {
+    final decoded = _decodedImage;
+    if (decoded == null) return;
+    final rows = _splitRows.clamp(1, 9);
+    final cols = _splitCols.clamp(1, 9);
+    setState(() => _splitPanelOpen = false);
+    final size = _worldSize;
+    final w = size.width.round();
+    final h = size.height.round();
+    if (w <= 0 || h <= 0) return;
+    // 全分辨率合成：底图 + 已提交命令逐条重放（不走屏幕缩放的画布截图）。
+    final recorder = ui.PictureRecorder();
+    final canvas = Canvas(
+      recorder,
+      Offset.zero & Size(w.toDouble(), h.toDouble()),
+    );
+    canvas.drawImage(decoded, Offset.zero, Paint());
+    for (final command in _visibleCommands) {
+      drawCommand(canvas, command, backgroundImage: decoded);
+    }
+    final picture = recorder.endRecording();
+    final merged = await picture.toImage(w, h);
+    picture.dispose();
+    final blocks = await splitGrid(
+      merged,
+      rows: rows,
+      cols: cols,
+      gap: _splitGap.clamp(0, 64),
+      background: _dockColors.first,
+    );
+    merged.dispose();
+    final dir = _store.directory;
+    if (dir == null) {
+      _showMessage(L.s('找不到截图目录', 'Screenshot folder not found'));
+      return;
+    }
+    final stamp = DateTime.now().millisecondsSinceEpoch;
+    var saved = 0;
+    for (var i = 0; i < blocks.length; i++) {
+      final png = await imageToPng(blocks[i]);
+      blocks[i].dispose();
+      if (png == null) continue;
+      final path = '${dir.path}/Screenshot-split-$stamp-${i + 1}.png';
+      try {
+        await File(path).writeAsBytes(png);
+        saved++;
+      } on Object {
+        continue;
+      }
+    }
+    _showMessage(
+      saved == 0
+          ? L.s('拆分导出失败', 'Split export failed')
+          : L.pick(
+              context,
+              '已拆分导出 $saved 张到截图目录',
+              'Split into $saved images in the screenshot folder',
+            ),
+    );
   }
 
   /// 文件面板确认路径后的回调。
@@ -4455,15 +4626,219 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
     );
   }
 
+  /// 拆图小面板：行列 + 间距 + 预设（四宫格/九宫格），确认导出。
+  Widget _buildSplitPanel() {
+    Widget stepper(String label, int value, ValueChanged<int> onChanged) {
+      return Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          SizedBox(
+            width: 64,
+            child: Text(
+              label,
+              style: const TextStyle(fontSize: 12, color: Colors.white70),
+            ),
+          ),
+          IconButton(
+            visualDensity: VisualDensity.compact,
+            icon: const Icon(Icons.remove, size: 16, color: Colors.white70),
+            onPressed: () => onChanged(value - 1),
+          ),
+          SizedBox(
+            width: 24,
+            child: Text(
+              '$value',
+              textAlign: TextAlign.center,
+              style: const TextStyle(fontSize: 13),
+            ),
+          ),
+          IconButton(
+            visualDensity: VisualDensity.compact,
+            icon: const Icon(Icons.add, size: 16, color: Colors.white70),
+            onPressed: () => onChanged(value + 1),
+          ),
+        ],
+      );
+    }
+
+    return Container(
+      key: _splitPanelKey,
+      width: 250,
+      padding: const EdgeInsets.fromLTRB(12, 10, 12, 10),
+      decoration: BoxDecoration(
+        color: Colors.black.withValues(alpha: 0.82),
+        borderRadius: BorderRadius.circular(10),
+        boxShadow: const [
+          BoxShadow(
+            color: Colors.black38,
+            blurRadius: 10,
+            offset: Offset(0, 2),
+          ),
+        ],
+      ),
+      child: Material(
+        type: MaterialType.transparency,
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              L.pick(context, '拆分导出', 'Split export'),
+              style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600),
+            ),
+            const SizedBox(height: 6),
+            Row(
+              children: [
+                TextButton(
+                  onPressed: () => setState(() {
+                    _splitRows = 2;
+                    _splitCols = 2;
+                  }),
+                  child: Text(L.pick(context, '四宫格', '2×2')),
+                ),
+                TextButton(
+                  onPressed: () => setState(() {
+                    _splitRows = 3;
+                    _splitCols = 3;
+                  }),
+                  child: Text(L.pick(context, '九宫格', '3×3')),
+                ),
+              ],
+            ),
+            stepper(
+              L.pick(context, '行', 'Rows'),
+              _splitRows,
+              (v) => setState(() => _splitRows = v.clamp(1, 9)),
+            ),
+            stepper(
+              L.pick(context, '列', 'Cols'),
+              _splitCols,
+              (v) => setState(() => _splitCols = v.clamp(1, 9)),
+            ),
+            stepper(
+              L.pick(context, '边距', 'Gap'),
+              _splitGap,
+              (v) => setState(() => _splitGap = v.clamp(0, 64)),
+            ),
+            const SizedBox(height: 4),
+            Text(
+              L.pick(
+                context,
+                '标注烙进每块，导出 $_splitRows×$_splitCols=${_splitRows * _splitCols} 张到截图目录',
+                'Annotations baked in; exports $_splitRows×$_splitCols=${_splitRows * _splitCols} PNGs',
+              ),
+              style: const TextStyle(fontSize: 11, color: Colors.white54),
+            ),
+            const SizedBox(height: 6),
+            Align(
+              alignment: Alignment.centerRight,
+              child: FilledButton(
+                onPressed: _confirmSplitExport,
+                child: Text(L.pick(context, '导出', 'Export')),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  /// 拆图面板浮层 + 摆位（锚在保存按钮外侧，同文件面板规则）。
+  Widget _buildSplitPanelOverlay({required bool dockShown}) {
+    final visible = dockShown && _splitPanelOpen;
+    if (_splitPanelVisible != visible) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted && _splitPanelVisible != visible) {
+          setState(() => _splitPanelVisible = visible);
+        }
+      });
+    }
+    return Positioned(
+      left: _splitPanelOffset?.dx ?? 0,
+      top: _splitPanelOffset?.dy ?? 0,
+      child: IgnorePointer(
+        ignoring: !visible,
+        child: AnimatedOpacity(
+          opacity: visible ? 1 : 0,
+          duration: const Duration(milliseconds: 120),
+          child: _buildSplitPanel(),
+        ),
+      ),
+    );
+  }
+
+  void _updateSplitPanelPlacement(
+    ({bool vertical, bool atStart, bool hidden, bool reserved}) placement,
+  ) {
+    if (!mounted) return;
+    final shouldShow =
+        showToolbar && (!placement.hidden || _dockRevealed) && _splitPanelOpen;
+    if (!shouldShow) {
+      if (_splitPanelVisible) {
+        setState(() => _splitPanelVisible = false);
+      }
+      return;
+    }
+    final barBox = _dockBarKey.currentContext?.findRenderObject() as RenderBox?;
+    final anchorBox =
+        _dockSplitKey.currentContext?.findRenderObject() as RenderBox?;
+    final panelBox =
+        _splitPanelKey.currentContext?.findRenderObject() as RenderBox?;
+    if (barBox == null ||
+        anchorBox == null ||
+        !barBox.attached ||
+        !anchorBox.attached ||
+        !barBox.hasSize) {
+      return;
+    }
+    final anchorCenter = anchorBox.localToGlobal(
+      anchorBox.size.center(Offset.zero),
+    );
+    final barOrigin = barBox.localToGlobal(Offset.zero);
+    final barSize = barBox.size;
+    final panelSize =
+        (panelBox != null && panelBox.attached && panelBox.hasSize)
+        ? panelBox.size
+        : const Size(250, 240);
+    final window = MediaQuery.sizeOf(context);
+    double left;
+    double top;
+    if (!placement.vertical) {
+      left = (anchorCenter.dx - panelSize.width / 2).clamp(
+        8.0,
+        math.max(8.0, window.width - panelSize.width - 8),
+      );
+      top = placement.atStart
+          ? barOrigin.dy + barSize.height + 6
+          : barOrigin.dy - panelSize.height - 6;
+    } else {
+      top = (anchorCenter.dy - panelSize.height / 2).clamp(
+        8.0,
+        math.max(8.0, window.height - panelSize.height - 8),
+      );
+      left = placement.atStart
+          ? barOrigin.dx + barSize.width + 6
+          : barOrigin.dx - panelSize.width - 6;
+    }
+    final offset = Offset(left, top);
+    if (_splitPanelOffset != offset) {
+      setState(() => _splitPanelOffset = offset);
+    }
+  }
+
   Widget _buildFilePanel() {
     final home = Platform.environment['HOME'] ?? '/';
     return PathChooserPanel(
       // 卡片外壳（深色/圆角/阴影）由面板自带，这里只管摆放尺寸。
       key: _filePanelKey,
-      title: _filePanelSave
+      title: _filePanelCollage
+          ? L.pick(context, '拼图：勾选多张网格合成', 'Collage: tick images to grid')
+          : _filePanelSave
           ? L.pick(context, '保存截图', 'Save screenshot')
           : L.pick(context, '打开图片', 'Open image'),
       save: _filePanelSave,
+      multiSelect: _filePanelCollage,
+      onSelectedMany: _onCollageConfirmed,
       initialDirectory: _filePanelSave
           ? '$home/Pictures/Screenshots'
           : '$home/Pictures',
@@ -4491,7 +4866,11 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
       return;
     }
     final barBox = _dockBarKey.currentContext?.findRenderObject() as RenderBox?;
-    final anchorKey = _filePanelSave ? _dockFileSaveKey : _dockFileOpenKey;
+    final anchorKey = _filePanelCollage
+        ? _dockCollageKey
+        : _filePanelSave
+        ? _dockFileSaveKey
+        : _dockFileOpenKey;
     final anchorBox =
         anchorKey.currentContext?.findRenderObject() as RenderBox?;
     final panelBox =
