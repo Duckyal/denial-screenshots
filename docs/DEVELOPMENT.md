@@ -17,7 +17,7 @@ denial-screenshots/
 │       │   ├── screenshot_tool.dart  # 编辑器主体（工具栏/画布/OCR/翻译/长截图入口）
 │       │   ├── commands.dart         # DrawCommand + layoutTextBlock 共享排版
 │       │   ├── painter.dart          # 静态层/预览层/选区层各 CustomPainter
-│       │   ├── collage.dart          # 拼图/拆图纯合成逻辑
+│       │   ├── collage.dart          # 拼图纯合成逻辑
 │       │   ├── file_picker.dart      # PathChooserPanel（打开/保存/目录/多选共用）
 │       │   ├── settings.dart         # 插件设置 + 可自定义快捷键
 │       │   ├── translate_service.dart# sidecar 调用（OCR/翻译流式事件）
@@ -56,7 +56,7 @@ selection_surface：grim -g 抓全屏 → 框选层画选区
 editor/screenshot_tool：DrawCommand 列表 + StaticDrawPainter 位图缓存
   ├─ OCR/翻译：translate_service → python sidecar（流式 region/done 事件）
   ├─ 长截图：scroll_capture 探针轮询 → scroll_stitch NCC 拼接
-  ├─ 拼图/拆图：editor/collage 纯合成
+  ├─ 拼图：editor/collage 纯合成
   └─ 保存/复制/置顶：dart:io + clipboard.dart + pin_surface
 ```
 

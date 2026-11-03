@@ -1,5 +1,5 @@
-/// 拼图 / 拆图的纯合成逻辑：只吃 `ui.Image`，产出 `ui.Image`，不碰编辑器
-/// 状态，方便单测与两处入口（工具栏）复用。
+/// 拼图的纯合成逻辑：只吃 `ui.Image`，产出 `ui.Image`，不碰编辑器状态，
+/// 方便单测与工具栏入口复用。
 ///
 /// 拼图一期 = 等比网格：所有图放进同一尺寸的格子，格内 contain 居中，
 /// 留白填背景色——不同 DPI / 比例的图天然对齐，不做自由摆放（二期）。
@@ -80,66 +80,6 @@ Future<ui.Image?> composeGridCollage(
   final picture = recorder.endRecording();
   final out = await picture.toImage(width, height);
   picture.dispose();
-  return out;
-}
-
-/// 拆图：把 [image] 均分 rows×cols 块，块四周留 [gap] 背景色（烙进每块，
-/// 所见即所拆）。返回按行优先顺序的 N 张图，调用方负责 dispose 原件。
-Future<List<ui.Image>> splitGrid(
-  ui.Image image, {
-  required int rows,
-  required int cols,
-  int gap = 0,
-  ui.Color background = const ui.Color(0xFFFFFFFF),
-}) async {
-  final r = math.max(1, rows);
-  final c = math.max(1, cols);
-  final w = image.width ~/ c;
-  final h = image.height ~/ r;
-  final out = <ui.Image>[];
-  final paint = ui.Paint()..filterQuality = ui.FilterQuality.medium;
-  for (var i = 0; i < r * c; i++) {
-    final row = i ~/ c;
-    final col = i % c;
-    // 最后一行/列吃掉整除余数，保证拆完无缝覆盖原图。
-    final x = col * w;
-    final y = row * h;
-    final blockW = col == c - 1 ? image.width - x : w;
-    final blockH = row == r - 1 ? image.height - y : h;
-    if (blockW <= 0 || blockH <= 0) continue;
-    final innerW = math.max(1, blockW - gap * 2);
-    final innerH = math.max(1, blockH - gap * 2);
-    final recorder = ui.PictureRecorder();
-    final canvas = ui.Canvas(
-      recorder,
-      ui.Offset.zero & ui.Size(blockW.toDouble(), blockH.toDouble()),
-    );
-    if (gap > 0) {
-      canvas.drawRect(
-        ui.Offset.zero & ui.Size(blockW.toDouble(), blockH.toDouble()),
-        ui.Paint()..color = background,
-      );
-    }
-    canvas.drawImageRect(
-      image,
-      ui.Rect.fromLTWH(
-        x.toDouble(),
-        y.toDouble(),
-        blockW.toDouble(),
-        blockH.toDouble(),
-      ),
-      ui.Rect.fromLTWH(
-        (blockW - innerW) / 2,
-        (blockH - innerH) / 2,
-        innerW.toDouble(),
-        innerH.toDouble(),
-      ),
-      paint,
-    );
-    final picture = recorder.endRecording();
-    out.add(await picture.toImage(blockW, blockH));
-    picture.dispose();
-  }
   return out;
 }
 
