@@ -307,58 +307,6 @@ ui.Rect? collageBounds(List<CollageSlot> slots) {
   return ui.Rect.fromLTRB(left, top, right, bottom);
 }
 
-/// 桌面平铺式吸附：把移动中的框架向其他框架的边/中线与画布边/中线对齐
-/// （容差内取最近的一条线），再夹进画布（平铺管理器语义：窗口不丢出
-/// 屏幕）。没有可对齐线时原样返回。
-ui.Rect snapFrameRect({
-  required ui.Rect moving,
-  required List<ui.Rect> others,
-  required ui.Size world,
-  required double tolerance,
-}) {
-  final xs = <double>[0, world.width / 2, world.width];
-  final ys = <double>[0, world.height / 2, world.height];
-  for (final r in others) {
-    xs
-      ..add(r.left)
-      ..add(r.center.dx)
-      ..add(r.right);
-    ys
-      ..add(r.top)
-      ..add(r.center.dy)
-      ..add(r.bottom);
-  }
-  double? bestX;
-  var bestXD = tolerance + 1;
-  for (final line in [moving.left, moving.center.dx, moving.right]) {
-    for (final t in xs) {
-      final d = (t - line).abs();
-      if (d <= tolerance && d < bestXD) {
-        bestXD = d;
-        bestX = t - line;
-      }
-    }
-  }
-  double? bestY;
-  var bestYD = tolerance + 1;
-  for (final line in [moving.top, moving.center.dy, moving.bottom]) {
-    for (final t in ys) {
-      final d = (t - line).abs();
-      if (d <= tolerance && d < bestYD) {
-        bestYD = d;
-        bestY = t - line;
-      }
-    }
-  }
-  final left = (moving.left + (bestX ?? 0))
-      .clamp(0.0, math.max(0.0, world.width - moving.width))
-      .toDouble();
-  final top = (moving.top + (bestY ?? 0))
-      .clamp(0.0, math.max(0.0, world.height - moving.height))
-      .toDouble();
-  return ui.Rect.fromLTWH(left, top, moving.width, moving.height);
-}
-
 /// 烘焙工作台为一张成品图：背景 + 每槽（clip 框架、按 pan/zoom 画内容）。
 /// [showGuides] 仅预览用（导出必须 false，框架线不烙进图里）。
 Future<ui.Image?> bakeCollage(

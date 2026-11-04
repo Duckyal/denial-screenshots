@@ -725,6 +725,9 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
     // 挂在 FittedBox 外侧，localPosition 是视口坐标，必须按 contain+zoom+pan
     // 换算成世界坐标再命中/锚定。
     if (_collageSlots != null && currentTool == ScreenshotToolType.select) {
+      // 工作台语义：框架是开在图片上的窗口，滚轮**一律**缩放指针所在
+      // 框架里的图片（不借任何修饰键，也不缩放整个工作台视图）。指针
+      // 落在框外空白时才平移视角，用来看全局布局。
       final layout = _canvasLayout(_canvasZoom, viewport, _worldSize);
       final c = (event.localPosition - layout.o) / layout.k;
       final worldPoint = (c - _canvasPan) / _canvasZoom;
@@ -735,7 +738,9 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
         _collageSlots![index].zoomAt(worldPoint, factor);
         _collageSelected = index;
         _touchCollage();
+        return;
       }
+      _panCanvas(_canvasPan + Offset(0, -event.scrollDelta.dy), viewport);
       return;
     }
     final world = _worldSize;
@@ -843,6 +848,13 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
   }
 
   void _panCanvas(Offset pan, Size viewport) {
+    // 拼图工作台：视角自由平移，不做"不许露白"的夹取——多框架布局
+    // 本来就有空白，夹取会把可平移范围锁成 0（等于拖不动）。
+    if (_collageSlots != null) {
+      if ((pan - _canvasPan).distance < 0.5) return;
+      setState(() => _canvasPan = pan);
+      return;
+    }
     final clamped = _clampCanvasPan(pan, _canvasZoom, viewport, _worldSize);
     if ((clamped - _canvasPan).distance < 0.5) return;
     setState(() => _canvasPan = clamped);
@@ -901,6 +913,8 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
       _collageSlots = slots;
       _collageWorld = world;
       _collageSelected = -1;
+      _loupeSlot = -1;
+      _loupeRestore = null;
       _collageDragSlot = null;
       _collageMoveSlot = null;
       _collageResizeSlot = null;
@@ -920,6 +934,8 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
       _collageSlots = null;
       _collageWorld = null;
       _collageSelected = -1;
+      _loupeSlot = -1;
+      _loupeRestore = null;
       _collageDragSlot = null;
       _collageMoveSlot = null;
       _collageResizeSlot = null;
@@ -1037,6 +1053,11 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
         return true;
       }
       if (binding == _settings.bindingFor('close')) {
+        // 放大镜开着：Esc 先退出预览（再按才走取消选中/关窗）。
+        if (_loupeSlot >= 0) {
+          _exitLoupe();
+          return true;
+        }
         if (_selectedCommandIndex != null) {
           setState(() => _selectedCommandIndex = null);
         } else {
@@ -1077,6 +1098,14 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
         return true;
       case LogicalKeyboardKey.delete:
       case LogicalKeyboardKey.backspace:
+        // 统一"选中 + Del = 删除"：工作台里删选中的框架，普通编辑删
+        // 选中的绘图对象。
+        if (_collageSlots != null &&
+            _collageSelected >= 0 &&
+            _collageSelected < _collageSlots!.length) {
+          _deleteCollageSlot(_collageSelected);
+          return true;
+        }
         if (_selectedCommandIndex != null) {
           _eraseCommandAt(_selectedCommandIndex!);
         }
@@ -4325,10 +4354,20 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
   int _collageVersion = 0; // 槽内容原地改动后递增，驱动导引层重绘
   CollageSlot? _collageDragSlot;
 
-  /// 光标模式下按住框架边缘（非手柄、非内部）拖动 = 移动整个框架
-  /// （平铺式吸附）；框内中间拖动 = 平移取景。
+  /// 光标模式下按住框架边缘（非手柄、非内部）拖动 = 移动整个框架；
+  /// 框内中间拖动 = 平移取景。
   CollageSlot? _collageMoveSlot;
+
+  /// 拼图放大预览（loupe）：双击框架 = 把工作台视图等比聚焦到该框架
+  /// （长边几乎铺满屏幕最短边），再双击任意处退出并还原聚焦前的缩放
+  /// 平移；期间滚轮/Alt/Ctrl 与普通截图完全一致（平移视角/缩放画布）。
+  int _loupeSlot = -1;
+  ({double zoom, Offset pan})? _loupeRestore;
   CollageSlot? _collageResizeSlot;
+
+  /// 工作台空白处拖动 = 平移视角（滚轮已归框内图片缩放，需要别的
+  /// 方式看全局）。
+  bool _collageViewDrag = false;
 
   /// 工作台图片所有权：进入时登记，撤销/重做栈里再无快照引用时统一
   /// dispose（快照间共享引用，绝不能提前释放）。
@@ -4616,25 +4655,31 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
 
   /// 打开文件面板（保存模式）：先渲染画布再展开面板。
   Future<void> _saveFilePanel() async {
-    final png = await _renderCanvas();
-    if (png == null || !mounted) return;
-    // 预览卡片按图片宽高比 contain 到 200×260 上限；读不到尺寸就退成
-    // 正方形，不拦保存流程。
-    final pngSize = await _pngSizeOf(png);
-    if (!mounted) return;
-    final preview = _previewCardSize(pngSize?.$1 ?? 4, pngSize?.$2 ?? 3);
+    // 面板先开（点保存立刻有反馈），渲染/预览异步补——工作台是四张
+    // 全分辨率帧的合成，bake+PNG 编码有百毫秒级开销，不能压在开面板
+    // 这一下。渲染完成前 pendingBytes 为 null，预览卡自然不显示。
+    final token = ++_saveRenderToken;
     setState(() {
-      _savePreviewSize = preview;
-      _savePreviewOffset = null;
       _filePanelSave = true;
       _filePanelCollage = false;
-      _filePanelPendingBytes = png;
+      _filePanelPendingBytes = null;
       _filePanelOpen = true;
+      _savePreviewOffset = null;
       _settingsOpen = false;
       _modelManagerOpen = false;
       _apiConfigOpen = false;
     });
+    final png = await _renderCanvas();
+    if (!mounted || token != _saveRenderToken) return;
+    final pngSize = await _pngSizeOf(png ?? Uint8List(0));
+    if (!mounted || token != _saveRenderToken) return;
+    setState(() {
+      _filePanelPendingBytes = png;
+      _savePreviewSize = _previewCardSize(pngSize?.$1 ?? 4, pngSize?.$2 ?? 3);
+    });
   }
+
+  int _saveRenderToken = 0;
 
   /// 拼图多选确认：当前画布（含标注，烘焙成一张图）排第一帧，其后是
   /// 勾选的各图 → 进拼图工作台。
@@ -4655,6 +4700,14 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
     }
     if (added.isEmpty) {
       _showMessage(L.s('所选图片都读不出来', 'None of the images could be read'));
+      return;
+    }
+    // 已在工作台：绝不重建！保留全部现有框架（用户已经摆好/调过的），
+    // 新图作为底部一行追加，world 相应扩展。上一版在这里无条件重建
+    // slots，第二次加图把第一批全丢了。
+    final existing = _collageSlots;
+    if (existing != null) {
+      _appendCollageImages(existing, added);
       return;
     }
     final base = await _bakeCurrentCanvas();
@@ -4679,6 +4732,8 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
       _collageSlots = slots;
       _collageWorld = layout.world;
       _collageSelected = -1;
+      _loupeSlot = -1;
+      _loupeRestore = null;
       _collageVersion = 0;
       // 工作台是独立画布：标注历史清空重画；撤销栈保留"拼图前"那一条
       // （上面刚压入），Ctrl+Z 可退出工作台。原图的 OCR 块/选区失效，
@@ -4828,6 +4883,57 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
     _touchCollage();
   }
 
+  /// 画布聚焦到某个框架：等比缩放到框架长边几乎铺满屏幕最短边
+  /// （92%），框架居中。首次进入记录聚焦前的 zoom/pan 供退出还原。
+  void _focusCollageSlot(int index) {
+    final slots = _collageSlots;
+    if (slots == null || index < 0 || index >= slots.length) return;
+    final viewport = _lastCanvasViewport;
+    final world = _collageWorld;
+    if (viewport == null || viewport.isEmpty || world == null) return;
+    final layout = _canvasLayout(_canvasZoom, viewport, world);
+    final slot = slots[index];
+    final target = math.min(viewport.width, viewport.height) * 0.92;
+    final longest = math.max(slot.rect.width, slot.rect.height);
+    if (longest <= 0 || layout.k <= 0) return;
+    // 画布普通缩放上限 8× 不够聚焦小框：预览模式允许到 24×。
+    final zoom = (target / (layout.k * longest)).clamp(1.0, 24.0);
+    // 框架中心对到视口中心：V = o + k*(pan + z*C) = viewport/2。
+    final center =
+        ((Offset(viewport.width / 2, viewport.height / 2) - layout.o) /
+            layout.k) -
+        slot.rect.center * zoom;
+    // 居中优先于"不露白"：聚焦时框架必须落在视口正中（工作台视角
+    // 平移本就不夹取，这里直接用算出来的 pan）。
+    setState(() {
+      _loupeRestore ??= (zoom: _canvasZoom, pan: _canvasPan);
+      _loupeSlot = index;
+      _canvasZoom = zoom;
+      _canvasPan = center;
+    });
+    _showMessage(
+      L.pick(
+        context,
+        '放大预览：滚轮缩放框内图片，放大后拖动平移，双击或 Esc 退出',
+        'Loupe: scroll zooms the image inside, then drag to pan; double-click or Esc exits',
+      ),
+      seconds: 2,
+    );
+  }
+
+  /// 退出放大预览：还原聚焦前的画布缩放与平移。
+  void _exitLoupe() {
+    final restore = _loupeRestore;
+    setState(() {
+      _loupeSlot = -1;
+      _loupeRestore = null;
+      if (restore != null) {
+        _canvasZoom = restore.zoom;
+        _canvasPan = restore.pan;
+      }
+    });
+  }
+
   /// 指针落在哪个框架（世界坐标）：重叠时取后画的（上层）。
   int? _collageSlotAt(Offset world) {
     final slots = _collageSlots;
@@ -4841,6 +4947,63 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
   /// 工作台里丢弃进行中的实时文字编辑（换画布语义，草稿作废）。
   void _abortLiveTextEdit() {
     if (_showTextDialog) _hideTextDialog();
+  }
+
+  /// 工作台内追加图片：现有框架原样保留，新图按面积归一方格排在现有
+  /// 内容包围盒下方一行（水平居中），world 扩宽/扩高容纳。压一条撤销
+  /// 快照：Ctrl+Z 回到追加前。
+  void _appendCollageImages(List<CollageSlot> existing, List<ui.Image> added) {
+    const gap = 12.0;
+    final world0 = _collageWorld ?? Size.zero;
+    final bounds = collageBounds(existing) ?? Rect.zero;
+    var side = 1.0;
+    for (final image in added) {
+      side = math.max(side, math.sqrt((image.width * image.height).toDouble()));
+    }
+    final rowWidth = added.length * side + (added.length + 1) * gap;
+    final newWorldWidth = math.max(world0.width, rowWidth);
+    final rowTop = bounds.bottom + gap;
+    final slots = <CollageSlot>[...existing];
+    _pushCollageStep();
+    _collageOwnedImages.addAll(added);
+    for (var i = 0; i < added.length; i++) {
+      final left = (newWorldWidth - rowWidth) / 2 + gap + i * (side + gap);
+      slots.add(
+        CollageSlot(
+          image: added[i],
+          rect: Rect.fromLTWH(left, rowTop, side, side),
+        ),
+      );
+    }
+    setState(() {
+      _collageSlots = slots;
+      _collageWorld = Size(newWorldWidth, rowTop + side + gap);
+      _collageSelected = -1;
+      _collageVersion++;
+      _imageWidget = _buildCollageContentWidget();
+    });
+    _showMessage(
+      L.pick(
+        context,
+        '已追加 ${added.length} 张到工作台',
+        'Added ${added.length} images to the board',
+      ),
+    );
+  }
+
+  /// 删除选中框架（Del）：槽移出列表并压撤销快照。图片本体不立即释放
+  /// ——旧快照还引用着，栈清空后由 _pruneCollageImages 统一 dispose。
+  void _deleteCollageSlot(int index) {
+    final slots = _collageSlots;
+    if (slots == null || index < 0 || index >= slots.length) return;
+    _pushCollageStep();
+    setState(() {
+      slots.removeAt(index);
+      _collageSelected = -1;
+      _collageVersion++;
+      _imageWidget = _buildCollageContentWidget();
+    });
+    _showMessage(L.pick(context, '已删除该框架', 'Frame removed'));
   }
 
   /// 拆分导出：world 尺寸现场全分辨率重合成（底图+标注，烙进每块），
@@ -4910,7 +5073,12 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
     setState(() => _filePanelOpen = false);
     if (_filePanelSave) {
       final bytes = _filePanelPendingBytes;
-      if (bytes == null) return;
+      if (bytes == null) {
+        // 异步渲染还没完成（工作台大图可能百毫秒级）：提示稍后再点，
+        // 别静默失败。
+        _showMessage(L.s('图片还在生成，请稍候再点保存', 'Image still rendering, try again'));
+        return;
+      }
       await File(path).writeAsBytes(bytes);
       _ffi.save();
       _showMessage('${L.s('已保存：', 'Saved: ')}$path');
@@ -7873,8 +8041,11 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
     if (content == null) return null;
     final recorder = ui.PictureRecorder();
     final canvas = Canvas(recorder, Offset.zero & bounds.size);
-    canvas.translate(-bounds.left, -bounds.top);
+    // content 已由 bakeCollage 裁到原点：必须先画它，再平移坐标系去画
+    // 世界坐标的标注。先前版本把 drawImage 也放到 translate 之后，内容
+    // 被推出画布，导出/预览整张黑。
     canvas.drawImage(content, Offset.zero, Paint());
+    canvas.translate(-bounds.left, -bounds.top);
     for (final command in _visibleCommands) {
       drawCommand(canvas, command, backgroundImage: content);
     }
@@ -8345,6 +8516,19 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
     // 实时编辑中：编辑区内的双击归输入框选词，区外先提交再吞掉这一击。
     if (_swallowCanvasGesture(position)) return;
     if (currentTool != ScreenshotToolType.select) return;
+    // 工作台：双击框架 = 放大预览（画布聚焦该框架）；预览中双击任意
+    // 处退出（含邻框——避免"想退出却跳去预览邻框"的误跳）。
+    if (_collageSlots != null) {
+      final slotIndex = _collageSlotAt(position);
+      if (_loupeSlot >= 0) {
+        _exitLoupe();
+        return;
+      }
+      if (slotIndex != null) {
+        _focusCollageSlot(slotIndex);
+      }
+      return;
+    }
     final index = findManipulableCommandIndex(history, position);
     if (index == null) return;
     if (history[index].type != ScreenshotToolType.text) {
@@ -8882,23 +9066,23 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
       if (findManipulableCommandIndex(history, position) == null) {
         final index = _collageSlotAt(position);
         _collageSelected = index ?? -1;
-        if (index != null) {
-          // 一次拖图/移框 = 一条撤销记录（起点状态入栈）。
-          _pushCollageStep();
-          final rect = slots[index].rect;
-          final edge = math.max(8.0, rect.shortestSide * 0.12);
-          final inside =
-              rect.left + edge < position.dx &&
-              position.dx < rect.right - edge &&
-              rect.top + edge < position.dy &&
-              position.dy < rect.bottom - edge;
-          if (inside) {
-            // 框内中间 = 平移取景（放大后可挪动看到的内容）。
-            _collageDragSlot = slots[index];
-          } else {
-            // 按住边缘（手柄除外）= 拖动整个框架（带吸附）。
-            _collageMoveSlot = slots[index];
-          }
+        if (index == null) {
+          // 空白处拖动 = 平移视角（工作台里滚轮归框内图片缩放，看全局
+          // 靠这里）。
+          _collageViewDrag = true;
+          _touchCollage();
+          return;
+        }
+        // 一次拖图/移框 = 一条撤销记录（起点状态入栈）。
+        _pushCollageStep();
+        // 语义按模式二分，不再分边缘/中心（中心拖取景在 1× 时没有
+        // 余量，看起来就是"拖不动"）：
+        //  · 全景（未预览）：按住框架任何位置拖 = 移动整个框架
+        //  · 放大预览：按住框架任何位置拖 = 平移框内图片取景
+        if (_loupeSlot == index) {
+          _collageDragSlot = slots[index];
+        } else {
+          _collageMoveSlot = slots[index];
         }
         _touchCollage();
         return;
@@ -9002,23 +9186,17 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
       }
       final move = _collageMoveSlot;
       if (move != null) {
-        final world = _collageWorld ?? _worldSize;
-        final others = [
-          for (final slot in _collageSlots!)
-            if (slot != move) slot.rect,
-        ];
-        final tolerance =
-            10.0 / (_canvasDisplayScale <= 0 ? 1.0 : _canvasDisplayScale);
-        final moved = move.rect.shift(details.delta);
-        // 只挪框架：取景窗口原样跟着走（内容不变），吸附/夹取都在
-        // snapFrameRect 里完成。
-        move.rect = snapFrameRect(
-          moving: moved,
-          others: others,
-          world: world,
-          tolerance: tolerance,
-        );
+        // 只挪框架：取景窗口原样跟着走（内容不变）。
+        move.moveByWorld(details.delta);
         _touchCollage();
+        return;
+      }
+      if (_collageViewDrag) {
+        final viewport = _lastCanvasViewport;
+        if (viewport != null && !viewport.isEmpty) {
+          // pan 与 delta 同处世界单位（手势在 Transform 子空间）。
+          _panCanvas(_canvasPan + details.delta, viewport);
+        }
       }
       return;
     }
@@ -9090,6 +9268,7 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
     _collageResizeSlot = null;
     _collageResizeHandle = null;
     _collageResizeOrigin = null;
+    _collageViewDrag = false;
     _pendingEraseSegment = null;
     _eraseTail = null;
     final moving = _editingCommandIndex;
@@ -9117,6 +9296,7 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
       _collageResizeSlot = null;
       _collageResizeHandle = null;
       _collageResizeOrigin = null;
+      _collageViewDrag = false;
       return;
     }
     if (_ocrSelecting) {
