@@ -112,14 +112,32 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
   Offset? _textBgPanelOffset;
   bool _textBgPanelVisible = false;
   final List<DrawCommand> history = [];
-  final List<List<DrawCommand>> _undoSnapshots = [];
-  final List<List<DrawCommand>> _redoSnapshots = [];
+
+  /// 撤销快照 = 命令列表 + 底图字节引用 + 拼图工作台状态。普通编辑时
+  /// slots 为 null（字节按引用比较，未换图的快照零开销）；进入/退出
+  /// 工作台、工作台内每次拖图/缩放/调框都压一条——Ctrl+Z 能撤销拼图
+  /// 本身（回到拼图前的图与标注），也能撤销工作台内的每一步。
+  final List<_EditSnapshot> _undoSnapshots = [];
+  final List<_EditSnapshot> _redoSnapshots = [];
+
+  _EditSnapshot _snapshotNow() => (
+    commands: List<DrawCommand>.from(history),
+    bytes: _currentImageBytes,
+    slots: _collageSlots == null ? null : _slotStatesOf(_collageSlots!),
+    world: _collageWorld,
+  );
+
+  /// 槽的浅拷贝状态（图片按引用共享，不拷贝像素）。
+  static List<_CollageSlotState> _slotStatesOf(List<CollageSlot> slots) => [
+    for (final slot in slots)
+      (image: slot.image, rect: slot.rect, frame: slot.frame),
+  ];
 
   /// 撤销分组：翻译落画布会一次产生"蒙版+译文"两条命令 × 多个文字块，
   /// 分组期间不逐条压撤销快照，整组结束后压一条——一次撤销回退整个
   /// 翻译步骤。
   int _undoGroupDepth = 0;
-  List<DrawCommand>? _pendingGroupSnapshot;
+  _EditSnapshot? _pendingGroupSnapshot;
   int currentStep = -1;
   Rect? selectionRect;
   final TextEditingController _textController = TextEditingController();
@@ -571,6 +589,10 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
   @override
   void dispose() {
     HardwareKeyboard.instance.removeHandler(_handleKeyEvent);
+    for (final image in _collageOwnedImages) {
+      image.dispose();
+    }
+    _collageOwnedImages.clear();
     _scrollCaptureSubscription?.cancel();
     _editorCursorSub?.cancel();
     _editorCursorPosition.dispose();
@@ -698,6 +720,24 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
   /// 方向键也能平移（Shift 加速）。
   void _onCanvasScroll(PointerSignalEvent event, Size viewport) {
     if (event is! PointerScrollEvent) return;
+    // 工作台（光标工具）：滚轮直接缩放指针所在框架里的图片（不借
+    // Alt），锚点跟随；其它工具下滚轮回归画布缩放/平移。注意本 Listener
+    // 挂在 FittedBox 外侧，localPosition 是视口坐标，必须按 contain+zoom+pan
+    // 换算成世界坐标再命中/锚定。
+    if (_collageSlots != null && currentTool == ScreenshotToolType.select) {
+      final layout = _canvasLayout(_canvasZoom, viewport, _worldSize);
+      final c = (event.localPosition - layout.o) / layout.k;
+      final worldPoint = (c - _canvasPan) / _canvasZoom;
+      final index = _collageSlotAt(worldPoint);
+      if (index != null) {
+        _pushCollageStep();
+        final factor = event.scrollDelta.dy < 0 ? 1.15 : 1 / 1.15;
+        _collageSlots![index].zoomAt(worldPoint, factor);
+        _collageSelected = index;
+        _touchCollage();
+      }
+      return;
+    }
     final world = _worldSize;
     if (world.isEmpty || viewport.isEmpty) return;
     final k = HardwareKeyboard.instance;
@@ -810,6 +850,8 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
 
   /// 标注世界的尺寸 = 当前图像的像素尺寸；图像未解码时退回选区尺寸。
   Size get _worldSize {
+    final collage = _collageWorld;
+    if (_collageSlots != null && collage != null) return collage;
     final decoded = _decodedImage;
     if (decoded != null && decoded.width > 0 && decoded.height > 0) {
       return Size(decoded.width.toDouble(), decoded.height.toDouble());
@@ -817,6 +859,88 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
     final selection = selectionRect;
     if (selection != null && !selection.size.isEmpty) return selection.size;
     return const Size(1280, 800);
+  }
+
+  /// 快照回滚时若底图字节换了引用（跨越一次拼图完成/打开图片），连底图
+  /// 一起还原并重新解码（换图自带重置缩放与后台重识别）。
+  void _restoreSnapshotImage(_EditSnapshot snapshot) {
+    final slots = snapshot.slots;
+    if (slots != null) {
+      // 回到拼图工作台：重建槽（图片引用共享，不拷贝像素）。
+      _restoreCollageSlots(slots, snapshot.world ?? _worldSize);
+      return;
+    }
+    if (_collageSlots != null) {
+      // 从工作台快照回滚到普通编辑：先丢弃工作台（图片引用归还）。
+      _discardCollageSlots();
+    }
+    if (identical(snapshot.bytes, _currentImageBytes)) return;
+    if (snapshot.bytes.isEmpty) return;
+    setState(() {
+      _currentImageBytes = snapshot.bytes;
+      _imageWidget = _buildImageWidget();
+      _frozenBackdrop = _buildFrozenBackdrop();
+    });
+    unawaited(_decodeCapturedImage(snapshot.bytes));
+  }
+
+  /// 回到拼图工作台快照：重建槽对象（图片引用共享，绝不在这 dispose——
+  /// 生命周期由 [_collageOwnedImages] 统一管，栈里不再有人引用时才回收）。
+  void _restoreCollageSlots(List<_CollageSlotState> states, Size world) {
+    // 工作台模式没有解码底图（撤销回退可能从"已完成"态回来）：释放
+    // 合成图，模糊蒙版等取背景的命令才不会拿旧合成图当素材。
+    _decodedImage?.dispose();
+    _decodedImage = null;
+    final slots = <CollageSlot>[];
+    for (final state in states) {
+      final slot = CollageSlot(image: state.image, rect: state.rect)
+        ..frame = state.frame;
+      slots.add(slot);
+    }
+    setState(() {
+      _collageSlots = slots;
+      _collageWorld = world;
+      _collageSelected = -1;
+      _collageDragSlot = null;
+      _collageMoveSlot = null;
+      _collageResizeSlot = null;
+      _collageResizeHandle = null;
+      _collageResizeOrigin = null;
+      _collageVersion++;
+      _imageWidget = _buildCollageContentWidget();
+    });
+  }
+
+  /// 丢弃当前工作台（回滚到拼图前的快照）：槽对象交还 GC，图片进
+  /// [_collageImageGarbage] 等引用归零统一 dispose。
+  void _discardCollageSlots() {
+    final slots = _collageSlots;
+    if (slots == null) return;
+    setState(() {
+      _collageSlots = null;
+      _collageWorld = null;
+      _collageSelected = -1;
+      _collageDragSlot = null;
+      _collageMoveSlot = null;
+      _collageResizeSlot = null;
+      _collageResizeHandle = null;
+      _collageResizeOrigin = null;
+    });
+  }
+
+  /// 图片回收：不在工作台、且撤销/重做栈里再没有任何快照引用槽状态时，
+  /// 统一 dispose 工作台图片（快照间共享引用，绝不能提前释放）。
+  void _pruneCollageImages() {
+    if (_collageSlots != null) return;
+    final referenced =
+        _undoSnapshots.any((snapshot) => snapshot.slots != null) ||
+        _redoSnapshots.any((snapshot) => snapshot.slots != null);
+    if (referenced) return;
+    if (_collageOwnedImages.isEmpty) return;
+    for (final image in _collageOwnedImages) {
+      image.dispose();
+    }
+    _collageOwnedImages.clear();
   }
 
   /// 全局键盘处理：注册在 HardwareKeyboard 上，不依赖焦点树——置顶/
@@ -1230,6 +1354,27 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
                                           // 但在 RepaintBoundary 之外，保存和置顶
                                           // 快照都不会带上它。只在光标模式吃指针
                                           // 事件，其它工具正常画图不受影响。
+                                          // 拼图工作台导引层：框架边框 +
+                                          // 选中高亮。挂在 RepaintBoundary
+                                          // 之外，保存/复制/置顶都不会带上。
+                                          if (_collageSlots != null)
+                                            Positioned.fill(
+                                              key: const ValueKey(
+                                                'collage-guides',
+                                              ),
+                                              child: IgnorePointer(
+                                                child: CustomPaint(
+                                                  painter: CollageGuidePainter(
+                                                    slots: _collageSlots!,
+                                                    selectedIndex:
+                                                        _collageSelected,
+                                                    version: _collageVersion,
+                                                    handleSize:
+                                                        _resizeHandleWorldSize,
+                                                  ),
+                                                ),
+                                              ),
+                                            ),
                                           if (_ocrBlocks.isNotEmpty)
                                             Positioned.fill(
                                               key: const ValueKey(
@@ -1349,6 +1494,8 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
                   _buildFilePanelOverlay(dockShown: showToolbar),
                   // 更多功能面板（拼图入口 + 拆分导出）。
                   _buildMorePanelOverlay(dockShown: showToolbar),
+                  // 保存面板旁的只读预览卡片。
+                  _buildSavePreviewOverlay(dockShown: showToolbar),
                   // 本地翻译模型管理：贴着设置面板弹出的三级浮层。
                   _buildModelManagerOverlay(dockShown: showToolbar),
                   // 在线翻译 API 配置：同款式贴设置面板的三级浮层。
@@ -1457,7 +1604,7 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
 
   void _pushCommand(DrawCommand command) {
     if (_undoGroupDepth == 0) {
-      _undoSnapshots.add(List<DrawCommand>.from(history));
+      _undoSnapshots.add(_snapshotNow());
       _redoSnapshots.clear();
     }
     if (currentStep + 1 < history.length) {
@@ -1474,7 +1621,7 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
   void _beginUndoGroup() {
     _undoGroupDepth++;
     if (_undoGroupDepth == 1) {
-      _pendingGroupSnapshot = List<DrawCommand>.from(history);
+      _pendingGroupSnapshot = _snapshotNow();
     }
   }
 
@@ -1484,7 +1631,7 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
     if (_undoGroupDepth == 0) {
       final snapshot = _pendingGroupSnapshot;
       _pendingGroupSnapshot = null;
-      if (snapshot != null && history.length > snapshot.length) {
+      if (snapshot != null && history.length > snapshot.commands.length) {
         _undoSnapshots.add(snapshot);
         _redoSnapshots.clear();
       }
@@ -1493,7 +1640,7 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
 
   void _eraseCommandAt(int index) {
     if (index < 0 || index >= history.length) return;
-    _undoSnapshots.add(List<DrawCommand>.from(history));
+    _undoSnapshots.add(_snapshotNow());
     _redoSnapshots.clear();
     history.removeAt(index);
     currentStep = history.length - 1;
@@ -3258,7 +3405,7 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
   void _mutateSelected(DrawCommand Function(DrawCommand) mutate) {
     final index = _selectedCommandIndex;
     if (index == null || index < 0 || index >= history.length) return;
-    _undoSnapshots.add(List<DrawCommand>.from(history));
+    _undoSnapshots.add(_snapshotNow());
     _redoSnapshots.clear();
     setState(() {
       var next = mutate(history[index]);
@@ -3446,15 +3593,17 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
 
   void _undo() {
     if (_undoSnapshots.isNotEmpty) {
+      final previous = _undoSnapshots.removeLast();
       setState(() {
-        _redoSnapshots.add(List<DrawCommand>.from(history));
-        final previous = _undoSnapshots.removeLast();
+        _redoSnapshots.add(_snapshotNow());
         history
           ..clear()
-          ..addAll(previous);
+          ..addAll(previous.commands);
         currentStep = history.length - 1;
         _selectedCommandIndex = null;
       });
+      _restoreSnapshotImage(previous);
+      _pruneCollageImages();
       _invalidateCommands();
       _ffi.undo();
       return;
@@ -3471,15 +3620,17 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
 
   void _redo() {
     if (_redoSnapshots.isNotEmpty) {
+      final next = _redoSnapshots.removeLast();
       setState(() {
-        _undoSnapshots.add(List<DrawCommand>.from(history));
-        final next = _redoSnapshots.removeLast();
+        _undoSnapshots.add(_snapshotNow());
         history
           ..clear()
-          ..addAll(next);
+          ..addAll(next.commands);
         currentStep = history.length - 1;
         _selectedCommandIndex = null;
       });
+      _restoreSnapshotImage(next);
+      _pruneCollageImages();
       _invalidateCommands();
       _ffi.redo();
       return;
@@ -4164,6 +4315,28 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
   /// 文件面板第三种形态：拼图多选（勾选 N 张 → 等比网格合成新底图）。
   bool _filePanelCollage = false;
 
+  /// 拼图工作台：非空 = 工作台模式。每个槽 = 一个框架（世界坐标矩形）
+  /// + 框内图片（可拖拽平移、滚轮缩放展示内容）。画布保存/复制/置顶
+  /// 截的就是内容层；导引框线挂在 RepaintBoundary 外不会烙进图。
+  /// 退出（Esc / 完成按钮）把内容+标注烘焙成新底图回到普通编辑。
+  List<CollageSlot>? _collageSlots;
+  Size? _collageWorld;
+  int _collageSelected = -1;
+  int _collageVersion = 0; // 槽内容原地改动后递增，驱动导引层重绘
+  CollageSlot? _collageDragSlot;
+
+  /// 光标模式下按住框架边缘（非手柄、非内部）拖动 = 移动整个框架
+  /// （平铺式吸附）；框内中间拖动 = 平移取景。
+  CollageSlot? _collageMoveSlot;
+  CollageSlot? _collageResizeSlot;
+
+  /// 工作台图片所有权：进入时登记，撤销/重做栈里再无快照引用时统一
+  /// dispose（快照间共享引用，绝不能提前释放）。
+  final Set<ui.Image> _collageOwnedImages = {};
+
+  ResizeHandle? _collageResizeHandle;
+  Rect? _collageResizeOrigin;
+
   /// 「更多功能」面板：拼图与拆分导出收进一个入口（置顶按钮旁）。
   bool _morePanelOpen = false;
   bool _morePanelVisible = false;
@@ -4180,6 +4353,13 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
   Offset? _filePanelOffset;
   bool _filePanelVisible = false;
   Uint8List? _filePanelPendingBytes;
+
+  /// 保存面板旁的只读预览卡片：贴在面板左/右侧（哪边放得下贴哪边），
+  /// 不可点击/拖动/放大——只是"你要存的就是这张"的确认。
+  Size _savePreviewSize = Size.zero;
+  Offset? _savePreviewOffset;
+  bool _savePreviewVisible = false;
+  final GlobalKey _savePreviewKey = GlobalKey();
 
   /// 本地翻译模型管理：贴着设置面板弹出的三级浮层。
   bool _modelManagerOpen = false;
@@ -4438,7 +4618,14 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
   Future<void> _saveFilePanel() async {
     final png = await _renderCanvas();
     if (png == null || !mounted) return;
+    // 预览卡片按图片宽高比 contain 到 200×260 上限；读不到尺寸就退成
+    // 正方形，不拦保存流程。
+    final pngSize = await _pngSizeOf(png);
+    if (!mounted) return;
+    final preview = _previewCardSize(pngSize?.$1 ?? 4, pngSize?.$2 ?? 3);
     setState(() {
+      _savePreviewSize = preview;
+      _savePreviewOffset = null;
       _filePanelSave = true;
       _filePanelCollage = false;
       _filePanelPendingBytes = png;
@@ -4449,57 +4636,211 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
     });
   }
 
-  /// 拼图多选确认：解码各图 → 等比网格合成（列数自动 ≈ 正方形布局）→
-  /// 合成图作为新底图进入编辑（压撤销快照，可 Ctrl+Z 回退）。
+  /// 拼图多选确认：当前画布（含标注，烘焙成一张图）排第一帧，其后是
+  /// 勾选的各图 → 进拼图工作台。
   Future<void> _onCollageConfirmed(List<String> paths) async {
     setState(() => _filePanelOpen = false);
-    final images = <ui.Image>[];
+    final added = <ui.Image>[];
     for (final path in paths) {
       try {
         final bytes = await File(path).readAsBytes();
         final codec = await ui.instantiateImageCodec(bytes);
         final frame = await codec.getNextFrame();
         codec.dispose();
-        images.add(frame.image);
+        added.add(frame.image);
       } on Object {
         // 单张坏图不拦整批：跳过继续。
         continue;
       }
     }
-    if (images.isEmpty) {
+    if (added.isEmpty) {
       _showMessage(L.s('所选图片都读不出来', 'None of the images could be read'));
       return;
     }
-    final collage = await composeGridCollage(images);
-    for (final image in images) {
-      image.dispose();
-    }
-    if (collage == null || !mounted) return;
-    final data = await imageToPng(collage);
-    collage.dispose();
-    if (data == null || !mounted) return;
-    // 与「打开图片」同一语义：换底图即新画布，清空标注与撤销栈
-    // （现状 main 的 undo 只回滚命令不回滚底图，拼图不越这个界）。
-    _undoSnapshots.clear();
+    final base = await _bakeCurrentCanvas();
+    final images = <ui.Image>[if (base != null) base, ...added];
+    final layout = collageLayout(images);
+    final slots = <CollageSlot>[
+      for (var i = 0; i < images.length; i++)
+        CollageSlot(image: images[i], rect: layout.rects[i]),
+    ];
+    _abortLiveTextEdit();
+    // 拼图前状态压一条：Ctrl+Z 直接退出工作台回到原图与原标注。
+    _undoSnapshots.add(_snapshotNow());
     _redoSnapshots.clear();
+    _pruneCollageImages();
+    _collageOwnedImages.addAll(slots.map((slot) => slot.image));
+    _decodedImage?.dispose();
+    _decodedImage = null;
+    _rgbaPixels = null;
+    _rgbaWidth = 0;
+    _rgbaHeight = 0;
     setState(() {
+      _collageSlots = slots;
+      _collageWorld = layout.world;
+      _collageSelected = -1;
+      _collageVersion = 0;
+      // 工作台是独立画布：标注历史清空重画；撤销栈保留"拼图前"那一条
+      // （上面刚压入），Ctrl+Z 可退出工作台。原图的 OCR 块/选区失效，
+      // 退出后对新图重新识别。
       history.clear();
       currentStep = -1;
       _selectedCommandIndex = null;
+      _ocrBlocks = const [];
+      _ocrSelRanges.clear();
+      _hasTextSelection = false;
+      _ocrGeneration++;
       _filePanelCollage = false;
-      _currentImageBytes = data;
-      _imageWidget = _buildImageWidget();
-      _frozenBackdrop = _buildFrozenBackdrop();
+      _currentImageBytes = Uint8List(0);
+      _imageWidget = _buildCollageContentWidget();
+      _canvasZoom = 1.0;
+      _canvasPan = Offset.zero;
     });
     _invalidateCommands();
-    await _decodeCapturedImage(data);
     _showMessage(
       L.pick(
         context,
-        '已拼图 ${paths.length} 张，可继续标注',
-        'Collaged ${paths.length} images — keep annotating',
+        '拼图工作台：拖动框内移动图片，滚轮缩放，拖手柄调框；保存/复制按当前帧出图，Ctrl+Z 退出拼图',
+        'Collage: drag to pan, scroll to zoom, handles resize frames; save/copy export the current view, Ctrl+Z exits',
       ),
     );
+  }
+
+  /// 当前画布（底图 + 已提交标注）烘焙成原生分辨率的一张图；无底图返回
+  /// null。进工作台时把编辑器里现图作为第一帧。
+  Future<ui.Image?> _bakeCurrentCanvas() async {
+    final decoded = _decodedImage;
+    if (decoded == null || _collageSlots != null) return null;
+    final size = Size(decoded.width.toDouble(), decoded.height.toDouble());
+    final recorder = ui.PictureRecorder();
+    final canvas = Canvas(recorder, Offset.zero & size);
+    canvas.drawImage(decoded, Offset.zero, Paint());
+    for (final command in _visibleCommands) {
+      drawCommand(canvas, command, backgroundImage: decoded);
+    }
+    final picture = recorder.endRecording();
+    final image = await picture.toImage(
+      size.width.round(),
+      size.height.round(),
+    );
+    picture.dispose();
+    return image;
+  }
+
+  /// 工作台内容层：一个 CustomPaint 画全部槽（clip 框架 + 按 pan/zoom
+  /// 绘制图片）。挂在 _imageWidget 位置（RepaintBoundary 内），保存/复制/
+  /// 置顶截到的就是拼好的内容。
+  Widget _buildCollageContentWidget() {
+    return CustomPaint(
+      painter: CollageContentPainter(
+        slots: _collageSlots ?? const [],
+        version: _collageVersion,
+      ),
+      size: Size.infinite,
+    );
+  }
+
+  /// 工作台内的一次动作（拖图/缩放/调框）开始前压当前状态：撤销栈在
+  /// 工作台模式下就是"槽状态栈"，_undo/_redo 走同一套快照恢复。
+  void _pushCollageStep() {
+    _undoSnapshots.add(_snapshotNow());
+    _redoSnapshots.clear();
+  }
+
+  /// 槽的 pan/zoom 变了：递增版本并重建内容层 widget。
+  void _touchCollage() {
+    _collageVersion++;
+    setState(() => _imageWidget = _buildCollageContentWidget());
+  }
+
+  /// 画布内容在 [_canvasKey] 盒子里实际占据的矩形。工作台模式下 boundary
+  /// 尺寸就是 world（无 contain 留白），整幅即内容；普通模式按底图在
+  /// contain 布局里的实际矩形裁掉四周留白。
+  Rect _canvasContentRect(Size boxSize) {
+    if (_collageSlots != null) return Offset.zero & boxSize;
+    final decoded = _decodedImage;
+    if (decoded == null) return Offset.zero & boxSize;
+    return displayedImageRect(
+      boxSize,
+      decoded.width.toDouble(),
+      decoded.height.toDouble(),
+    );
+  }
+
+  /// 选中框架的 8 向手柄命中（世界坐标，容差按屏幕恒定手柄尺寸）。
+  ResizeHandle? _collageHandleAt(Offset world) {
+    final slots = _collageSlots;
+    if (slots == null ||
+        _collageSelected < 0 ||
+        _collageSelected >= slots.length) {
+      return null;
+    }
+    final rect = slots[_collageSelected].rect;
+    final tol = _resizeHandleWorldSize;
+    final points = <(ResizeHandle, Offset)>[
+      (ResizeHandle.topLeft, rect.topLeft),
+      (ResizeHandle.top, rect.topCenter),
+      (ResizeHandle.topRight, rect.topRight),
+      (ResizeHandle.right, rect.centerRight),
+      (ResizeHandle.bottomRight, rect.bottomRight),
+      (ResizeHandle.bottom, rect.bottomCenter),
+      (ResizeHandle.bottomLeft, rect.bottomLeft),
+      (ResizeHandle.left, rect.centerLeft),
+    ];
+    for (final (handle, point) in points) {
+      if ((world - point).distance <= tol) return handle;
+    }
+    return null;
+  }
+
+  /// 按手柄把选中框架改大小（世界坐标），夹最小边长；改完重夹内容平移。
+  void _collageResizeTo(Offset world) {
+    final slot = _collageResizeSlot;
+    final handle = _collageResizeHandle;
+    final origin = _collageResizeOrigin;
+    if (slot == null || handle == null || origin == null) return;
+    var left = origin.left;
+    var top = origin.top;
+    var right = origin.right;
+    var bottom = origin.bottom;
+    if (handle == ResizeHandle.left ||
+        handle == ResizeHandle.topLeft ||
+        handle == ResizeHandle.bottomLeft) {
+      left = math.min(world.dx, origin.right - CollageSlot.minSide);
+    }
+    if (handle == ResizeHandle.right ||
+        handle == ResizeHandle.topRight ||
+        handle == ResizeHandle.bottomRight) {
+      right = math.max(world.dx, origin.left + CollageSlot.minSide);
+    }
+    if (handle == ResizeHandle.top ||
+        handle == ResizeHandle.topLeft ||
+        handle == ResizeHandle.topRight) {
+      top = math.min(world.dy, origin.bottom - CollageSlot.minSide);
+    }
+    if (handle == ResizeHandle.bottom ||
+        handle == ResizeHandle.bottomLeft ||
+        handle == ResizeHandle.bottomRight) {
+      bottom = math.max(world.dy, origin.top + CollageSlot.minSide);
+    }
+    slot.rect = Rect.fromLTRB(left, top, right, bottom);
+    slot.reframeAfterResize();
+    _touchCollage();
+  }
+
+  /// 指针落在哪个框架（世界坐标）：重叠时取后画的（上层）。
+  int? _collageSlotAt(Offset world) {
+    final slots = _collageSlots;
+    if (slots == null) return null;
+    for (var i = slots.length - 1; i >= 0; i--) {
+      if (slots[i].rect.contains(world)) return i;
+    }
+    return null;
+  }
+
+  /// 工作台里丢弃进行中的实时文字编辑（换画布语义，草稿作废）。
+  void _abortLiveTextEdit() {
+    if (_showTextDialog) _hideTextDialog();
   }
 
   /// 拆分导出：world 尺寸现场全分辨率重合成（底图+标注，烙进每块），
@@ -4576,6 +4917,12 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
     } else {
       final bytes = await File(path).readAsBytes();
       if (!mounted) return;
+      // 打开 = 新画布：撤销栈必须清空——快照连着底图，留着旧快照
+      // Ctrl+Z 会跳回上一张图。工作台进行中打开同样直接丢弃。
+      _undoSnapshots.clear();
+      _redoSnapshots.clear();
+      _discardCollageSlots();
+      _pruneCollageImages();
       setState(() {
         _currentImageBytes = bytes;
         _imageWidget = _buildImageWidget();
@@ -4651,98 +4998,107 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
       );
     }
 
-    return Container(
-      key: _morePanelKey,
-      width: 258,
-      padding: const EdgeInsets.fromLTRB(12, 10, 12, 10),
-      decoration: BoxDecoration(
-        color: Colors.black.withValues(alpha: 0.82),
-        borderRadius: BorderRadius.circular(10),
-        boxShadow: const [
-          BoxShadow(
-            color: Colors.black38,
-            blurRadius: 10,
-            offset: Offset(0, 2),
-          ),
-        ],
-      ),
-      child: Material(
-        type: MaterialType.transparency,
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Text(
-              L.pick(context, '更多功能', 'More features'),
-              style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600),
-            ),
-            const SizedBox(height: 6),
-            SizedBox(
-              width: 234,
-              child: OutlinedButton.icon(
-                onPressed: _openCollagePanel,
-                icon: const Icon(Icons.grid_view_rounded, size: 16),
-                label: Text(
-                  L.pick(context, '拼图：多选网格合成', 'Collage: grid compose'),
-                  style: const TextStyle(fontSize: 12),
-                ),
-              ),
-            ),
-            const SizedBox(height: 6),
-            Text(
-              L.pick(context, '拆分导出', 'Split export'),
-              style: const TextStyle(fontSize: 12, color: Colors.white70),
-            ),
-            Row(
-              children: [
-                TextButton(
-                  onPressed: () => setState(() {
-                    _splitRows = 2;
-                    _splitCols = 2;
-                  }),
-                  child: Text(L.pick(context, '四宫格', '2×2')),
-                ),
-                TextButton(
-                  onPressed: () => setState(() {
-                    _splitRows = 3;
-                    _splitCols = 3;
-                  }),
-                  child: Text(L.pick(context, '九宫格', '3×3')),
-                ),
-              ],
-            ),
-            stepper(
-              L.pick(context, '行', 'Rows'),
-              _splitRows,
-              (v) => setState(() => _splitRows = v.clamp(1, 9)),
-            ),
-            stepper(
-              L.pick(context, '列', 'Cols'),
-              _splitCols,
-              (v) => setState(() => _splitCols = v.clamp(1, 9)),
-            ),
-            stepper(
-              L.pick(context, '边距', 'Gap'),
-              _splitGap,
-              (v) => setState(() => _splitGap = v.clamp(0, 64)),
-            ),
-            Text(
-              L.pick(
-                context,
-                '标注烙进每块，导出 $_splitRows×$_splitCols=${_splitRows * _splitCols} 张到截图目录',
-                'Annotations baked in; exports $_splitRows×$_splitCols=${_splitRows * _splitCols} PNGs',
-              ),
-              style: const TextStyle(fontSize: 11, color: Colors.white54),
-            ),
-            const SizedBox(height: 4),
-            Align(
-              alignment: Alignment.centerRight,
-              child: FilledButton(
-                onPressed: _confirmSplitExport,
-                child: Text(L.pick(context, '导出', 'Export')),
-              ),
+    // 深色主题包裹：OutlinedButton / TextButton / FilledButton 的文字色
+    // 从 Theme 继承，宿主是浅色主题时按钮黑字压黑底完全看不清（与调色板/
+    // 文件面板同款处理）。
+    return Theme(
+      data: ThemeData.dark(useMaterial3: true),
+      child: Container(
+        key: _morePanelKey,
+        width: 258,
+        padding: const EdgeInsets.fromLTRB(12, 10, 12, 10),
+        decoration: BoxDecoration(
+          color: Colors.black.withValues(alpha: 0.82),
+          borderRadius: BorderRadius.circular(10),
+          boxShadow: const [
+            BoxShadow(
+              color: Colors.black38,
+              blurRadius: 10,
+              offset: Offset(0, 2),
             ),
           ],
+        ),
+        child: Material(
+          type: MaterialType.transparency,
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                L.pick(context, '更多功能', 'More features'),
+                style: const TextStyle(
+                  fontSize: 13,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+              const SizedBox(height: 6),
+              SizedBox(
+                width: 234,
+                child: OutlinedButton.icon(
+                  onPressed: _openCollagePanel,
+                  icon: const Icon(Icons.grid_view_rounded, size: 16),
+                  label: Text(
+                    L.pick(context, '拼图：多选网格合成', 'Collage: grid compose'),
+                    style: const TextStyle(fontSize: 12),
+                  ),
+                ),
+              ),
+              const SizedBox(height: 6),
+              Text(
+                L.pick(context, '拆分导出', 'Split export'),
+                style: const TextStyle(fontSize: 12, color: Colors.white70),
+              ),
+              Row(
+                children: [
+                  TextButton(
+                    onPressed: () => setState(() {
+                      _splitRows = 2;
+                      _splitCols = 2;
+                    }),
+                    child: Text(L.pick(context, '四宫格', '2×2')),
+                  ),
+                  TextButton(
+                    onPressed: () => setState(() {
+                      _splitRows = 3;
+                      _splitCols = 3;
+                    }),
+                    child: Text(L.pick(context, '九宫格', '3×3')),
+                  ),
+                ],
+              ),
+              stepper(
+                L.pick(context, '行', 'Rows'),
+                _splitRows,
+                (v) => setState(() => _splitRows = v.clamp(1, 9)),
+              ),
+              stepper(
+                L.pick(context, '列', 'Cols'),
+                _splitCols,
+                (v) => setState(() => _splitCols = v.clamp(1, 9)),
+              ),
+              stepper(
+                L.pick(context, '边距', 'Gap'),
+                _splitGap,
+                (v) => setState(() => _splitGap = v.clamp(0, 64)),
+              ),
+              Text(
+                L.pick(
+                  context,
+                  '标注烙进每块，导出 $_splitRows×$_splitCols=${_splitRows * _splitCols} 张到截图目录',
+                  'Annotations baked in; exports $_splitRows×$_splitCols=${_splitRows * _splitCols} PNGs',
+                ),
+                style: const TextStyle(fontSize: 11, color: Colors.white54),
+              ),
+              const SizedBox(height: 4),
+              Align(
+                alignment: Alignment.centerRight,
+                child: FilledButton(
+                  onPressed: _confirmSplitExport,
+                  child: Text(L.pick(context, '导出', 'Export')),
+                ),
+              ),
+            ],
+          ),
         ),
       ),
     );
@@ -4829,6 +5185,66 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
     if (_morePanelOffset != offset) {
       setState(() => _morePanelOffset = offset);
     }
+  }
+
+  /// 预览卡片显示尺寸：contain 进 200×260 上限。
+  static Size _previewCardSize(int w, int h) {
+    const maxW = 200.0;
+    const maxH = 260.0;
+    if (w <= 0 || h <= 0) return const Size(maxW, maxW * 0.75);
+    final scale = math.min(1.0, math.min(maxW / w, maxH / h));
+    return Size((w * scale).roundToDouble(), (h * scale).roundToDouble());
+  }
+
+  /// 保存预览浮层：纯展示（IgnorePointer），随保存面板同开同关。
+  Widget _buildSavePreviewOverlay({required bool dockShown}) {
+    final visible =
+        dockShown &&
+        _filePanelOpen &&
+        _filePanelSave &&
+        _filePanelPendingBytes != null;
+    if (_savePreviewVisible != visible) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted && _savePreviewVisible != visible) {
+          setState(() => _savePreviewVisible = visible);
+        }
+      });
+    }
+    if (!_savePreviewVisible || _savePreviewOffset == null) {
+      return const SizedBox.shrink();
+    }
+    return Positioned(
+      left: _savePreviewOffset!.dx,
+      top: _savePreviewOffset!.dy,
+      child: IgnorePointer(
+        child: Container(
+          key: _savePreviewKey,
+          width: _savePreviewSize.width,
+          height: _savePreviewSize.height,
+          decoration: BoxDecoration(
+            color: Colors.black.withValues(alpha: 0.82),
+            borderRadius: BorderRadius.circular(10),
+            border: Border.all(color: Colors.white24),
+            boxShadow: const [
+              BoxShadow(
+                color: Colors.black38,
+                blurRadius: 10,
+                offset: Offset(0, 2),
+              ),
+            ],
+          ),
+          padding: const EdgeInsets.all(6),
+          child: ClipRRect(
+            borderRadius: BorderRadius.circular(6),
+            child: Image.memory(
+              _filePanelPendingBytes!,
+              fit: BoxFit.fill,
+              filterQuality: FilterQuality.medium,
+            ),
+          ),
+        ),
+      ),
+    );
   }
 
   Widget _buildFilePanel() {
@@ -4934,6 +5350,43 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
         _filePanelOffset = next;
         _filePanelVisible = true;
       });
+    }
+    _updateSavePreviewPlacement(next, panelSize, window);
+  }
+
+  /// 预览卡片定位：贴在保存面板左/右侧（垂直居中于面板），哪边放得下
+  /// 贴哪边——两侧都放不下时不显示（不硬挤，观感优先）。非保存模式
+  /// （打开/拼图面板）自动隐藏。
+  void _updateSavePreviewPlacement(Offset panel, Size panelSize, Size window) {
+    if (!_filePanelSave || _filePanelPendingBytes == null) {
+      if (_savePreviewOffset != null) {
+        setState(() => _savePreviewOffset = null);
+      }
+      return;
+    }
+    const gap = 8.0;
+    final pw = _savePreviewSize.width;
+    final ph = _savePreviewSize.height;
+    final centerY = panel.dy + (panelSize.height - ph) / 2;
+    final top = centerY
+        .clamp(8.0, math.max(8.0, window.height - ph - 8))
+        .toDouble();
+    final rightSpace = window.width - (panel.dx + panelSize.width) - gap;
+    final leftSpace = panel.dx - gap;
+    double? left;
+    if (rightSpace >= pw + 8) {
+      left = panel.dx + panelSize.width + gap;
+    } else if (leftSpace >= pw + 8) {
+      left = panel.dx - gap - pw;
+    }
+    final next = left == null ? null : Offset(left, top);
+    final changed =
+        (_savePreviewOffset == null) != (next == null) ||
+        (next != null &&
+            _savePreviewOffset != null &&
+            (next - _savePreviewOffset!).distance > 0.5);
+    if (changed) {
+      setState(() => _savePreviewOffset = next);
     }
   }
 
@@ -6384,11 +6837,9 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
     final box = _canvasKey.currentContext?.findRenderObject() as RenderBox?;
     final decoded = _decodedImage;
     if (box == null || !box.hasSize || decoded == null) return;
-    final imageRect = displayedImageRect(
-      box.size,
-      decoded.width.toDouble(),
-      decoded.height.toDouble(),
-    );
+    // 工作台阶段底图未合成，OCR 结果无落点（退出时对新图重新识别）。
+    if (_collageSlots != null) return;
+    final imageRect = _canvasContentRect(box.size);
     // 图片像素坐标 → 画布坐标的缩放比。
     final scaleX = imageRect.width / decoded.width;
     final scaleY = imageRect.height / decoded.height;
@@ -7056,11 +7507,13 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
       );
       return;
     }
-    final imageRect = displayedImageRect(
-      box.size,
-      decoded.width.toDouble(),
-      decoded.height.toDouble(),
-    );
+    if (_collageSlots != null) {
+      _showMessage(
+        L.s('拼图工作台请先完成合成再翻译', 'Finish the collage before translating'),
+      );
+      return;
+    }
+    final imageRect = _canvasContentRect(box.size);
     // 图片像素坐标 → 画布坐标的缩放比。
     final scaleX = imageRect.width / decoded.width;
     final scaleY = imageRect.height / decoded.height;
@@ -7394,12 +7847,46 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
   }
 
   Future<Uint8List?> _renderCanvas() async {
+    // 拼图工作台：按当前帧（各槽此刻的框架/平移/缩放 + 标注）以 world
+    // 原生分辨率合成——屏幕截屏会被 FittedBox 缩小，大图拼出来糊。
+    if (_collageSlots != null) return _renderCollageCanvas();
     final boundary =
         _canvasKey.currentContext?.findRenderObject() as RenderRepaintBoundary?;
     if (boundary == null) return null;
     final image = await boundary.toImage(pixelRatio: 1);
     final data = await image.toByteData(format: ui.ImageByteFormat.png);
     image.dispose();
+    return data?.buffer.asUint8List();
+  }
+
+  /// 工作台当前帧的原生分辨率合成：bakeCollage（背景+各槽 clip 绘制）
+  /// 打底，再重放标注命令（模糊蒙版取合成图当背景素材）。
+  Future<Uint8List?> _renderCollageCanvas() async {
+    final slots = _collageSlots;
+    final world = _collageWorld;
+    if (slots == null || world == null) return null;
+    // 只出所有框架的整体包围盒：框外的留白（含透明）不烙进来，也不再
+    // 填白底强制整块 world 长方形出图。标注命令同样裁进这块。
+    final bounds = collageBounds(slots);
+    if (bounds == null || bounds.isEmpty) return null;
+    final content = await bakeCollage(slots, world, crop: bounds);
+    if (content == null) return null;
+    final recorder = ui.PictureRecorder();
+    final canvas = Canvas(recorder, Offset.zero & bounds.size);
+    canvas.translate(-bounds.left, -bounds.top);
+    canvas.drawImage(content, Offset.zero, Paint());
+    for (final command in _visibleCommands) {
+      drawCommand(canvas, command, backgroundImage: content);
+    }
+    final picture = recorder.endRecording();
+    final merged = await picture.toImage(
+      bounds.width.round(),
+      bounds.height.round(),
+    );
+    picture.dispose();
+    content.dispose();
+    final data = await merged.toByteData(format: ui.ImageByteFormat.png);
+    merged.dispose();
     return data?.buffer.asUint8List();
   }
 
@@ -7422,16 +7909,14 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
   /// contain 居中，留白和选区边框会烙进 PNG），只保留图像 + 标注。
   Future<Uint8List?> _renderPinSnapshot() async {
     final png = await _renderCanvas();
+    // 工作台：_renderCanvas 已是 world 原生分辨率的内容图，无留白可裁。
+    if (_collageSlots != null) return png;
     final box = _canvasKey.currentContext?.findRenderObject() as RenderBox?;
     final decoded = _decodedImage;
     if (png == null || box == null || !box.hasSize || decoded == null) {
       return png;
     }
-    final imageRect = displayedImageRect(
-      box.size,
-      decoded.width.toDouble(),
-      decoded.height.toDouble(),
-    );
+    final imageRect = _canvasContentRect(box.size);
     if (imageRect.width < 1 || imageRect.height < 1) return png;
 
     final codec = await ui.instantiateImageCodec(png);
@@ -7474,11 +7959,7 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
     final box = _canvasKey.currentContext?.findRenderObject() as RenderBox?;
     final decoded = _decodedImage;
     if (box == null || !box.hasSize || decoded == null || !mounted) return;
-    final imageRect = displayedImageRect(
-      box.size,
-      decoded.width.toDouble(),
-      decoded.height.toDouble(),
-    );
+    final imageRect = _canvasContentRect(box.size);
     if (imageRect.width < 8 || imageRect.height < 8) return;
     final region = imageRect.shift(box.localToGlobal(Offset.zero));
     _closeEditor();
@@ -7850,7 +8331,7 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
           result.painter.height,
         );
     setState(() {
-      _undoSnapshots.add(List<DrawCommand>.from(history));
+      _undoSnapshots.add(_snapshotNow());
       _redoSnapshots.clear();
       // strokeWidth（基准字号）保留原值：框内自适应由渲染层每次现算，
       // 内容改短后字号能回弹；回写缩小值会把它永久固化。
@@ -7983,7 +8464,7 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
     if (!_showTextDialog || index == null || index >= history.length) {
       return false;
     }
-    _undoSnapshots.add(List<DrawCommand>.from(history));
+    _undoSnapshots.add(_snapshotNow());
     _redoSnapshots.clear();
     var next = mutate(history[index]);
     if (next.type == ScreenshotToolType.text) {
@@ -8213,6 +8694,7 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
     }
     if (_filePanelOpen) keys.add(_filePanelKey);
     if (_morePanelVisible) keys.add(_morePanelKey);
+    if (_savePreviewVisible) keys.add(_savePreviewKey);
     return keys;
   }
 
@@ -8294,6 +8776,18 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
     if (handledByPan || _dragStart != null || _editingCommandIndex != null) {
       return;
     }
+    // 工作台：纯点击选中框架（拖动时 pan 已接手，不会走到这）。标注
+    // 对象命中优先——对象归普通选中逻辑。
+    if (_collageSlots != null &&
+        currentTool == ScreenshotToolType.select &&
+        findManipulableCommandIndex(history, position) == null) {
+      final index = _collageSlotAt(position);
+      if (index != null) {
+        setState(() => _collageSelected = index);
+        _touchCollage();
+      }
+      return;
+    }
     switch (currentTool) {
       case ScreenshotToolType.eraser:
         final index = findEraserTargetIndex(history, position, eraserSize / 2);
@@ -8368,6 +8862,49 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
     // 这一笔（同一次点击不该既确认文字又开始画）。
     if (_swallowCanvasGesture(position)) return;
     _pointerHandledByPan = true;
+    // 拼图工作台只在光标工具下接管画布手势（工具即模式）：光标 = 整理
+    // （手柄调框 / 框内拖图取景）；切到画笔/文字等就是正常标注，滚轮
+    // 回归画布缩放平移。已画的标注对象优先被抓住移动（叠在框之上）。
+    final slots = _collageSlots;
+    if (slots != null && currentTool == ScreenshotToolType.select) {
+      final handle = _collageHandleAt(position);
+      if (handle != null &&
+          _collageSelected >= 0 &&
+          _collageSelected < slots.length) {
+        // 一次拖框调大小 = 一条撤销记录（起点状态入栈）。
+        _pushCollageStep();
+        _collageResizeSlot = slots[_collageSelected];
+        _collageResizeHandle = handle;
+        _collageResizeOrigin = slots[_collageSelected].rect;
+        _touchCollage();
+        return;
+      }
+      if (findManipulableCommandIndex(history, position) == null) {
+        final index = _collageSlotAt(position);
+        _collageSelected = index ?? -1;
+        if (index != null) {
+          // 一次拖图/移框 = 一条撤销记录（起点状态入栈）。
+          _pushCollageStep();
+          final rect = slots[index].rect;
+          final edge = math.max(8.0, rect.shortestSide * 0.12);
+          final inside =
+              rect.left + edge < position.dx &&
+              position.dx < rect.right - edge &&
+              rect.top + edge < position.dy &&
+              position.dy < rect.bottom - edge;
+          if (inside) {
+            // 框内中间 = 平移取景（放大后可挪动看到的内容）。
+            _collageDragSlot = slots[index];
+          } else {
+            // 按住边缘（手柄除外）= 拖动整个框架（带吸附）。
+            _collageMoveSlot = slots[index];
+          }
+        }
+        _touchCollage();
+        return;
+      }
+      // 抓到标注对象：落到下面的普通光标逻辑（移动对象）。
+    }
     // 开始绘图就立即收起唤出的工具栏，别挡住落笔区域。
     if (_dockRevealed) _hideDockTransient();
     // Hover events stop during a drag, so the cursor ring must be fed from
@@ -8449,6 +8986,42 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
 
   void _onPanUpdate(DragUpdateDetails details) {
     _cursorPosition = details.localPosition;
+    // 工作台的手势接管与 panStart 同条件（工具即模式）：只有光标工具
+    // 才消费拖动；漏加这条的话，画笔等工具起笔后 update 被这里吞掉，
+    // 笔画永远画不出来。resize/drag 槽只可能由光标工具的 panStart 设置。
+    if (_collageSlots != null && currentTool == ScreenshotToolType.select) {
+      if (_collageResizeSlot != null) {
+        _collageResizeTo(details.localPosition);
+        return;
+      }
+      final drag = _collageDragSlot;
+      if (drag != null) {
+        drag.panByWorld(details.delta);
+        _touchCollage();
+        return;
+      }
+      final move = _collageMoveSlot;
+      if (move != null) {
+        final world = _collageWorld ?? _worldSize;
+        final others = [
+          for (final slot in _collageSlots!)
+            if (slot != move) slot.rect,
+        ];
+        final tolerance =
+            10.0 / (_canvasDisplayScale <= 0 ? 1.0 : _canvasDisplayScale);
+        final moved = move.rect.shift(details.delta);
+        // 只挪框架：取景窗口原样跟着走（内容不变），吸附/夹取都在
+        // snapFrameRect 里完成。
+        move.rect = snapFrameRect(
+          moving: moved,
+          others: others,
+          world: world,
+          tolerance: tolerance,
+        );
+        _touchCollage();
+      }
+      return;
+    }
     if (_ocrSelecting) {
       _updateOcrSelection(details.globalPosition);
       return;
@@ -8511,6 +9084,12 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
   /// 丢弃进行中的手势（不提交）：被移动的对象还原，其余拖动状态清空。
   void _cancelActiveGesture() {
     if (_ocrSelecting) _finishOcrSelection();
+    // 工作台拖动被竞技场取消：清掉槽引用，否则后续 update 还会挪图。
+    _collageDragSlot = null;
+    _collageMoveSlot = null;
+    _collageResizeSlot = null;
+    _collageResizeHandle = null;
+    _collageResizeOrigin = null;
     _pendingEraseSegment = null;
     _eraseTail = null;
     final moving = _editingCommandIndex;
@@ -8531,6 +9110,15 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
   }
 
   void _onPanEnd(DragEndDetails details) {
+    // 与 panStart/panUpdate 同条件：非光标工具的抬笔要落到正常提交。
+    if (_collageSlots != null && currentTool == ScreenshotToolType.select) {
+      _collageDragSlot = null;
+      _collageMoveSlot = null;
+      _collageResizeSlot = null;
+      _collageResizeHandle = null;
+      _collageResizeOrigin = null;
+      return;
+    }
     if (_ocrSelecting) {
       _finishOcrSelection();
       return;
@@ -8705,6 +9293,19 @@ class _EraserGlyphPainter extends CustomPainter {
 }
 
 /// 选色板里的一个色块：方格样式，点击即选中。
+/// 撤销快照：命令列表 + 底图字节 + 拼图工作台状态。拼图换底图会同时
+/// 改变三者，回滚必须连带；普通编辑时 slots/world 为 null。
+typedef _EditSnapshot = ({
+  List<DrawCommand> commands,
+  Uint8List bytes,
+  List<_CollageSlotState>? slots,
+  Size? world,
+});
+
+/// 拼图槽的可撤销状态：图片按引用共享（不拷贝像素），rect/frame 值拷贝；
+/// cover 取景模型下这一对矩形就是槽的全部状态。
+typedef _CollageSlotState = ({ui.Image image, Rect rect, Rect frame});
+
 /// 「无背景」格子的斜线：左上到右下的一条对角线。
 class _SlashPainter extends CustomPainter {
   const _SlashPainter();

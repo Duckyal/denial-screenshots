@@ -1,3 +1,5 @@
+import 'collage.dart';
+
 import 'dart:math' as math;
 import 'dart:ui' as ui;
 
@@ -362,6 +364,113 @@ class TextBackgroundPainter extends CustomPainter {
   @override
   bool shouldRepaint(TextBackgroundPainter oldDelegate) =>
       oldDelegate.color != color || oldDelegate.radius != radius;
+}
+
+/// 拼图工作台的内容层：逐槽 clip 到框架矩形并按 pan/zoom 绘制图片。
+/// 槽的 pan/zoom 原地修改，编辑器用 _canvasTick 驱动重绘，这里每帧全画
+/// （槽数 ≤ 十几，成本可忽略）。
+class CollageContentPainter extends CustomPainter {
+  CollageContentPainter({required this.slots, this.version = 0});
+
+  final List<CollageSlot> slots;
+
+  /// 槽的 pan/zoom 原地修改（引用不变），编辑器每次改动递增版本号并重建
+  /// painter，shouldRepaint 靠它判定重绘。
+  final int version;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final paint = Paint()..filterQuality = FilterQuality.medium;
+    for (final slot in slots) {
+      canvas.save();
+      canvas.clipRect(slot.rect);
+      canvas.drawImageRect(
+        slot.image,
+        Rect.fromLTWH(
+          0,
+          0,
+          slot.image.width.toDouble(),
+          slot.image.height.toDouble(),
+        ),
+        slot.contentRect,
+        paint,
+      );
+      canvas.restore();
+    }
+  }
+
+  @override
+  bool shouldRepaint(CollageContentPainter oldDelegate) =>
+      oldDelegate.slots != slots || oldDelegate.version != version;
+}
+
+/// 工作台框架导引层：每个槽画一圈细边框（选中高亮），编辑期悬浮在画布
+/// 上提示"框在哪"；导出走烘焙图，天然不含这层。
+class CollageGuidePainter extends CustomPainter {
+  CollageGuidePainter({
+    required this.slots,
+    this.selectedIndex,
+    this.version = 0,
+    this.handleSize = 0,
+  });
+
+  final List<CollageSlot> slots;
+  final int? selectedIndex;
+
+  /// 槽的 pan/zoom 是原地修改（引用不变），编辑器每次改动递增此版本号，
+  /// 否则 shouldRepaint 的引用比较会漏画。
+  final int version;
+
+  /// >0 时给选中框架画 8 向调大小手柄（白方块蓝边，世界尺寸由调用方按
+  /// 屏幕恒定换算）。
+  final double handleSize;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    for (var i = 0; i < slots.length; i++) {
+      final selected = i == selectedIndex;
+      final rect = slots[i].rect;
+      canvas.drawRect(
+        rect,
+        Paint()
+          ..color = selected ? const Color(0xFF4C9AFF) : const Color(0x66FFFFFF)
+          ..style = PaintingStyle.stroke
+          ..strokeWidth = selected ? 2.5 : 1.2,
+      );
+      if (selected && handleSize > 0) {
+        final fill = Paint()..color = Colors.white;
+        final border = Paint()
+          ..color = const Color(0xFF4C9AFF)
+          ..style = PaintingStyle.stroke
+          ..strokeWidth = 1.5;
+        for (final point in [
+          rect.topLeft,
+          rect.topCenter,
+          rect.topRight,
+          rect.centerRight,
+          rect.bottomRight,
+          rect.bottomCenter,
+          rect.bottomLeft,
+          rect.centerLeft,
+        ]) {
+          final hr = Rect.fromCenter(
+            center: point,
+            width: handleSize,
+            height: handleSize,
+          );
+          canvas.drawRect(hr, fill);
+          canvas.drawRect(hr, border);
+        }
+      }
+    }
+  }
+
+  @override
+  bool shouldRepaint(CollageGuidePainter oldDelegate) =>
+      oldDelegate.selectedIndex != selectedIndex ||
+      oldDelegate.slots != slots ||
+      oldDelegate.version != version ||
+      oldDelegate.handleSize != handleSize;
 }
 
 /// 文本框编辑态的高亮层：高对比虚线描边 + 半透明底 + 四角实心角标，
