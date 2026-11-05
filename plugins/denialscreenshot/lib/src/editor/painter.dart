@@ -413,7 +413,12 @@ class CollageGuidePainter extends CustomPainter {
     this.version = 0,
     this.handleSize = 0,
     this.guides = const [],
+    this.strokeWidthScale = 1.0,
   });
+
+  /// 世界像素/屏幕像素换算：>1 放大（线变细回屏幕宽度），<1 全景
+  /// （线加粗到屏幕宽度）。线宽与出线长度都按它除。
+  final double strokeWidthScale;
 
   final List<CollageSlot> slots;
   final int? selectedIndex;
@@ -432,23 +437,54 @@ class CollageGuidePainter extends CustomPainter {
 
   @override
   void paint(Canvas canvas, Size size) {
-    // 对齐参考线：拖框时命中才画（1.5px 亮蓝，盖在框线之上更醒目）。
-    if (guides.isNotEmpty) {
-      final line = Paint()..color = const Color(0xFF4C9AFF);
-      for (final g in guides) {
-        canvas.drawRect(g, line);
-      }
-    }
-    for (var i = 0; i < slots.length; i++) {
-      final selected = i == selectedIndex;
-      final rect = slots[i].rect;
+    final k = strokeWidthScale <= 0 ? 1.0 : strokeWidthScale;
+
+    void frame(CollageSlot slot, {required bool selected}) {
+      final rect = slot.rect;
+      // 深浅双线描边：单色细线在白底（或黑底）上都会隐形，深色外圈 +
+      // 亮色内圈保证任何画面背景都有对比；线宽除以显示比例，屏幕上
+      // 恒定（全景 fit<1 时不会细到看不见）。
       canvas.drawRect(
         rect,
         Paint()
-          ..color = selected ? const Color(0xFF4C9AFF) : const Color(0x66FFFFFF)
+          ..color = const Color(0xB3000000)
           ..style = PaintingStyle.stroke
-          ..strokeWidth = selected ? 2.5 : 1.2,
+          ..strokeWidth = (selected ? 4.0 : 2.8) / k,
       );
+      canvas.drawRect(
+        rect,
+        Paint()
+          ..color = selected ? const Color(0xFF4C9AFF) : const Color(0xF2FFFFFF)
+          ..style = PaintingStyle.stroke
+          ..strokeWidth = (selected ? 2.2 : 1.2) / k,
+      );
+    }
+
+    // 相邻框架共用一条边：按 slots 顺序画的话，后画的白边会盖住先画
+    // 的选中蓝边——同一框的边一半蓝一半白。分两遍：普通框在前，选中
+    // 框最后画，蓝边完整。
+    for (var i = 0; i < slots.length; i++) {
+      if (i != selectedIndex) frame(slots[i], selected: false);
+    }
+    if (selectedIndex != null &&
+        selectedIndex! >= 0 &&
+        selectedIndex! < slots.length) {
+      frame(slots[selectedIndex!], selected: true);
+    }
+
+    // 对齐参考线：拖框时命中才画（1.5px 亮蓝，盖在所有框线之上）。
+    if (guides.isNotEmpty) {
+      final halo = Paint()..color = const Color(0x99000000);
+      final line = Paint()..color = const Color(0xFF4C9AFF);
+      for (final g in guides) {
+        canvas.drawRect(g.inflate(1.5), halo);
+        canvas.drawRect(g, line);
+      }
+    }
+
+    for (var i = 0; i < slots.length; i++) {
+      final selected = i == selectedIndex;
+      final rect = slots[i].rect;
       if (selected && handleSize > 0) {
         final fill = Paint()..color = Colors.white;
         final border = Paint()
@@ -483,7 +519,8 @@ class CollageGuidePainter extends CustomPainter {
       oldDelegate.slots != slots ||
       oldDelegate.version != version ||
       oldDelegate.handleSize != handleSize ||
-      oldDelegate.guides != guides;
+      oldDelegate.guides != guides ||
+      oldDelegate.strokeWidthScale != strokeWidthScale;
 }
 
 /// 文本框编辑态的高亮层：高对比虚线描边 + 半透明底 + 四角实心角标，

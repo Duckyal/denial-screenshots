@@ -13,6 +13,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart' show ProviderScope;
 
 import '../api_config_field.dart';
+import '../capture_flow_bus.dart';
 import '../clipboard.dart';
 import '../editor_bus.dart';
 import '../l10n.dart';
@@ -378,6 +379,13 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
   void initState() {
     super.initState();
     HardwareKeyboard.instance.addHandler(_handleKeyEvent);
+    // Alt+A 被全局层拦下（编辑器正开着）时由框选 surface 转发过来：
+    // 关闭自己并接着拉起新选区——"再按一次截图"就该重新截图。
+    _retriggerSub = DenialScreenshotEditorBus.instance.retriggerCaptures.listen(
+      (_) {
+        if (mounted) _restartCaptureFlow();
+      },
+    );
     _currentImageBytes = widget.capturedImage;
     _imageWidget = _buildImageWidget();
     _frozenBackdrop = _buildFrozenBackdrop();
@@ -589,6 +597,8 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
   @override
   void dispose() {
     HardwareKeyboard.instance.removeHandler(_handleKeyEvent);
+    _retriggerSub?.cancel();
+    _messageTimer?.cancel();
     for (final image in _collageOwnedImages) {
       image.dispose();
     }
@@ -724,10 +734,12 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
     // Alt），锚点跟随；其它工具下滚轮回归画布缩放/平移。注意本 Listener
     // 挂在 FittedBox 外侧，localPosition 是视口坐标，必须按 contain+zoom+pan
     // 换算成世界坐标再命中/锚定。
-    if (_collageSlots != null && currentTool == ScreenshotToolType.select) {
-      // 工作台语义：框架是开在图片上的窗口，滚轮**一律**缩放指针所在
-      // 框架里的图片（不借任何修饰键，也不缩放整个工作台视图）。指针
-      // 落在框外空白时才平移视角，用来看全局布局。
+    // 工作台滚轮语义：只有**双击放大预览**时才缩放框内图片（精调取景
+    // 的场景）；全景态下滚轮回归普通截图行为（上下平移视角、Alt 缩放、
+    // Ctrl 横移）——否则画完一笔想滚一下看看全局就把图片误缩放了。
+    if (_collageSlots != null &&
+        currentTool == ScreenshotToolType.select &&
+        _loupeSlot >= 0) {
       final layout = _canvasLayout(_canvasZoom, viewport, _worldSize);
       final c = (event.localPosition - layout.o) / layout.k;
       final worldPoint = (c - _canvasPan) / _canvasZoom;
@@ -738,8 +750,10 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
         _collageSlots![index].zoomAt(worldPoint, factor);
         _collageSelected = index;
         _touchCollage();
+        return;
       }
-      // 框外空白：什么都不做——双击聚焦已经够用，不需要视角平移。
+      // 预览中指针滑出框架：滚轮平移视角，不空转。
+      _panCanvas(_canvasPan + Offset(0, -event.scrollDelta.dy), viewport);
       return;
     }
     final world = _worldSize;
@@ -1046,9 +1060,11 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
       'hints=${_settings.bindingFor("hints")} showHints=$_showHints',
     );
     // 放弃确认浮层开着：任何 Esc 先收起它（等价「继续编辑」）。
-    if (_discardConfirmOpen &&
-        event.logicalKey == LogicalKeyboardKey.escape) {
-      setState(() => _discardConfirmOpen = false);
+    if (_discardConfirmOpen && event.logicalKey == LogicalKeyboardKey.escape) {
+      setState(() {
+        _discardConfirmOpen = false;
+        _captureAfterClose = false;
+      });
       return true;
     }
     // 放大预览开着：物理 Esc 先退出预览（放在 binding 之前——close
@@ -1423,6 +1439,13 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
                                                     handleSize:
                                                         _resizeHandleWorldSize,
                                                     guides: _collageSnapGuides,
+                                                    // 线宽按显示比例换算：
+                                                    // 屏幕上恒定，缩到全景
+                                                    // 也不会细成看不见的线。
+                                                    strokeWidthScale:
+                                                        _canvasDisplayScale <= 0
+                                                        ? 1.0
+                                                        : _canvasDisplayScale,
                                                   ),
                                                 ),
                                               ),
@@ -1601,6 +1624,33 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
                       ),
                     ),
                   if (_showHints) _buildHintsPlacement(),
+                  // 消息条（原 SnackBar 的自绘替身）。
+                  if (_messageText case final text?)
+                    Align(
+                      alignment: Alignment.bottomCenter,
+                      child: Padding(
+                        padding: const EdgeInsets.only(bottom: 28),
+                        child: IgnorePointer(
+                          child: Container(
+                            padding: const EdgeInsets.symmetric(
+                              horizontal: 16,
+                              vertical: 9,
+                            ),
+                            decoration: BoxDecoration(
+                              color: const Color(0xE6202428),
+                              borderRadius: BorderRadius.circular(8),
+                            ),
+                            child: Text(
+                              text,
+                              style: const TextStyle(
+                                fontSize: 13,
+                                color: Colors.white,
+                              ),
+                            ),
+                          ),
+                        ),
+                      ),
+                    ),
                   // 放弃编辑确认浮层（最顶层模态）。
                   _buildDiscardConfirmOverlay(),
                 ],
@@ -4392,6 +4442,8 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
   int _loupeSlot = -1;
   ({double zoom, Offset pan})? _loupeRestore;
 
+  StreamSubscription<void>? _retriggerSub;
+
   /// 本会话是否已把成果交付过（保存成功/复制成功/拆分导出）。Esc 关
   /// 编辑器时据此决定要不要弹「放弃编辑？」确认——没交付过才拦。
   bool _delivered = false;
@@ -4423,8 +4475,8 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
   int _splitCols = 3;
 
   /// 拆图工作台：由「更多功能→拆分导出→确定」进入——当前画面（含标注）
-  /// 烘成底图铺满 world，上覆 rows×cols 个正方形框架，每格初始取景 =
-  /// 底图对应格子的方形裁切；框架与逐格取景像拼图工作台一样可调。
+  /// 烘成底图，按 rows×cols 均分成互不重叠、正好铺满的框架（N 块能拼
+  /// 回原图），每格 1:1 显示对应块；框架与逐格取景像拼图工作台一样可调。
   /// 保存按 文件名+序号 导出 N 张（名字-1.png…），区别于普通单图保存。
   bool _splitBoard = false;
   final GlobalKey _dockFileOpenKey = GlobalKey();
@@ -4781,6 +4833,7 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
         CollageSlot(image: images[i], rect: layout.rects[i]),
     ];
     _abortLiveTextEdit();
+    _clearCollageSnap();
     // 拼图前状态压一条：Ctrl+Z 直接退出工作台回到原图与原标注。
     _undoSnapshots.add(_snapshotNow());
     _redoSnapshots.clear();
@@ -4794,6 +4847,8 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
     setState(() {
       _collageSlots = slots;
       _collageWorld = layout.world;
+      // 同拆图：进工作台清掉框选阶段的选区矩形，防蓝框残留。
+      selectionRect = null;
       _collageSelected = -1;
       _loupeSlot = -1;
       _loupeRestore = null;
@@ -5077,7 +5132,6 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
     _showMessage(L.pick(context, '已删除该框架', 'Frame removed'));
   }
 
-
   /// 文件面板确认路径后的回调。
   Future<void> _onFilePanelSelected(String path) async {
     setState(() => _filePanelOpen = false);
@@ -5259,7 +5313,7 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
               ),
               divider(),
               // ── 拆分导出 ──
-section(L.pick(context, '拆分导出', 'SPLIT EXPORT')),
+              section(L.pick(context, '拆分导出', 'SPLIT EXPORT')),
               Row(
                 children: [
                   stepper(
@@ -5302,10 +5356,10 @@ section(L.pick(context, '拆分导出', 'SPLIT EXPORT')),
     );
   }
 
-  /// 进入拆图工作台：当前画面（含标注）烘成底图，铺 rows×cols 个正方形
-  /// 框架，每格 1:1 显示原图对应块（外接正方，相邻块自然有重叠，可自行
-  /// 调整）。框架/取景/吸附与拼图工作台完全同一套手势。压一条撤销快照：
-  /// Ctrl+Z 退出拆图回到拆之前。
+  /// 进入拆图工作台：当前画面（含标注）烘成底图，按 rows×cols 均分成
+  /// 互不重叠、正好铺满的框架（朋友圈九宫格语义：N 块能拼回原图），
+  /// 每格 1:1 显示对应块。框架/取景/吸附与拼图工作台完全同一套手势。
+  /// 压一条撤销快照：Ctrl+Z 退出拆图回到拆之前。
   Future<void> _startSplitBoard() async {
     if (_collageSlots != null) {
       _showMessage(
@@ -5324,35 +5378,41 @@ section(L.pick(context, '拆分导出', 'SPLIT EXPORT')),
     final cols = _splitCols.clamp(1, 9);
     final imgW = base.width.toDouble();
     final imgH = base.height.toDouble();
-    final cellW = imgW / cols;
-    final cellH = imgH / rows;
-    final side = math.max(cellW, cellH);
+    // 框架 = 均分块本身，**不凑正方形**：拆图的用途是朋友圈/空间九宫格
+    // ——一张图切成 N 块，好友时间线里拼回原图。所以格子必须正好铺满、
+    // 互不重叠、无缝无缺。此前取 max(cellW, cellH) 撑成正方形，非正方
+    // 原图就必然溢出重叠，切出来的块拼不回去。
+    // 边界取**整数像素**（floor 均分、末行/列吃余数，与 splitGrid 同一
+    // 套）：浮点均分（如 1024÷3=341.33）会把横线画在半个像素上，抗锯齿
+    // 糊成灰浅色，而整除方向的竖线清晰——"横线竖线颜色不一样"正是这个
+    // 不对称；整数边界还保证屏上所见 == 导出裁切。
+    final xs = [
+      for (var c = 0; c <= cols; c++)
+        (c == cols ? imgW : (base.width * c / cols).floorToDouble()),
+    ];
+    final ys = [
+      for (var r = 0; r <= rows; r++)
+        (r == rows ? imgH : (base.height * r / rows).floorToDouble()),
+    ];
     final slots = <CollageSlot>[];
     for (var r = 0; r < rows; r++) {
       for (var c = 0; c < cols; c++) {
-        final block = Rect.fromLTWH(
-          c * cellW,
-          r * cellH,
-          cellW,
-          cellH,
-        );
-        final rect = Rect.fromCenter(
-          center: block.center,
-          width: side,
-          height: side,
-        );
-        final slot = CollageSlot(image: base, rect: rect);
-        // 1:1 取景：整张底图按原尺寸放在框架下，中心对齐该块中心 →
-        // 框内看到的就是原图这一块（外接正方范围）。
-        slot.zoom = (math.max(imgW, imgH) / side).clamp(
+        final block = Rect.fromLTRB(xs[c], ys[r], xs[c + 1], ys[r + 1]);
+        final slot = CollageSlot(image: base, rect: block);
+        // 1:1 取景：底图按原尺寸落在 world 里（zoom 补回 contain 的
+        // 缩小量），pan 把 imageRect 中心钉到底图自身中心——所有框架
+        // 共用同一张世界坐标里的底图，框内看到的就是各自那块。
+        final fit = math.min(block.width / imgW, block.height / imgH);
+        slot.zoom = (fit <= 0 ? 1.0 : 1.0 / fit).clamp(
           CollageSlot.minZoom,
           CollageSlot.maxZoom,
         );
-        slot.pan = block.center - rect.center;
+        slot.pan = Offset(imgW / 2, imgH / 2) - block.center;
         slots.add(slot);
       }
     }
     _abortLiveTextEdit();
+    _clearCollageSnap();
     _undoSnapshots.add(_snapshotNow());
     _redoSnapshots.clear();
     _pruneCollageImages();
@@ -5362,15 +5422,16 @@ section(L.pick(context, '拆分导出', 'SPLIT EXPORT')),
     _rgbaPixels = null;
     _rgbaWidth = 0;
     _rgbaHeight = 0;
-    final world = collageBounds(slots)?.size ?? Size(imgW, imgH);
-    final origin = collageBounds(slots)?.topLeft ?? Offset.zero;
-    for (final slot in slots) {
-      slot.rect = slot.rect.shift(-origin);
-    }
+    // 格子从 (0,0) 铺到整张图：world 就是底图尺寸，无需归零平移。
+    final world = Size(imgW, imgH);
     setState(() {
       _splitBoard = true;
       _collageSlots = slots;
       _collageWorld = world;
+      // 框选阶段的选区矩形（蓝色 SelectionPainter 框）进工作台后没有
+      // 意义：不清的话它一直叠在网格上，它的边看起来就像"某条框线
+      // 颜色不对"。
+      selectionRect = null;
       _collageSelected = -1;
       _loupeSlot = -1;
       _loupeRestore = null;
@@ -5391,8 +5452,8 @@ section(L.pick(context, '拆分导出', 'SPLIT EXPORT')),
     _showMessage(
       L.pick(
         context,
-        '拆图工作台：$rows×$cols 方格已铺好，可调每格取景；保存按文件名+序号导出',
-        'Split board: $rows×$cols frames laid out; save exports named files with an index',
+        '拆图工作台：已按 $rows×$cols 均分（不重叠、可拼回原图）；保存按文件名+序号导出 ${rows * cols} 张',
+        'Split board: tiled into $rows×$cols without overlap; save exports ${rows * cols} indexed files',
       ),
     );
   }
@@ -5657,7 +5718,8 @@ section(L.pick(context, '拆分导出', 'SPLIT EXPORT')),
       return;
     }
     final barBox = _dockBarKey.currentContext?.findRenderObject() as RenderBox?;
-    final anchorKey = _filePanelCollage ? _dockMoreKey
+    final anchorKey = _filePanelCollage
+        ? _dockMoreKey
         : _filePanelSave
         ? _dockFileSaveKey
         : _dockFileOpenKey;
@@ -6902,12 +6964,33 @@ section(L.pick(context, '拆分导出', 'SPLIT EXPORT')),
   void _closeEditor() {
     _ffi.cancel();
     _window.quit();
+    if (_captureAfterClose) {
+      _captureAfterClose = false;
+      // 等编辑器 surface 真正隐藏合成上屏，grim 抓的关键帧才不含编辑器
+      // 画面（同藏浮层重抓的既有节奏）。
+      Timer(const Duration(milliseconds: 150), () {
+        CaptureFlowBus.instance.begin();
+      });
+    }
   }
+
+  /// Alt+A：关闭当前编辑器后紧接着拉起新的框选。"继续编辑"要撤销这个
+  /// 连锁（见确认浮层的取消分支），所以标志只在真正关窗时兑现。
+  void _restartCaptureFlow() {
+    _captureAfterClose = true;
+    _closeEditorWithConfirm();
+  }
+
+  bool _captureAfterClose = false;
 
   /// Esc 关窗：已保存/已复制过直接走；改过（有标注或进过工作台）且
   /// 从未交付 → 弹「放弃编辑？」确认浮层。什么都没改过也直接走，不打扰。
   void _closeEditorWithConfirm() {
     final edited = history.isNotEmpty || _collageSlots != null;
+    debugPrint(
+      '[close-confirm] edited=$edited delivered=$_delivered '
+      'history=${history.length} slots=${_collageSlots?.length}',
+    );
     if (_delivered || !edited) {
       _closeEditor();
       return;
@@ -6924,7 +7007,10 @@ section(L.pick(context, '拆分导出', 'SPLIT EXPORT')),
         children: [
           GestureDetector(
             behavior: HitTestBehavior.opaque,
-            onTap: () => setState(() => _discardConfirmOpen = false),
+            onTap: () => setState(() {
+              _discardConfirmOpen = false;
+              _captureAfterClose = false;
+            }),
             child: Container(color: Colors.black.withValues(alpha: 0.55)),
           ),
           Center(
@@ -6961,8 +7047,10 @@ section(L.pick(context, '拆分导出', 'SPLIT EXPORT')),
                     mainAxisAlignment: MainAxisAlignment.end,
                     children: [
                       TextButton(
-                        onPressed: () =>
-                            setState(() => _discardConfirmOpen = false),
+                        onPressed: () => setState(() {
+                          _discardConfirmOpen = false;
+                          _captureAfterClose = false;
+                        }),
                         child: Text(L.s('继续编辑', 'Keep editing')),
                       ),
                       const SizedBox(width: 8),
@@ -8528,14 +8616,19 @@ section(L.pick(context, '拆分导出', 'SPLIT EXPORT')),
     }
   }
 
+  /// 编辑器内消息条：自绘浮层（编辑器树里没有 Scaffold，
+  /// ScaffoldMessenger/SnackBar 拿不到挂载点，之前所有提示都是哑的）。
   void _showMessage(String message, {int seconds = 3}) {
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        content: Text(message),
-        duration: Duration(seconds: seconds),
-      ),
-    );
+    if (!mounted) return;
+    _messageTimer?.cancel();
+    setState(() => _messageText = message);
+    _messageTimer = Timer(Duration(seconds: seconds), () {
+      if (mounted) setState(() => _messageText = null);
+    });
   }
+
+  Timer? _messageTimer;
+  String? _messageText;
 
   Future<void> _toggleToolbarPin() async {
     if (_pinnedOverlayVisible || _nativePinned) {
