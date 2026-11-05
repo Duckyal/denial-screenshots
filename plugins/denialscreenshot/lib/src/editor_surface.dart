@@ -220,17 +220,6 @@ class _EditorSurfaceHostState extends ConsumerState<EditorSurfaceHost> {
     DenialScreenshotEditorBus.instance.editorVisible.value = true;
   }
 
-  /// Open a frame that is already in memory, bypassing the on-disk
-  /// [ScreenshotStore.readStable] poll. The optional [path] keeps save/pin
-  /// provenance but is not read from.
-  void _openBytes(Uint8List? bytes, String? path) {
-    if (bytes == null || bytes.isEmpty || !mounted) return;
-    setState(() {
-      _session = EditorSession(bytes: bytes, path: path ?? '');
-      _visible = true;
-    });
-  }
-
   void _close() {
     if (!mounted) return;
     setState(() {
