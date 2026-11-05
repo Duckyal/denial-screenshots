@@ -156,6 +156,8 @@ class PathChooserPanel extends StatefulWidget {
     this.nav,
     required this.onSelected,
     required this.onCancel,
+    this.multiSelect = false,
+    this.onSelectedMany,
   });
 
   /// 面板标题；空串不显示标题行。
@@ -198,6 +200,14 @@ class PathChooserPanel extends StatefulWidget {
   final void Function(String path) onSelected;
   final VoidCallback onCancel;
 
+  /// 多选模式（拼图选图）：点行勾选/取消（跨目录保持勾选与顺序），隐藏
+  /// 文件名输入框，确认按钮变成「加入 N 张」并经 [onSelectedMany] 返回
+  /// 全部路径。与单选模式互斥，[save]/[directoryMode] 下无效。
+  final bool multiSelect;
+
+  /// 多选确认回调（按勾选顺序）。
+  final void Function(List<String> paths)? onSelectedMany;
+
   @override
   State<PathChooserPanel> createState() => _PathChooserPanelState();
 }
@@ -207,6 +217,10 @@ class _PathChooserPanelState extends State<PathChooserPanel> {
   late final TextEditingController _nameController;
   List<FileSystemEntity> _entries = const <FileSystemEntity>[];
   String? _error;
+
+  /// 多选模式的勾选集（全路径，LinkedHashSet 保持勾选顺序；跨目录切换
+  /// 不清空——拼图常要从不同目录凑图）。
+  final Set<String> _multiSelected = <String>{};
 
   /// 翻译模型目录正在异步校验（调用 sidecar 发现逻辑）：期间禁用「选择此文件夹」
   /// 并转圈，避免重复点击与选到未校验的目录。
@@ -304,6 +318,15 @@ class _PathChooserPanelState extends State<PathChooserPanel> {
       _enter(entity);
       return;
     }
+    if (widget.multiSelect) {
+      // 多选：点一下勾上/取消，勾选顺序 = 加入顺序。
+      setState(() {
+        if (!_multiSelected.remove(entity.path)) {
+          _multiSelected.add(entity.path);
+        }
+      });
+      return;
+    }
     // 目录/模型模式下文件不可点选（只是展示），只有普通文件对话框才回填文件名。
     if (_dirMode) return;
     setState(() => _nameController.text = entity.uri.pathSegments.last);
@@ -312,6 +335,10 @@ class _PathChooserPanelState extends State<PathChooserPanel> {
   /// 双击文件 = 回填名字并直接确认（打开模式选中即所选；保存模式选中同名覆盖）。
   void _openAndConfirm(FileSystemEntity entity) {
     if (entity is Directory || _dirMode) return;
+    if (widget.multiSelect) {
+      _open(entity); // 双击也是切换勾选，不直接确认整批。
+      return;
+    }
     _nameController.text = entity.uri.pathSegments.last;
     _confirm();
   }
@@ -390,6 +417,14 @@ class _PathChooserPanelState extends State<PathChooserPanel> {
       widget.onSelected(_directory.path);
       return;
     }
+    if (widget.multiSelect) {
+      if (_multiSelected.isEmpty) {
+        setState(() => _error = L.s('先勾选至少一张图', 'Tick at least one image'));
+        return;
+      }
+      widget.onSelectedMany?.call(_multiSelected.toList(growable: false));
+      return;
+    }
     final raw = _nameController.text.trim();
     if (raw.isEmpty) {
       setState(() => _error = L.s('请输入文件名', 'Enter a file name'));
@@ -416,6 +451,14 @@ class _PathChooserPanelState extends State<PathChooserPanel> {
         : null;
     final confirmLabel = _dirMode
         ? L.pick(context, '选择此文件夹', 'Choose folder')
+        : widget.multiSelect
+        ? _multiSelected.isEmpty
+              ? L.pick(context, '勾选图片', 'Tick images')
+              : L.pick(
+                  context,
+                  '加入 ${_multiSelected.length} 张',
+                  'Add ${_multiSelected.length}',
+                )
         : widget.save
         ? L.pick(context, '保存', 'Save')
         : L.pick(context, '打开', 'Open');
@@ -478,7 +521,7 @@ class _PathChooserPanelState extends State<PathChooserPanel> {
                       ],
                     ),
                   ),
-                if (!_dirMode) ...[
+                if (!_dirMode && !widget.multiSelect) ...[
                   Padding(
                     padding: const EdgeInsets.only(bottom: 8),
                     child: TextField(
@@ -561,7 +604,9 @@ class _PathChooserPanelState extends State<PathChooserPanel> {
                               final selected =
                                   !isDirectory &&
                                   !_dirMode &&
-                                  name == _nameController.text.trim();
+                                  (widget.multiSelect
+                                      ? _multiSelected.contains(entity.path)
+                                      : name == _nameController.text.trim());
                               return InkWell(
                                 onDoubleTap: isDirectory || _dirMode
                                     ? null
@@ -597,6 +642,21 @@ class _PathChooserPanelState extends State<PathChooserPanel> {
                                               )
                                             : null,
                                       ),
+                                      if (widget.multiSelect && !isDirectory)
+                                        Padding(
+                                          padding: const EdgeInsets.only(
+                                            right: 6,
+                                          ),
+                                          child: Icon(
+                                            selected
+                                                ? Icons.check_circle
+                                                : Icons.circle_outlined,
+                                            size: 15,
+                                            color: selected
+                                                ? const Color(0xFF4C9AFF)
+                                                : Colors.white30,
+                                          ),
+                                        ),
                                       const SizedBox(width: 7),
                                       Icon(
                                         isDirectory

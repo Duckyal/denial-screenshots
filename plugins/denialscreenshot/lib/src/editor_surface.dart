@@ -155,6 +155,7 @@ class _EditorSurfaceHostState extends ConsumerState<EditorSurfaceHost> {
       );
       _visible = true;
     });
+    DenialScreenshotEditorBus.instance.editorVisible.value = true;
   }
 
   void _startCapture() {
@@ -204,6 +205,19 @@ class _EditorSurfaceHostState extends ConsumerState<EditorSurfaceHost> {
       _session = EditorSession(bytes: bytes, path: file.path);
       _visible = true;
     });
+    DenialScreenshotEditorBus.instance.editorVisible.value = true;
+  }
+
+  /// Open a frame that is already in memory, bypassing the on-disk
+  /// [ScreenshotStore.readStable] poll. The optional [path] keeps save/pin
+  /// provenance but is not read from.
+  void _openBytes(Uint8List? bytes, String? path) {
+    if (bytes == null || bytes.isEmpty || !mounted) return;
+    setState(() {
+      _session = EditorSession(bytes: bytes, path: path ?? '');
+      _visible = true;
+    });
+    DenialScreenshotEditorBus.instance.editorVisible.value = true;
   }
 
   /// Open a frame that is already in memory, bypassing the on-disk
@@ -223,6 +237,7 @@ class _EditorSurfaceHostState extends ConsumerState<EditorSurfaceHost> {
       _visible = false;
       _session = null;
     });
+    DenialScreenshotEditorBus.instance.editorVisible.value = false;
   }
 
   /// 钉住的快照：交给 [PinCardBus]，由钉住 surface 画成桌面上的浮动小窗

@@ -4,7 +4,7 @@ description: >-
   window picking, scrolling capture, clipboard pin, and an in-shell editor with
   brush, arrow, shape, highlighter, mask and eraser tools.
 publish_to: none
-version: 0.1.0
+version: 0.2.0
 
 environment:
   sdk: ^3.13.0
