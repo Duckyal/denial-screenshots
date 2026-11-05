@@ -18,71 +18,6 @@ import 'dart:ui' as ui;
   return (rows: (count / cols).ceil(), cols: cols);
 }
 
-/// 等比网格拼图：[images] 按序入格。单元格 = 全体图的最大宽高，每张
-/// contain 居中，格间与外缘留 [gap] 像素的背景色 [background]。
-Future<ui.Image?> composeGridCollage(
-  List<ui.Image> images, {
-  int? columns,
-  int gap = 12,
-  ui.Color background = const ui.Color(0xFFFFFFFF),
-}) async {
-  if (images.isEmpty) return null;
-  final (rows: rows, cols: cols) = gridFor(images.length, columns);
-  if (rows == 0) return null;
-  var cellW = 0;
-  var cellH = 0;
-  for (final image in images) {
-    cellW = math.max(cellW, image.width);
-    cellH = math.max(cellH, image.height);
-  }
-  final width = cols * cellW + (cols + 1) * gap;
-  final height = rows * cellH + (rows + 1) * gap;
-  final recorder = ui.PictureRecorder();
-  final canvas = ui.Canvas(
-    recorder,
-    ui.Offset.zero & ui.Size(width.toDouble(), height.toDouble()),
-  );
-  canvas.drawRect(
-    ui.Offset.zero & ui.Size(width.toDouble(), height.toDouble()),
-    ui.Paint()..color = background,
-  );
-  final paint = ui.Paint()..filterQuality = ui.FilterQuality.medium;
-  for (var i = 0; i < images.length; i++) {
-    final image = images[i];
-    final cell = i % cols;
-    final row = i ~/ cols;
-    final slot = ui.Rect.fromLTWH(
-      (gap + cell * (cellW + gap)).toDouble(),
-      (gap + row * (cellH + gap)).toDouble(),
-      cellW.toDouble(),
-      cellH.toDouble(),
-    );
-    // contain 居中：取较小的缩放比，两边各留内边距。
-    final scale = math.min(
-      slot.width / image.width,
-      slot.height / image.height,
-    );
-    final drawW = image.width * scale;
-    final drawH = image.height * scale;
-    final dest = ui.Rect.fromLTWH(
-      slot.center.dx - drawW / 2,
-      slot.center.dy - drawH / 2,
-      drawW,
-      drawH,
-    );
-    canvas.drawImageRect(
-      image,
-      ui.Rect.fromLTWH(0, 0, image.width.toDouble(), image.height.toDouble()),
-      dest,
-      paint,
-    );
-  }
-  final picture = recorder.endRecording();
-  final out = await picture.toImage(width, height);
-  picture.dispose();
-  return out;
-}
-
 /// 拆图：把 [image] 均分 rows×cols 块，块四周留 [gap] 背景色（烙进每块，
 /// 所见即所拆）。返回按行优先顺序的 N 张图，调用方负责 dispose 原件。
 Future<List<ui.Image>> splitGrid(
@@ -143,119 +78,171 @@ Future<List<ui.Image>> splitGrid(
   return out;
 }
 
-/// 拼图工作台的一个框架槽：框架矩形（世界坐标）+ 框内图片的**取景窗口**
-/// （源图像素坐标）。图片永远盖满框架（cover）：拖拽 = 平移取景、滚轮 =
-/// 缩放取景范围、手柄调框架 = 改窗口形状。窗口自动夹在图片边界内，框架
-/// 里永不露白。撤销快照记录 (rect, frame) 一对值即可完整还原。
+/// 拼图工作台的一个框架槽：框架矩形（世界坐标）+ 框内图片的自由摆放
+/// 状态（缩放倍率 + 平移偏移，均相对框架）。图片按「适配框架」为 1×
+/// 基准：滚轮 0.2×–8× 随便调，**可以小于框架**（四周留白，构图用），
+/// 也可以大于框架（只显示框住的部分，框架=开在图上的窗口）；平移不设
+/// 边界限制，想怎么挪就怎么挪。撤销快照记录 (rect, imageRect) 一对
+/// 矩形即可完整还原。
 final class CollageSlot {
-  CollageSlot({required this.image, required this.rect})
-    : frame = const ui.Rect.fromLTWH(0, 0, 1, 1) {
-    // 初始 = cover 基准（恰好盖满框架），取景中心在图片正中。
-    frame = _frameFor(
-      rect.size,
-      1.0,
-      ui.Offset(image.width / 2.0, image.height / 2.0),
-    );
-  }
+  CollageSlot({required this.image, required this.rect});
 
   final ui.Image image;
 
-  /// 框架矩形（世界坐标），手柄可原地调整。
+  /// 框架矩形（世界坐标），手柄可调大小、拖动可移动。
   ui.Rect rect;
 
-  /// 取景窗口：源图像素坐标下当前显示的部分，宽高比恒等于框架宽高比，
-  /// 且完整落在图片内。
-  ui.Rect frame;
+  /// 相对框架的缩放倍率：1 = 恰好适配（contain），<1 图小于框，
+  /// >1 图大于框（超出部分被框架裁掉）。
+  double zoom = 1.0;
+
+  /// 图心相对框心的偏移（世界坐标）。
+  ui.Offset pan = ui.Offset.zero;
 
   static const minSide = 60.0;
-  static const maxZoom = 8.0;
+  static const minZoom = 0.2;
+
+  /// 上限 32×：拆图工作台初始取景 = 底图铺满 world，大图多格时
+  /// 1/fitScale 可达 16+；拼图手动放大也够用了。
+  static const maxZoom = 32.0;
 
   ui.Size get _imgSize =>
       ui.Size(image.width.toDouble(), image.height.toDouble());
 
-  /// cover 基准窗口：恰好盖满框架的最小取景（zoom = 1 时的 frame 尺寸）。
-  ui.Size _baseFrame(ui.Size slotSize) {
+  /// 适配基准：图完整放进框架的最大比例（contain）。
+  double get _fitScale {
     final img = _imgSize;
-    if (img.width <= 0 || img.height <= 0 || slotSize.width <= 0) {
-      return const ui.Size(1, 1);
+    if (img.width <= 0 ||
+        img.height <= 0 ||
+        rect.width <= 0 ||
+        rect.height <= 0) {
+      return 1.0;
     }
-    // 宽高比 = 框架；取"能盖满框架"里最小的窗口 = 另一轴贴满图片。
-    final byHeight = ui.Size(
-      img.height * slotSize.width / slotSize.height,
-      img.height,
-    );
-    return byHeight.width <= img.width
-        ? byHeight
-        : ui.Size(img.width, img.width * slotSize.height / slotSize.width);
+    return math.min(rect.width / img.width, rect.height / img.height);
   }
 
-  /// 当前放大倍率（1 = 恰好盖满）。
-  double get zoom {
-    final base = _baseFrame(rect.size);
-    return base.width <= 0
-        ? 1.0
-        : (base.width / frame.width).clamp(1.0, maxZoom);
+  /// 图片当前占据的世界矩形（可能小于/大于框架；绘制与烘焙都按它）。
+  ui.Rect get imageRect {
+    final base = _fitScale * zoom;
+    final w = _imgSize.width * base;
+    final h = _imgSize.height * base;
+    return ui.Rect.fromCenter(center: rect.center + pan, width: w, height: h);
   }
 
-  /// 以 [center]（源图像素）为中心、[zoom] 倍率下的窗口，夹进图片边界。
-  ui.Rect _frameFor(ui.Size slotSize, double zoom, ui.Offset center) {
-    final base = _baseFrame(slotSize);
-    final z = zoom.clamp(1.0, maxZoom);
-    final w = math.min(base.width / z, _imgSize.width);
-    final h = math.min(base.height / z, _imgSize.height);
-    return ui.Rect.fromLTWH(
-      (center.dx - w / 2).clamp(0.0, math.max(0.0, _imgSize.width - w)),
-      (center.dy - h / 2).clamp(0.0, math.max(0.0, _imgSize.height - h)),
-      w,
-      h,
-    );
-  }
-
-  /// 平移：框架内拖动 [deltaWorld]（世界坐标）→ 看到的内容跟着手指走
-  /// （窗口反向移动，按 源图像素/世界像素 比例换算）。
+  /// 平移：框架内拖动 [deltaWorld]（世界坐标）→ 图片跟着手指走。
   void panByWorld(ui.Offset deltaWorld) {
-    final k = frame.width / rect.width;
-    frame = _frameFor(rect.size, zoom, frame.center - deltaWorld * k);
+    pan += deltaWorld;
   }
 
-  /// 滚轮缩放取景：以指针下的源图点为锚（缩放时指针指着的内容不动）。
+  /// 滚轮缩放：以指针下的世界点为锚（指针指着的内容不动）。
   void zoomAt(ui.Offset worldPoint, double factor) {
-    final rel = ui.Offset(
-      ((worldPoint.dx - rect.left) / rect.width).clamp(0.0, 1.0),
-      ((worldPoint.dy - rect.top) / rect.height).clamp(0.0, 1.0),
-    );
-    final anchor = ui.Offset(
-      frame.left + rel.dx * frame.width,
-      frame.top + rel.dy * frame.height,
-    );
-    final next = (zoom * factor).clamp(1.0, maxZoom);
-    final base = _baseFrame(rect.size);
-    final w = math.min(base.width / next, _imgSize.width);
-    final h = math.min(base.height / next, _imgSize.height);
-    frame = ui.Rect.fromLTWH(
-      (anchor.dx - rel.dx * w).clamp(0.0, math.max(0.0, _imgSize.width - w)),
-      (anchor.dy - rel.dy * h).clamp(0.0, math.max(0.0, _imgSize.height - h)),
-      w,
-      h,
-    );
+    final next = (zoom * factor).clamp(minZoom, maxZoom);
+    if (next == zoom) return;
+    // 指针相对"当前图心"的偏移；缩放 r 倍后图心沿反方向外移，指针下
+    // 的内容保持钉住：C' = P + r*(C-P) ⇒ pan' = pan + (P-C)*(1-r)。
+    final offset = worldPoint - (rect.center + pan);
+    final ratio = next / zoom;
+    pan = pan + offset * (1.0 - ratio);
+    zoom = next;
   }
 
-  /// 手柄调整框架后：保持取景中心与倍率，按新框架形状重算窗口。
-  void reframeAfterResize() {
-    frame = _frameFor(rect.size, zoom, frame.center);
+  /// 手柄调整框架：图片在世界坐标里钉住不动（位置与大小都不变），
+  /// 框架矩形在其上变形——"窗口"心智：调框只改变露出范围，不挪内容。
+  void resizeFrameTo(ui.Rect newRect) {
+    if (newRect.width <= 0 || newRect.height <= 0) return;
+    final oldImage = imageRect;
+    final oldFit = _fitScale;
+    rect = newRect;
+    if (oldFit > 0 && _fitScale > 0) {
+      zoom = (zoom * oldFit / _fitScale).clamp(minZoom, maxZoom);
+    }
+    pan = oldImage.center - rect.center;
   }
 
-  /// 整体移动框架（世界坐标 delta）：取景窗口原样跟着走（看到的内容
-  /// 不变，只是框挪位置）。
+  /// 整体移动框架（世界坐标 delta）：图片跟着框走（相对位置不变）。
   void moveByWorld(ui.Offset deltaWorld) {
     rect = rect.shift(deltaWorld);
   }
 
-  /// 绘制目标 = 框架本身（cover 模型下图必盖满框，无内缩偏移）。
-  ui.Rect get contentRect => rect;
-  ui.Rect get sourceRect => frame;
+  /// 撤销快照还原：用记录时的 imageRect 反推 pan/zoom。
+  void restoreImageRect(ui.Rect imageRect) {
+    pan = imageRect.center - rect.center;
+    final img = _imgSize;
+    final fit = _fitScale;
+    if (img.width <= 0 || img.height <= 0 || fit <= 0) return;
+    zoom = (imageRect.width / img.width / fit).clamp(minZoom, maxZoom);
+  }
 
   void dispose() => image.dispose();
+}
+
+/// 桌面式对齐（重做版）：**只对齐其他框架的边/中线**——不再拿画布
+/// 边缘和中线当靶子（上一版线太密、吸得突兀被否）。[moving] 的
+/// 左/中/右 与 [others] 各框的左/中/右 距离 ≤ [tolerance] 时吸附到
+/// 该线（横纵独立、取最近一条），命中的线作为参考线返回：拖拽中实时
+/// 显示蓝线提示，松手才真正吸附。无命中则原样返回。
+({ui.Rect rect, List<ui.Rect> guides}) snapAlignFrame({
+  required ui.Rect moving,
+  required List<ui.Rect> others,
+  required double tolerance,
+  double lineWidth = 1.5,
+  double overhang = 40.0,
+}) {
+  final guides = <ui.Rect>[];
+  double? bestX;
+  var bestXD = tolerance + 1;
+  double? bestXLine;
+  for (final r in others) {
+    for (final line in [r.left, r.center.dx, r.right]) {
+      for (final edge in [moving.left, moving.center.dx, moving.right]) {
+        final d = (line - edge).abs();
+        if (d <= tolerance && d < bestXD) {
+          bestXD = d;
+          bestX = line - edge;
+          bestXLine = line;
+        }
+      }
+    }
+  }
+  double? bestY;
+  var bestYD = tolerance + 1;
+  double? bestYLine;
+  for (final r in others) {
+    for (final line in [r.top, r.center.dy, r.bottom]) {
+      for (final edge in [moving.top, moving.center.dy, moving.bottom]) {
+        final d = (line - edge).abs();
+        if (d <= tolerance && d < bestYD) {
+          bestYD = d;
+          bestY = line - edge;
+          bestYLine = line;
+        }
+      }
+    }
+  }
+  final left = moving.left + (bestX ?? 0);
+  final top = moving.top + (bestY ?? 0);
+  final out = ui.Rect.fromLTWH(left, top, moving.width, moving.height);
+  if (bestXLine != null) {
+    guides.add(
+      ui.Rect.fromLTWH(
+        bestXLine - lineWidth / 2,
+        out.top - overhang,
+        lineWidth,
+        out.height + overhang * 2,
+      ),
+    );
+  }
+  if (bestYLine != null) {
+    guides.add(
+      ui.Rect.fromLTWH(
+        out.left - overhang,
+        bestYLine - lineWidth / 2,
+        out.width + overhang * 2,
+        lineWidth,
+      ),
+    );
+  }
+  return (rect: out, guides: guides);
 }
 
 /// 按槽数与图片尺寸算网格布局：返回（世界尺寸，各槽框架矩形）。
@@ -329,7 +316,17 @@ Future<ui.Image?> bakeCollage(
   for (final slot in slots) {
     canvas.save();
     canvas.clipRect(slot.rect);
-    canvas.drawImageRect(slot.image, slot.sourceRect, slot.contentRect, paint);
+    canvas.drawImageRect(
+      slot.image,
+      ui.Rect.fromLTWH(
+        0,
+        0,
+        slot.image.width.toDouble(),
+        slot.image.height.toDouble(),
+      ),
+      slot.imageRect,
+      paint,
+    );
     canvas.restore();
   }
   final picture = recorder.endRecording();

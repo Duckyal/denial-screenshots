@@ -392,7 +392,7 @@ class CollageContentPainter extends CustomPainter {
           slot.image.width.toDouble(),
           slot.image.height.toDouble(),
         ),
-        slot.contentRect,
+        slot.imageRect,
         paint,
       );
       canvas.restore();
@@ -412,10 +412,15 @@ class CollageGuidePainter extends CustomPainter {
     this.selectedIndex,
     this.version = 0,
     this.handleSize = 0,
+    this.guides = const [],
   });
 
   final List<CollageSlot> slots;
   final int? selectedIndex;
+
+  /// 拖框过程中命中的对齐参考线（世界坐标矩形），实时画成蓝线；
+  /// 空列表不画。松手吸附后由编辑器清空。
+  final List<Rect> guides;
 
   /// 槽的 pan/zoom 是原地修改（引用不变），编辑器每次改动递增此版本号，
   /// 否则 shouldRepaint 的引用比较会漏画。
@@ -427,6 +432,13 @@ class CollageGuidePainter extends CustomPainter {
 
   @override
   void paint(Canvas canvas, Size size) {
+    // 对齐参考线：拖框时命中才画（1.5px 亮蓝，盖在框线之上更醒目）。
+    if (guides.isNotEmpty) {
+      final line = Paint()..color = const Color(0xFF4C9AFF);
+      for (final g in guides) {
+        canvas.drawRect(g, line);
+      }
+    }
     for (var i = 0; i < slots.length; i++) {
       final selected = i == selectedIndex;
       final rect = slots[i].rect;
@@ -470,7 +482,8 @@ class CollageGuidePainter extends CustomPainter {
       oldDelegate.selectedIndex != selectedIndex ||
       oldDelegate.slots != slots ||
       oldDelegate.version != version ||
-      oldDelegate.handleSize != handleSize;
+      oldDelegate.handleSize != handleSize ||
+      oldDelegate.guides != guides;
 }
 
 /// 文本框编辑态的高亮层：高对比虚线描边 + 半透明底 + 四角实心角标，
