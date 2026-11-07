@@ -197,9 +197,6 @@ class _CaptureFlowHostState extends ConsumerState<CaptureFlowHost> {
     _requests?.cancel();
     _cursorSub?.cancel();
     _environmentEvents?.cancel();
-    // 异常路径销毁（不经 _close）也要复位：suppressAutoOpen 卡在 true
-    // 会让"截图自动进编辑器"永久失效。
-    DenialScreenshotEditorBus.instance.suppressAutoOpen.value = false;
     _windowPick
       ..removeListener(_recomputeWindowHover)
       ..stop()

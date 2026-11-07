@@ -1,5 +1,4 @@
 import 'dart:io';
-import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
 
@@ -475,15 +474,7 @@ class _PathChooserPanelState extends State<PathChooserPanel> {
           style: const TextStyle(color: Colors.white),
           child: Container(
             width: widget.width,
-            // 高度按窗口再夹一遍：调用方摆位的 clamp 在"窗口比面板还矮"
-            // 时算出负上界、被 max(8,…) 吃掉，面板底部就溢出屏幕（文件
-            // 多的目录 + 小屏必踩）。内部 ListView 会随高度收缩滚动。
-            constraints: BoxConstraints(
-              maxHeight: math.min(
-                widget.height,
-                math.max(240.0, MediaQuery.sizeOf(context).height - 24),
-              ),
-            ),
+            constraints: BoxConstraints(maxHeight: widget.height),
             decoration: BoxDecoration(
               color: widget.background,
               borderRadius: BorderRadius.circular(12),
