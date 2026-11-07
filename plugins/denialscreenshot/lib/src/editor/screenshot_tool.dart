@@ -813,6 +813,27 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
   /// 的效果一致——此前写反（按 ↓ 反而看上方），同一画布里两种平移输入
   /// 互相打架，用起来很别脚。
   bool _panWithArrowKey(LogicalKeyboardKey key) {
+    // 拆图工作台：方向键直接平移整张底图（改 slot.pan），步幅精细（5 像素），
+    // Shift 加速（25 像素）。与画布缩放无关，永远生效。
+    if (_splitBoard && _collageSlots != null) {
+      final step = HardwareKeyboard.instance.isShiftPressed ? 25.0 : 5.0;
+      final delta = switch (key) {
+        LogicalKeyboardKey.arrowLeft => Offset(-step, 0),
+        LogicalKeyboardKey.arrowRight => Offset(step, 0),
+        LogicalKeyboardKey.arrowUp => Offset(0, -step),
+        LogicalKeyboardKey.arrowDown => Offset(0, step),
+        _ => Offset.zero,
+      };
+      if (delta == Offset.zero) return false;
+      final slots = _collageSlots!;
+      // 所有格共享 pan：改一张就行，其余同步
+      _pushCollageStep();
+      for (final sl in slots) {
+        sl.pan += delta;
+      }
+      _touchCollage();
+      return true;
+    }
     final viewport = _lastCanvasViewport;
     if (viewport == null || viewport.isEmpty || _canvasZoom <= 1) {
       return false;
@@ -5708,10 +5729,16 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
     );
   }
 
-  /// 退出拆图工作台：dispose slots 并重置状态，Ctrl+Z 可从撤销栈恢复。
+  /// 退出拆图工作台：等价 Ctrl+Z，弹出"进拆图"那条撤销快照，
+  /// 完整恢复原始底图 + 标注。
   void _exitSplitBoard() {
-    _discardCollageSlots();
-    _pruneCollageImages();
+    if (_undoSnapshots.isNotEmpty) {
+      _undo();
+    } else {
+      // 保险：没有撤销快照时，直接 dispose slots。
+      _discardCollageSlots();
+      _pruneCollageImages();
+    }
   }
 
   /// 拆图工作台内切换行列数：**底图保留**（pan/zoom 跟随新网格中心），
