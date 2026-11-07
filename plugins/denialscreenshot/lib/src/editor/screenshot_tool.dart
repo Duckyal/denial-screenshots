@@ -1000,6 +1000,8 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
       _loupeSlot = -1;
       _loupeRestore = null;
       _splitBoard = false;
+      _activeSplitRows = 3;
+      _activeSplitCols = 3;
       _collageDragSlot = null;
       _collageMoveSlot = null;
       _collageResizeSlot = null;
@@ -4561,6 +4563,10 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
   int _splitRows = 3;
   int _splitCols = 3;
 
+  /// 拆图工作台当前生效的行列数（进入时记录，"切换"时比对 stepper 值）。
+  int _activeSplitRows = 3;
+  int _activeSplitCols = 3;
+
   /// 拆图工作台：由「更多功能→拆分导出→确定」进入——当前画面（含标注）
   /// 烘成底图，按 rows×cols 均分成互不重叠、正好铺满的框架（N 块能拼
   /// 回原图），每格 1:1 显示对应块；框架与逐格取景像拼图工作台一样可调。
@@ -5508,7 +5514,7 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
                 style: const TextStyle(fontSize: 11, color: Colors.white54),
               ),
               divider(),
-              // ── 拆分导出 ──
+              // ── 拆图工作台 ──
               section(L.pick(context, '拆图工作台', 'SPLIT BOARD')),
               Row(
                 children: [
@@ -5517,26 +5523,65 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
                     _splitRows,
                     (v) => setState(() => _splitRows = v.clamp(1, 9)),
                   ),
-                  const SizedBox(width: 6),
+                  const SizedBox(width: 12),
                   stepper(
                     L.pick(context, '列', 'C'),
                     _splitCols,
                     (v) => setState(() => _splitCols = v.clamp(1, 9)),
                   ),
-                  const Spacer(),
-                  FilledButton(
-                    onPressed: _startSplitBoard,
-                    style: FilledButton.styleFrom(
-                      minimumSize: const Size(0, 32),
-                      padding: const EdgeInsets.symmetric(horizontal: 14),
-                    ),
-                    child: Text(
-                      L.pick(context, '确定', 'Split'),
-                      style: const TextStyle(fontSize: 12),
-                    ),
-                  ),
                 ],
               ),
+              const SizedBox(height: 8),
+              _splitBoard
+                  // 已在拆图工作台：按钮 = 取消 / 切换
+                  ? SizedBox(
+                      width: double.infinity,
+                      child: FilledButton(
+                        onPressed: () {
+                          setState(() => _morePanelOpen = false);
+                          final rows = _splitRows.clamp(1, 9);
+                          final cols = _splitCols.clamp(1, 9);
+                          if (rows != _activeSplitRows || cols != _activeSplitCols) {
+                            // 行列变了 → 切换（重建九宫格，保留底图和已有撤销栈）
+                            _switchSplitGrid(rows, cols);
+                          } else {
+                            // 没变 → 取消（退出拆图）
+                            _exitSplitBoard();
+                          }
+                        },
+                        style: FilledButton.styleFrom(
+                          minimumSize: const Size(0, 32),
+                          padding: const EdgeInsets.symmetric(horizontal: 14),
+                          backgroundColor:
+                              (_splitRows != _activeSplitRows ||
+                                      _splitCols != _activeSplitCols)
+                                  ? const Color(0xFF4C9AFF)
+                                  : const Color(0xFFD64545),
+                        ),
+                        child: Text(
+                          (_splitRows != _activeSplitRows ||
+                                  _splitCols != _activeSplitCols)
+                              ? L.pick(context, '切换', 'Switch')
+                              : L.pick(context, '取消', 'Cancel'),
+                          style: const TextStyle(fontSize: 12),
+                        ),
+                      ),
+                    )
+                  // 未在拆图工作台：按钮 = 确认
+                  : SizedBox(
+                      width: double.infinity,
+                      child: FilledButton(
+                        onPressed: _startSplitBoard,
+                        style: FilledButton.styleFrom(
+                          minimumSize: const Size(0, 32),
+                          padding: const EdgeInsets.symmetric(horizontal: 14),
+                        ),
+                        child: Text(
+                          L.pick(context, '确定', 'Confirm'),
+                          style: const TextStyle(fontSize: 12),
+                        ),
+                      ),
+                    ),
               // 拆图模型：固定的正方形九宫格框架 + 一张可自由挪动/缩放的
               // 底图（九格是底图的九个窗口）。不做模式开关——只有这一种。
               Text(
@@ -5629,6 +5674,8 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
     }
     setState(() {
       _splitBoard = true;
+      _activeSplitRows = rows;
+      _activeSplitCols = cols;
       _collageSlots = slots;
       _collageWorld = world;
       // 框选阶段的选区矩形（蓝色 SelectionPainter 框）进工作台后没有
@@ -5657,6 +5704,74 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
         context,
         '拆图工作台：已按 $rows×$cols 均分（不重叠、可拼回原图）；保存按文件名+序号导出 ${rows * cols} 张',
         'Split board: tiled into $rows×$cols without overlap; save exports ${rows * cols} indexed files',
+      ),
+    );
+  }
+
+  /// 退出拆图工作台：dispose slots 并重置状态，Ctrl+Z 可从撤销栈恢复。
+  void _exitSplitBoard() {
+    _discardCollageSlots();
+    _pruneCollageImages();
+  }
+
+  /// 拆图工作台内切换行列数：**底图保留**（pan/zoom 跟随新网格中心），
+  /// 九宫格框架按新行列重新均分，world 不变。
+  Future<void> _switchSplitGrid(int rows, int cols) async {
+    final slots0 = _collageSlots;
+    if (slots0 == null || slots0.isEmpty) return;
+    // 所有格共享同一张底图，拿第一张的 imageRect/pan/zoom 当共享状态。
+    final first = slots0.first;
+    final base = first.image;
+    final imgW = base.width.toDouble();
+    final imgH = base.height.toDouble();
+    final cell = math
+        .min((imgW / cols).floorToDouble(), (imgH / rows).floorToDouble())
+        .clamp(1.0, double.infinity);
+    final gridW = cell * cols;
+    final gridH = cell * rows;
+    final gridLeft = ((imgW - gridW) / 2).floorToDouble();
+    final gridTop = ((imgH - gridH) / 2).floorToDouble();
+    final anchor = Rect.fromLTWH(0, 0, imgW, imgH);
+    // 新九宫格框架
+    final slots = <CollageSlot>[];
+    for (var r = 0; r < rows; r++) {
+      for (var c = 0; c < cols; c++) {
+        slots.add(CollageSlot(
+          image: base,
+          rect: Rect.fromLTWH(
+            gridLeft + cell * c,
+            gridTop + cell * r,
+            cell,
+            cell,
+          ),
+        ));
+      }
+    }
+    // 共享原底图的 pan/zoom——用户调的底图位置保持。
+    for (final s in slots) {
+      s.oneToOne = true;
+      s.anchorRect = anchor;
+      s.zoom = first.zoom;
+      s.pan = first.pan;
+    }
+    // 进工作台压一条撤销快照（切换前后都能回滚）。
+    _pushCollageStep();
+    setState(() {
+      _activeSplitRows = rows;
+      _activeSplitCols = cols;
+      _collageSlots = slots;
+      _collageSelected = -1;
+      _loupeSlot = -1;
+      _loupeRestore = null;
+      _collageVersion++;
+      _imageWidget = _buildCollageContentWidget();
+    });
+    _touchCollage();
+    _showMessage(
+      L.pick(
+        context,
+        '已切换为 $rows×$cols',
+        'Switched to $rows×$cols',
       ),
     );
   }
