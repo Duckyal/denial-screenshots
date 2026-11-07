@@ -410,11 +410,15 @@ class CollageGuidePainter extends CustomPainter {
     this.guides = const [],
     this.strokeWidthScale = 1.0,
     this.selectable = true,
+    this.fixedGrid = false,
   });
 
   /// 是否允许选中高亮与调框手柄。拆图工作台的九宫格框架是固定的、
   /// 不能改，选中反而误导（用户会以为能拖动）——关掉。
   final bool selectable;
+
+  /// 拆图模式：固定网格，不画选中/手柄，但保留规整的井字形分割线。
+  final bool fixedGrid;
 
   /// 世界像素/屏幕像素换算：>1 放大（线变细回屏幕宽度），<1 全景
   /// （线加粗到屏幕宽度）。线宽与出线长度都按它除。
@@ -438,6 +442,39 @@ class CollageGuidePainter extends CustomPainter {
   @override
   void paint(Canvas canvas, Size size) {
     final k = strokeWidthScale <= 0 ? 1.0 : strokeWidthScale;
+
+    // 拆图模式：固定井字形分割线——相邻格子共享一条边，不描两遍。
+    if (fixedGrid) {
+      final paintDark = Paint()
+        ..color = const Color(0xB3000000)
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = 3.0 / k;
+      final paintLight = Paint()
+        ..color = const Color(0xE6FFFFFF)
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = 1.2 / k;
+      // 收集所有独立的竖线和横线（去重共享边）
+      final xs = <double>{};
+      final ys = <double>{};
+      for (final slot in slots) {
+        xs.add(slot.rect.left);
+        xs.add(slot.rect.right);
+        ys.add(slot.rect.top);
+        ys.add(slot.rect.bottom);
+      }
+      // 排序后画线——井字形（去重共享边，每条只描一次）
+      final xList = xs.toList()..sort();
+      final yList = ys.toList()..sort();
+      for (final x in xList) {
+        canvas.drawLine(Offset(x, yList.first), Offset(x, yList.last), paintDark);
+        canvas.drawLine(Offset(x, yList.first), Offset(x, yList.last), paintLight);
+      }
+      for (final y in yList) {
+        canvas.drawLine(Offset(xList.first, y), Offset(xList.last, y), paintDark);
+        canvas.drawLine(Offset(xList.first, y), Offset(xList.last, y), paintLight);
+      }
+      return;
+    }
 
     void frame(CollageSlot slot, {required bool selected}) {
       final rect = slot.rect;
@@ -520,7 +557,8 @@ class CollageGuidePainter extends CustomPainter {
       oldDelegate.version != version ||
       oldDelegate.handleSize != handleSize ||
       oldDelegate.guides != guides ||
-      oldDelegate.strokeWidthScale != strokeWidthScale;
+      oldDelegate.strokeWidthScale != strokeWidthScale ||
+      oldDelegate.fixedGrid != fixedGrid;
 }
 
 /// 文本框编辑态的高亮层：高对比虚线描边 + 半透明底 + 四角实心角标，

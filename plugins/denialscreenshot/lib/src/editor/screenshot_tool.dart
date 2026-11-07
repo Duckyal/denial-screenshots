@@ -755,7 +755,7 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
       if (index != null) {
         _pushCollageStep();
         final slot = _collageSlots![index];
-        final factor = event.scrollDelta.dy < 0 ? 1.15 : 1 / 1.15;
+        final factor = event.scrollDelta.dy < 0 ? 1.05 : 1 / 1.05;
         // 所有格共享 zoom/pan：改一次，九格同步（指针下内容钉住）。
         final next = (slot.zoom * factor).clamp(
           CollageSlot.minZoom,
@@ -767,7 +767,7 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
           sl.zoom = next;
           sl.pan = sl.pan + offset * (1.0 - ratio);
         }
-        _collageSelected = index;
+        // 拆图框架固定不可选：永远不设选中，免得内部状态脏掉。
         _touchCollage();
         return;
       }
@@ -1475,9 +1475,12 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
                                                     slots: _collageSlots!,
                                                     selectedIndex:
                                                         _collageSelected,
-                                                    // 拆图的九宫格框架固定不可
-                                                    // 改：不画选中高亮/手柄。
+                                                    // 拆图：固定井字形分割线，不可选不可拖动。
+                                                    // selectable + fixedGrid 双保险：
+                                                    // selectable=false 关选中/手柄，
+                                                    // fixedGrid=true 走专用井字形渲染。
                                                     selectable: !_splitBoard,
+                                                    fixedGrid: _splitBoard,
                                                     version: _collageVersion,
                                                     handleSize:
                                                         _resizeHandleWorldSize,
