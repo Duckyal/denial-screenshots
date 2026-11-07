@@ -99,6 +99,17 @@ final class CollageSlot {
   /// 图心相对框心的偏移（世界坐标）。
   ui.Offset pan = ui.Offset.zero;
 
+  /// 拆图：本格显示的原图区域（源矩形，原图像素坐标）。**仅逐格独立
+  /// 模式**用（各格自己的那块）；联动模式下整张底图共享一组 zoom/pan，
+  /// 每格是底图的一个窗口（源区域由 zoom/pan 算出，无需显式矩形）。
+  /// 拼图工作台为 null（= 整张图，自由取景）。
+  ui.Rect? sourceViewport;
+
+  /// 联动取景的**共享锚点**（世界坐标）：底图整体摆放的参考框——所有格
+  /// 共享它（底图在世界里只摆一份），每格是它在锚点内的窗口。联动时
+  /// 设为整个网格矩形；逐格独立/拼图为 null（各自按自己的 rect 摆）。
+  ui.Rect? anchorRect;
+
   static const minSide = 60.0;
   static const minZoom = 0.2;
 
@@ -109,25 +120,68 @@ final class CollageSlot {
   ui.Size get _imgSize =>
       ui.Size(image.width.toDouble(), image.height.toDouble());
 
-  /// 适配基准：图完整放进框架的最大比例（contain）。
+  /// 摆放参考框：联动时用共享锚点（底图对所有格同一个位置），否则用
+  /// 本格矩形。
+  ui.Rect get _frameRect => anchorRect ?? rect;
+
+  /// 适配基准：图完整放进参考框的最大比例（contain）。
   double get _fitScale {
     final img = _imgSize;
+    final frame = _frameRect;
     if (img.width <= 0 ||
         img.height <= 0 ||
-        rect.width <= 0 ||
-        rect.height <= 0) {
+        frame.width <= 0 ||
+        frame.height <= 0) {
       return 1.0;
     }
-    return math.min(rect.width / img.width, rect.height / img.height);
+    return math.min(frame.width / img.width, frame.height / img.height);
+  }
+
+  /// 这一格实际取用的**源矩形**（原图像素坐标）：拆图=自己的源区域
+  /// [sourceViewport]（各格不同，拼起来 = 原图或共享区域）；拼图=整张图。
+  ui.Rect get effectiveSourceRect {
+    final full = ui.Rect.fromLTWH(
+      0,
+      0,
+      image.width.toDouble(),
+      image.height.toDouble(),
+    );
+    final vp = sourceViewport;
+    if (vp == null) return full;
+    final l = vp.left.clamp(0.0, full.right);
+    final t = vp.top.clamp(0.0, full.bottom);
+    final r = vp.right.clamp(0.0, full.right);
+    final b = vp.bottom.clamp(0.0, full.bottom);
+    if (r <= l || b <= t) return full;
+    return ui.Rect.fromLTRB(l, t, r, b);
   }
 
   /// 图片当前占据的世界矩形（可能小于/大于框架；绘制与烘焙都按它）。
+  /// 联动取景开启时用共享的 [linkZoom]/[linkPan] 代替本槽的 zoom/pan。
   ui.Rect get imageRect {
+    if (fixedTarget) {
+      // 逐格独立：源区域直接铺进格子（不做 contain 缩放）。
+      return rect;
+    }
     final base = _fitScale * zoom;
     final w = _imgSize.width * base;
     final h = _imgSize.height * base;
-    return ui.Rect.fromCenter(center: rect.center + pan, width: w, height: h);
+    // 拆图（oneToOne）：底图 1:1 贴原图，锚点 = 原图区域（世界坐标），
+    // pan=0 时底图与原图重合，九格各看自己那块。
+    // 拼图：contain 基准 + zoom/pan（自由取景）。
+    return ui.Rect.fromCenter(
+      center: _frameRect.center + pan,
+      width: w,
+      height: h,
+    );
   }
+
+  /// 拆图模式：目标矩形恒等于格子（源区域直接映射进格子）。
+  bool fixedTarget = false;
+
+  /// 拆图：底图按 **1:1** 贴原图（fit=1），九宫格框架是原图上的窗口——
+  /// 每格显示原图对应那一块，拖动/缩放底图就是在原图上取景。
+  bool oneToOne = false;
 
   /// 平移：框架内拖动 [deltaWorld]（世界坐标）→ 图片跟着手指走。
   void panByWorld(ui.Offset deltaWorld) {
@@ -159,6 +213,46 @@ final class CollageSlot {
     pan = oldImage.center - rect.center;
   }
 
+  /// 拆图：平移本格的源区域（选截原图哪一块），夹在原图范围内。
+  void panSourceViewport(ui.Offset deltaSource) {
+    final vp = sourceViewport;
+    if (vp == null) return;
+    final full = ui.Rect.fromLTWH(
+      0,
+      0,
+      image.width.toDouble(),
+      image.height.toDouble(),
+    );
+    final left = (vp.left + deltaSource.dx).clamp(
+      0.0,
+      math.max(0.0, full.width - vp.width).toDouble(),
+    );
+    final top = (vp.top + deltaSource.dy).clamp(
+      0.0,
+      math.max(0.0, full.height - vp.height).toDouble(),
+    );
+    sourceViewport = ui.Rect.fromLTWH(left, top, vp.width, vp.height);
+  }
+
+  /// 拆图：缩放本格的源区域（围绕中心），夹在原图范围内。
+  void zoomSourceViewport(double factor) {
+    final vp = sourceViewport;
+    if (vp == null) return;
+    final full = ui.Rect.fromLTWH(
+      0,
+      0,
+      image.width.toDouble(),
+      image.height.toDouble(),
+    );
+    final w = (vp.width * factor).clamp(8.0, full.width);
+    final h = (vp.height * factor).clamp(8.0, full.height);
+    var left = vp.center.dx - w / 2;
+    var top = vp.center.dy - h / 2;
+    left = left.clamp(0.0, math.max(0.0, full.width - w).toDouble());
+    top = top.clamp(0.0, math.max(0.0, full.height - h).toDouble());
+    sourceViewport = ui.Rect.fromLTWH(left, top, w, h);
+  }
+
   /// 整体移动框架（世界坐标 delta）：图片跟着框走（相对位置不变）。
   void moveByWorld(ui.Offset deltaWorld) {
     rect = rect.shift(deltaWorld);
@@ -168,6 +262,13 @@ final class CollageSlot {
   void restoreImageRect(ui.Rect imageRect) {
     pan = imageRect.center - rect.center;
     final img = _imgSize;
+    // oneToOne 模式：底图 1:1 贴原图，fitScale 恒为 1（anchorRect = 原图区域），
+    // 还原时直接用 imageRect 尺寸比上原图像素尺寸即可——别再乘/除 fitScale，
+    // 否则 fitScale 被当成 contain 基准，缩放值完全错乱。
+    if (oneToOne && anchorRect != null) {
+      zoom = (imageRect.width / img.width).clamp(minZoom, maxZoom);
+      return;
+    }
     final fit = _fitScale;
     if (img.width <= 0 || img.height <= 0 || fit <= 0) return;
     zoom = (imageRect.width / img.width / fit).clamp(minZoom, maxZoom);
@@ -318,12 +419,7 @@ Future<ui.Image?> bakeCollage(
     canvas.clipRect(slot.rect);
     canvas.drawImageRect(
       slot.image,
-      ui.Rect.fromLTWH(
-        0,
-        0,
-        slot.image.width.toDouble(),
-        slot.image.height.toDouble(),
-      ),
+      slot.effectiveSourceRect,
       slot.imageRect,
       paint,
     );

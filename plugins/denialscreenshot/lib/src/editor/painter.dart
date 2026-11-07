@@ -386,12 +386,7 @@ class CollageContentPainter extends CustomPainter {
       canvas.clipRect(slot.rect);
       canvas.drawImageRect(
         slot.image,
-        Rect.fromLTWH(
-          0,
-          0,
-          slot.image.width.toDouble(),
-          slot.image.height.toDouble(),
-        ),
+        slot.effectiveSourceRect,
         slot.imageRect,
         paint,
       );
@@ -414,7 +409,12 @@ class CollageGuidePainter extends CustomPainter {
     this.handleSize = 0,
     this.guides = const [],
     this.strokeWidthScale = 1.0,
+    this.selectable = true,
   });
+
+  /// 是否允许选中高亮与调框手柄。拆图工作台的九宫格框架是固定的、
+  /// 不能改，选中反而误导（用户会以为能拖动）——关掉。
+  final bool selectable;
 
   /// 世界像素/屏幕像素换算：>1 放大（线变细回屏幕宽度），<1 全景
   /// （线加粗到屏幕宽度）。线宽与出线长度都按它除。
@@ -483,7 +483,7 @@ class CollageGuidePainter extends CustomPainter {
     }
 
     for (var i = 0; i < slots.length; i++) {
-      final selected = i == selectedIndex;
+      final selected = selectable && i == selectedIndex;
       final rect = slots[i].rect;
       if (selected && handleSize > 0) {
         final fill = Paint()..color = Colors.white;

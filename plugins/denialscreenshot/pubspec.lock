@@ -76,24 +76,32 @@ packages:
   denial_flutter_sdk:
     dependency: "direct main"
     description:
-      path: "/home/wu/.local/state/denial/plugins/build-kits/4d69d87ef7d6b197c0dd34d74a1926ca16eb067fa4b43d90489c2048b764715c/runtime/packages/denial_flutter_sdk"
+      path: "/home/wu/.local/state/denial/plugins/build-kits/0143e6b8f826b5049551fc334c02e319f02e167d3fdd65befd473c96ad2c5a58/runtime/packages/denial_flutter_sdk"
       relative: false
     source: path
     version: "0.0.0"
   denial_sdk:
     dependency: "direct main"
     description:
-      path: "/home/wu/.local/state/denial/plugins/build-kits/4d69d87ef7d6b197c0dd34d74a1926ca16eb067fa4b43d90489c2048b764715c/runtime/packages/denial_sdk"
+      path: "/home/wu/.local/state/denial/plugins/build-kits/0143e6b8f826b5049551fc334c02e319f02e167d3fdd65befd473c96ad2c5a58/runtime/packages/denial_sdk"
       relative: false
     source: path
     version: "0.0.0"
   denial_wire_protocol:
     dependency: transitive
     description:
-      path: "../../../../.local/state/denial/plugins/build-kits/4d69d87ef7d6b197c0dd34d74a1926ca16eb067fa4b43d90489c2048b764715c/runtime/protocol/generated/dart"
+      path: "../../../../.local/state/denial/plugins/build-kits/0143e6b8f826b5049551fc334c02e319f02e167d3fdd65befd473c96ad2c5a58/runtime/protocol/generated/dart"
       relative: true
     source: path
     version: "0.1.0"
+  equatable:
+    dependency: transitive
+    description:
+      name: equatable
+      sha256: "3bce007a596ff8b3119c45d68aaef631272537c03d30e5d4534dd24bf4c5eaa2"
+      url: "https://pub.dev"
+    source: hosted
+    version: "2.1.0"
   fake_async:
     dependency: transitive
     description:
@@ -237,6 +245,14 @@ packages:
       url: "https://pub.dev"
     source: hosted
     version: "1.19.0"
+  motor:
+    dependency: transitive
+    description:
+      name: motor
+      sha256: cbd49f21b00e568c2b1a55f134ed803614a107782f4fea7769693bca32940c58
+      url: "https://pub.dev"
+    source: hosted
+    version: "1.1.0"
   path:
     dependency: transitive
     description:
