@@ -86,6 +86,9 @@ class _EditorSurfaceHostState extends ConsumerState<EditorSurfaceHost> {
     _resumes?.cancel();
     _directoryEvents?.cancel();
     _openRequestEvents?.cancel();
+    // surface 没了编辑器必然不可见：不重置的话 editorVisible 卡在 true，
+    // Alt+A 会被"编辑器开着"分支永远吞掉（转发给不存在的编辑器）。
+    DenialScreenshotEditorBus.instance.editorVisible.value = false;
     EditorHostBridge.instance.unbindSurface(this);
     super.dispose();
   }
