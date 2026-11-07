@@ -121,15 +121,17 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
   final List<_EditSnapshot> _undoSnapshots = [];
   final List<_EditSnapshot> _redoSnapshots = [];
 
-  _EditSnapshot _snapshotNow() => (
-    commands: List<DrawCommand>.from(history),
-    bytes: (_collageSlots != null && _preSplitBytes != null)
-        ? _preSplitBytes!
-        : _currentImageBytes,
-    slots: _collageSlots == null ? null : _slotStatesOf(_collageSlots!),
-    world: _collageWorld,
-    split: _splitBoard,
-  );
+  _EditSnapshot _snapshotNow() {
+    final usePre = (_collageSlots != null && _preSplitBytes != null);
+    final bytes = usePre ? _preSplitBytes! : _currentImageBytes;
+    return (
+      commands: List<DrawCommand>.from(history),
+      bytes: bytes,
+      slots: _collageSlots == null ? null : _slotStatesOf(_collageSlots!),
+      world: _collageWorld,
+      split: _splitBoard,
+    );
+  }
 
   /// 槽的浅拷贝状态（图片按引用共享，不拷贝像素）。
   static List<_CollageSlotState> _slotStatesOf(List<CollageSlot> slots) => [
@@ -5094,8 +5096,6 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
       _ocrGeneration++;
       _filePanelCollage = false;
       _preSplitBytes = _currentImageBytes;
-      _preSplitBytes = _currentImageBytes;
-      _preSplitBytes = _currentImageBytes;
       _currentImageBytes = Uint8List(0);
       _imageWidget = _buildCollageContentWidget();
       _canvasZoom = 1.0;
@@ -5154,6 +5154,10 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
   Timer? _groupTimer;
   _EditSnapshot? _pendingCollageSnapshot;
   void _pushCollageStep() {
+    // 拆图工作台是预览态：调节底图（缩放/平移）实时显示但**不压撤销**。
+    // Ctrl+Z 在拆图里应"一步退出"回到进拆图前的普通编辑（拆图是一次性
+    // 操作，分割只在保存时真正执行），所以拆图内任何槽动作不产生步骤。
+    if (_splitBoard && _collageSlots != null) return;
     // 已经在分组窗口里：不再压新 snapshot，只重置 timer。
     if (_groupTimer != null) {
       _groupTimer!.cancel();
@@ -5180,9 +5184,10 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
   }
 
   /// 槽的 pan/zoom 变了：递增版本并重建内容层 widget。
-  /// 每次"连续操作"结束时（手势 end / 指针 up）都会调，确保撤销落盘。
+  /// 不在这里 flush：连续事件（滚轮一格接一格、方向键按住连发）靠
+  /// [_groupTimer] 自动合并——500ms 静默才算"松手"落盘一条撤销。
+  /// 手势真正结束处（指针 up / 面板动作）才显式 [_flushCollageGroup]。
   void _touchCollage() {
-    _flushCollageGroup();
     _collageVersion++;
     setState(() => _imageWidget = _buildCollageContentWidget());
   }
@@ -5753,8 +5758,6 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
       _hasTextSelection = false;
       _ocrGeneration++;
       _preSplitBytes = _currentImageBytes;
-      _preSplitBytes = _currentImageBytes;
-      _preSplitBytes = _currentImageBytes;
       _currentImageBytes = Uint8List(0);
       _imageWidget = _buildCollageContentWidget();
       _canvasZoom = 1.0;
@@ -5770,16 +5773,32 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
     );
   }
 
-  /// 退出拆图工作台：等价 Ctrl+Z，弹出"进拆图"那条撤销快照，
-  /// 完整恢复原始底图 + 标注。
+  /// 退出拆图工作台（取消）：**手动**回滚到进拆图之前的完整普通编辑。
+  /// 不依赖 undo 栈——进拆图时已把原始字节存进 [_preSplitBytes]，这里
+  /// 直接用它对普通编辑视图做完整恢复（清槽 + 重设字节 + 重建 widget +
+  /// 重置缩放 + 重新解码标注层）。
   void _exitSplitBoard() {
-    if (_undoSnapshots.isNotEmpty) {
-      _undo();
-    } else {
-      // 保险：没有撤销快照时，直接 dispose slots。
-      _discardCollageSlots();
-      _pruneCollageImages();
+    final pre = _preSplitBytes;
+    // 1. 丢弃工作台槽（含 _preSplitBytes=null、九宫格状态全清）
+    _discardCollageSlots();
+    _pruneCollageImages();
+    if (pre == null || pre.isEmpty) {
+      // 理论上不该发生：进拆图前 _currentImageBytes 一定非空。兜底清空。
+      setState(() => _imageWidget = _buildImageWidget());
+      return;
     }
+    // 2. 恢复原始截图字节并重建普通编辑视图（走 _decodeCapturedImage 会
+    //    重建标注层、背景 OCR、重置缩放到 contain）。
+    setState(() {
+      _currentImageBytes = pre;
+      _canvasZoom = 1.0;
+      _canvasPan = Offset.zero;
+      _imageWidget = _buildImageWidget();
+      _frozenBackdrop = _buildFrozenBackdrop();
+      selectionRect = null;
+    });
+    unawaited(_decodeCapturedImage(pre));
+    _invalidateCommands();
   }
 
   /// 拆图工作台内切换行列数：**底图保留**（pan/zoom 跟随新网格中心），
@@ -5877,7 +5896,13 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
     }
     merged.dispose();
     // 全失败不算交付：否则 Esc 不再弹放弃确认，用户以为存过了。
-    if (saved > 0) _delivered = true;
+    final delivered = saved > 0;
+    if (delivered) _delivered = true;
+    // 分割只在保存时真正执行；导出成功后**自动关闭拆图工作台**，回到
+    // 进拆图前的普通编辑（底图恢复原样），不留下可撤销的多余步骤。
+    if (delivered && _splitBoard) {
+      _exitSplitBoard();
+    }
     _showMessage(
       saved == 0
           ? L.pick(context, '拆图导出失败', 'Split export failed')
