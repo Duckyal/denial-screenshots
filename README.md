@@ -44,19 +44,20 @@ QQ / Snipaste 风格的截图标注工具，按 [denial-plugins](https://github.
 | 分类 | 说明 |
 |---|---|
 | 截图取图 | 全屏压暗框选 + 边/角微调；`grim`（wlr-screencopy）截活画面；兼容合成器截图目录 |
-| 标注工具 | 选择、画笔、直线、箭头、矩形、圆、文字、**荧光笔**、马赛克（模糊 / 纯色两种）、橡皮 |
+| 标注工具 | 选择、画笔、直线、箭头、矩形、椭圆、文字、**荧光笔**、马赛克（模糊 / 纯色两种）、橡皮 |
 | 文字引擎 | PPT 式**实时编辑所见即所得**：拖框=多行文本框（超框自动缩字号）、单击=自由单行、双击就地改；颜色/字号/字体/加粗/**背景色**编辑中即时生效；`Enter` 换行 / `Ctrl+Enter` 或点画布提交 / `Esc` 取消 |
 | 图形编辑 | 撤销 / 重做、选中已有图形后改颜色与粗细、删除选中；`Alt+滚轮`缩放画布、方向键平移视角 |
 | 选区工具栏 | 识字 / 翻译 / 长截屏 / 编辑 / 复制 / 保存 / 置顶 / 设置，框选完就地处理 |
 | 长截图 | 框选滚动区域后自动连拍拼接；滚动注入默认为 denial 虚拟键盘，可切 `wtype` / `ydotool` 或手动滚动，翻页键（Down / Space）与速度可在设置里改；右上角有实时缩略图小窗 |
-| 输出 | 保存 / 另存 / 打开图片（文件面板）、`Enter` 保存；「复制」按钮合并复制并关闭，用图标和颜色反馈「复制中 / 已复制 / 失败」；`Esc` 只关窗不覆盖剪贴板；图片剪贴板不可用时兜底复制文件路径文本 |
-| 更多功能 | 置顶旁的「更多」面板二合一：**拼图工作台**（多选面板勾选多张、可跨目录按序；当前画面自动作第一帧；每张图一个框架=开在图上的窗口——框内滚轮缩放 / 拖动平移图片、拖框移动、手柄调框、拖近自动对齐参考线、双击放大预览、Del 删除、保存按包围盒出透明底图，全程可撤销重做）与**拆分导出**（四宫格 / 九宫格 / 自定义 m×n、边距可调，标注烙进每块，N 张 PNG 落截图目录） |
+| 输出 | 保存 / 另存 / 打开图片（文件面板）、`Enter` 保存；「复制」按钮合并复制并关闭，用图标和颜色反馈「复制中 / 已复制 / 失败」；`Esc` 关窗不覆盖剪贴板，**有未保存/未复制的改动时先弹「放弃编辑？」确认**；图片剪贴板不可用时兜底复制文件路径文本 |
+| 更多功能 | 置顶旁的「更多」面板二合一：**拼图工作台**（多选面板勾选多张、可跨目录按序；当前画面自动作第一帧；每张图一个框架=开在图上的窗口——拖框移动、手柄调框、拖近其他框自动吸附对齐、双击放大预览后滚轮缩放 / 拖动平移框内图片、Del 删除、保存按包围盒出透明底图，全程可撤销重做）与**拆图工作台**（朋友圈九宫格式：设行 / 列数点确定，当前画面按 m×n 均分成互不重叠、正好铺满的方格，每格可逐张调取景，保存按「文件名+序号」导出 N 张，拼起来就是原图） |
 | 取字多选 | 光标模式在识别文字上拖拽选字；`Ctrl`+拖拽追加多段（同行覆盖）、`Ctrl`+点 ✕ 释放、`Ctrl+C` 按选取顺序复制 |
 | 置顶快照 | 标注结果或剪贴板内容变成可拖动小卡片浮在桌面，边缘/角落**锁比例缩放**，双击回编辑器继续画，文字卡可就地选字复制 |
 | OCR | 本地 RapidOCR（PP-OCRv3 自带零下载；v4/v5/v6 可下载；统一包内置多语言；也可自选本地模型目录），**或在线视觉大模型**（可复用翻译 API 的地址/密钥，单独填模型名） |
 | 翻译 | **本地离线**（Argos 逐语对 / M2M-100 二选一）或在线 API（OpenAI 兼容 / 百度 / DeepL / LibreTranslate）；译文按原图位置贴回，蒙版可模糊或纯色，文字颜色可提取原色或固定 |
 | 过程可见 | 识字与翻译都有浮层进度：识字显示「已用 Ns / 已找到 N 段」，翻译显示「已用 Ns · 模型名」，失败给出具体原因（超时、连不上、401/429/余额不足…） |
-| 设置 | 工具栏停靠位置、翻译后端与 API、OCR 模型、长截图滚动方式、蒙版颜色等全部持久化；中英双语界面跟随系统语言 |
+| 设置 | 工具栏停靠位置、翻译后端与 API、OCR 模型、长截图滚动方式、蒙版颜色、图片「打开方式」注册开关等全部持久化；中英双语界面跟随系统语言 |
+| 系统集成 | 装好插件即自动注册进文件管理器右键「打开方式」（标准 freedesktop `.desktop` + MIME 关联）；png/jpeg/webp/bmp **原本没有默认打开方式**时自动补位设为本编辑器，已有别人的默认绝不抢占；设置 → 常规 → 「打开图片」可随时关闭（关闭即撤销注册） |
 
 设置文件：`~/.config/denial-screenshots/settings.json`。
 截图目录可用环境变量 `DENIAL_SCREENSHOT_DIR` 覆盖（默认 `~/Pictures/Screenshots`）。
@@ -71,7 +72,7 @@ QQ / Snipaste 风格的截图标注工具，按 [denial-plugins](https://github.
 | 形态 | Denial shell **进程内插件**，无独立窗口 | 独立应用 | 随 QQ 客户端 |
 | 平台 | Denial（Wayland / wlr-screencopy） | Linux（Wayland + X11）/ Windows | Windows（Linux 版功能受限） |
 | 开源 | ✔ 开源 | ✔ 开源 | ✘ 闭源 |
-| 标注工具 | 选择 / 画笔 / 直线 / 箭头 / 矩形 / 圆 / 文字 / 荧光笔 / 马赛克 / 橡皮 | 类似，另有激光笔、放大镜、反色矩形、步骤序号等 | 基础标注（矩形 / 箭头 / 文字 / 马赛克等） |
+| 标注工具 | 选择 / 画笔 / 直线 / 箭头 / 矩形 / 椭圆 / 文字 / 荧光笔 / 马赛克 / 橡皮 | 类似，另有激光笔、放大镜、反色矩形、步骤序号等 | 基础标注（矩形 / 箭头 / 文字 / 马赛克等） |
 | 就地编辑已绘图形 | ✔ 选中改色与粗细、双击改文字 | — | — |
 | 置顶贴图 | ✔ 图 + 文字，可叠多张、锁比例缩放 | ✔ | ✔ |
 | 长截图 / 滚动拼接 | ✔ denial 虚拟键盘自动滚动注入 | ✔ portal 录制式 | ✔ |
@@ -119,6 +120,25 @@ denial-plugins activate CANDIDATE_ID
 **Settings → Shortcuts → Denial actions** → `Screenshot Tool` 绑定快捷键
 （例如把「截图选区-推荐入口」绑到 `Ctrl+Alt+A`，「钉住剪贴板内容」绑到 `Super+S`）。
 
+### 用编辑器打开图片（系统集成）
+
+**装好插件即自动生效**（编辑器 surface 启动时幂等注册，无需任何手动步骤）：
+
+- 右键图片「打开方式」里出现 *Denial Screenshot Editor*，选中即用标注编辑器打开；
+- **默认打开方式只在原本没有时补位**：注册前逐 MIME 检查 `mimeapps.list` 的
+  `[Default Applications]`，png/jpeg/webp/bmp 从没设过默认才设为本编辑器；
+  已有别的默认（看图软件、浏览器…）一律不动，你手动改回去后也永不再抢。
+
+原理是标准 freedesktop 集成，不是另造一套：`.desktop` 条目（`MimeType=image/...`）+ 一个桥接脚本把图片
+路径写进投递目录 `~/.config/denial-screenshot-editor-open/`，编辑器 surface 监听该目录、读后即删；插件
+没在跑时投递的路径会静静等它下次启动排空。
+
+不想用：设置 → 常规 → 「打开图片」切到「关」（**立即撤销注册**：删条目并清掉指向本编辑器的默认项）；也可 `export DENIAL_SCREENSHOT_NO_OPEN_WITH=1` 硬关。想手动装/设默认还可用
+`bash tools/install-image-open.sh [--default]`（与自动注册同源）。卸载：删掉
+`~/.local/share/applications/com.denial.ScreenshotEditor.desktop` 与
+`~/.local/share/bin/denial-screenshot-editor-open`，被补位过的默认再
+`xdg-mime default <原应用> image/png` 改回。
+
 ### 若 activate 报 "No initial frame arrived within 20 seconds"
 
 custom runtime 冷启动偶尔超过 20 秒硬超时。先把 AOT runtime 拉热再切换：
@@ -134,7 +154,7 @@ denialctl ui activate /home/wu/.local/state/denial/plugins/candidates/<CANDIDATE
 
 | 键 | 作用 |
 |---|---|
-| `V` `B` `L` `A` `R` `C` `T` `H` `M` `E` | 选择 / 画笔 / 直线 / 箭头 / 矩形 / 圆 / 文字 / 荧光笔 / 马赛克 / 橡皮 |
+| `V` `B` `L` `A` `R` `C` `T` `H` `M` `E` | 选择 / 画笔 / 直线 / 箭头 / 矩形 / 椭圆 / 文字 / 荧光笔 / 马赛克 / 橡皮 |
 | `Tab` | 收起 / 唤出工具栏 |
 | `Space` | 快捷键面板 |
 | `Ctrl+Z` / `Ctrl+R` | 撤销 / 重做 |
@@ -144,10 +164,10 @@ denialctl ui activate /home/wu/.local/state/denial/plugins/candidates/<CANDIDATE
 | `Ctrl+Enter` | 提交文字编辑（或点画布空白处提交） |
 | 双击文字 | 就地改字：PPT 式实时编辑，颜色 / 字号 / 字体 / 加粗 / 背景即时生效 |
 | 光标模式拖拽 | 在识别出的文字上拖动选字；`Ctrl`+拖拽追加多段（同行新选区覆盖旧段），`Ctrl`+点选段上的 ✕ 释放该段 |
-| `Delete` / `Backspace` | 删除选中图形 |
+| `Delete` / `Backspace` | 删除选中图形 / 工作台选中框架 |
 | `[` / `]` | 笔触粗细微调 |
-| `Alt+滚轮` | 缩放画布；放大后方向键平移视角 |
-| `Esc` | 关闭编辑器（文字编辑中先取消编辑；有选中时先取消选中；不写剪贴板） |
+| `Alt+滚轮` | 缩放画布；放大后方向键平移视角（工作台全景态滚轮=平移视角，双击放大预览态滚轮=缩放框内图片） |
+| `Esc` | 关闭编辑器（文字编辑中先取消编辑；放大预览中先退出预览；有选中时先取消选中；有未交付改动先弹确认；不写剪贴板） |
 
 ## 配置翻译 API
 
@@ -229,7 +249,7 @@ denial-screenshots/
 │   │   ├── selection_surface.dart    # 框选平面 + 选区工具栏（grim 取图）
 │   │   ├── scroll_capture.dart       # 滚动连拍会话
 │   │   ├── scroll_stitch.dart        # 长图拼接
-│   │   ├── editor_surface.dart       # 编辑器 surface + 截图目录监听
+│   │   ├── editor_surface.dart       # 编辑器 surface + 截图目录/打开请求监听
 │   │   ├── pin_surface.dart          # 置顶快照浮窗
 │   │   ├── clipboard.dart            # wl-copy / xclip + 环境兜底
 │   │   ├── exporter.dart             # 图片剪贴板封装与路径兜底
@@ -240,6 +260,11 @@ denial-screenshots/
 │   │   └── editor/                   # 编辑器 UI、命令栈、绘制、设置、
 │   │                                 # 文件面板、翻译服务、sidecar 源码
 │   └── docs/DEVELOPMENT.md       # 开发 / 验证步骤
+├── tools/                        # 开发 / 安装辅助脚本
+│   ├── sync-overrides.sh             # pubspec_overrides 对齐 build-kit
+│   ├── install-image-open.sh         # 装"图片用编辑器打开"的 freedesktop 关联
+│   ├── denial-screenshot-editor-open.sh  # 投递桥接脚本（写路径进投递目录）
+│   └── com.denial.ScreenshotEditor.desktop # .desktop 模板（MimeType=image/*）
 ├── compositor/src/dart_shell/    # 独立编辑器 app（UI 原型，不参与插件构建）
 └── run_standalone.sh             # 独立 app 开发入口
 ```

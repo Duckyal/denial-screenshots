@@ -27,6 +27,7 @@ class ScreenshotSettings {
     this.translateEngine = 'argos',
     this.translateModelsDir = '',
     this.windowPick = true,
+    this.openWith = true,
     this.autoScroll = true,
     this.autoScrollKey = 'Down',
     this.scrollInjector = 'denial',
@@ -76,6 +77,12 @@ class ScreenshotSettings {
   /// 框选阶段的「智能选窗」：未拖拽时悬停高亮光标下的窗口，单击即把整个
   /// 窗口取为选区（QQ / 微信截图式）；按下并拖动仍是自由框选。默认开。
   final bool windowPick;
+
+  /// 「用本编辑器打开图片」系统集成：开=注册 .desktop 条目（文件管理器
+  /// 右键「打开方式」里有我们），且**仅在该 MIME 原本没有显式默认时**
+  /// 补位设为默认；已有别人的默认绝不抢占。关=撤销注册（删条目与脚本，
+  /// 并清掉指向我们的默认项）。默认开。
+  final bool openWith;
 
   /// 自动滚动注入的按键：'Down'（逐行，重叠更稳）| 'space'（翻页，步幅大）。
   /// 仅识别 denial 软件键盘支持的键名。
@@ -191,6 +198,7 @@ class ScreenshotSettings {
     String? translateEngine,
     String? translateModelsDir,
     bool? windowPick,
+    bool? openWith,
     bool? autoScroll,
     String? autoScrollKey,
     String? scrollInjector,
@@ -219,6 +227,7 @@ class ScreenshotSettings {
       translateEngine: translateEngine ?? this.translateEngine,
       translateModelsDir: translateModelsDir ?? this.translateModelsDir,
       windowPick: windowPick ?? this.windowPick,
+      openWith: openWith ?? this.openWith,
       autoScroll: autoScroll ?? this.autoScroll,
       autoScrollKey: autoScrollKey ?? this.autoScrollKey,
       scrollInjector: scrollInjector ?? this.scrollInjector,
@@ -248,6 +257,7 @@ class ScreenshotSettings {
     'translateEngine': translateEngine,
     'translateModelsDir': translateModelsDir,
     'windowPick': windowPick,
+    'openWith': openWith,
     'autoScroll': autoScroll,
     'autoScrollKey': autoScrollKey,
     'scrollInjector': scrollInjector,
@@ -291,6 +301,7 @@ class ScreenshotSettings {
       translateEngine: json['translateEngine'] as String? ?? 'argos',
       translateModelsDir: json['translateModelsDir'] as String? ?? '',
       windowPick: json['windowPick'] as bool? ?? true,
+      openWith: json['openWith'] as bool? ?? true,
       autoScroll: json['autoScroll'] as bool? ?? true,
       autoScrollKey: json['autoScrollKey'] as String? ?? 'Down',
       scrollInjector: switch (json['scrollInjector'] as String?) {

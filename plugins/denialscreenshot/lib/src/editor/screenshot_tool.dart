@@ -16,6 +16,7 @@ import '../api_config_field.dart';
 import '../capture_flow_bus.dart';
 import '../clipboard.dart';
 import '../editor_bus.dart';
+import '../open_with_integration.dart';
 import '../l10n.dart';
 import '../panel_nav.dart';
 import '../scroll_capture.dart';
@@ -774,6 +775,9 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
 
   /// 方向键平移视角：只能平移方向键、且放大后才吃键（未放大时画面本就
   /// 完整可见，不消费按键以免影响其它用途）。Shift 按住时步幅更大。
+  /// 方向按**文档滚动惯例**：按 ↓ = 看下方内容（图片上移），与滚轮向下
+  /// 的效果一致——此前写反（按 ↓ 反而看上方），同一画布里两种平移输入
+  /// 互相打架，用起来很别脚。
   bool _panWithArrowKey(LogicalKeyboardKey key) {
     final viewport = _lastCanvasViewport;
     if (viewport == null || viewport.isEmpty || _canvasZoom <= 1) {
@@ -781,10 +785,10 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
     }
     final step = HardwareKeyboard.instance.isShiftPressed ? 180.0 : 60.0;
     final delta = switch (key) {
-      LogicalKeyboardKey.arrowLeft => Offset(-step, 0),
-      LogicalKeyboardKey.arrowRight => Offset(step, 0),
-      LogicalKeyboardKey.arrowUp => Offset(0, -step),
-      LogicalKeyboardKey.arrowDown => Offset(0, step),
+      LogicalKeyboardKey.arrowLeft => Offset(step, 0),
+      LogicalKeyboardKey.arrowRight => Offset(-step, 0),
+      LogicalKeyboardKey.arrowUp => Offset(0, step),
+      LogicalKeyboardKey.arrowDown => Offset(0, -step),
       _ => Offset.zero,
     };
     if (delta == Offset.zero) return false;
@@ -1903,12 +1907,17 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
       ),
       dockButton(
         Icons.apps_rounded,
-        L.pick(context, '更多功能（拼图 / 拆分导出）', 'More (collage / split export)'),
+        L.pick(context, '更多功能（拼图 / 拆图工作台）', 'More (collage / split boards)'),
         () {
           final opening = !_morePanelOpen;
           setState(() {
             _morePanelOpen = opening;
-            _filePanelOpen = false;
+            if (opening) {
+              _filePanelOpen = false;
+              _settingsOpen = false;
+              _modelManagerOpen = false;
+              _apiConfigOpen = false;
+            }
           });
         },
         active: _morePanelOpen,
@@ -1987,9 +1996,9 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
   /// 展开选项行的内容：随工具变化（颜色/粗细/蒙版填充方式）。
   /// 光标模式选中对象时展示该对象的可编辑项。返回 null 表示不展开。
   Widget? _buildOptionsPanelContent() {
-    // 设置/文件面板打开时收起工具二级菜单及其三级面板（调色板/字体），
-    // 一次只跟随一个按钮展开。
-    if (_settingsOpen || _filePanelOpen) return null;
+    // 设置/文件/更多面板打开时收起工具二级菜单及其三级面板（调色板/
+    // 字体），一次只跟随一个按钮展开。
+    if (_settingsOpen || _filePanelOpen || _morePanelOpen) return null;
     final editingSelected = _editingSelectedObject;
     if (currentTool == ScreenshotToolType.select && !editingSelected) {
       return null;
@@ -3291,7 +3300,11 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
           ),
           _buildShortcutRow(
             context,
-            L.pick(context, '取消编辑（不复制）', 'Cancel edit (no copy)'),
+            L.pick(
+              context,
+              '关闭编辑器（未保存先确认）',
+              'Close editor (confirms if unsaved)',
+            ),
             _prettyBinding('close'),
           ),
           _buildShortcutRow(
@@ -3326,7 +3339,7 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
           ),
           _buildShortcutRow(
             context,
-            L.pick(context, '圆形', 'Ellipse'),
+            L.pick(context, '椭圆', 'Ellipse'),
             _prettyBinding('tool.circle'),
           ),
           _buildShortcutRow(
@@ -3424,6 +3437,37 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
             context,
             L.pick(context, '复制所选文字', 'Copy selected text'),
             'Ctrl+C',
+          ),
+          const Divider(height: 12, color: Colors.white24),
+          _buildShortcutRow(
+            context,
+            L.pick(context, '重新截图（全局）', 'Re-capture (global)'),
+            L.pick(context, 'Alt+A（关编辑器后选新图）', 'Alt+A (closes editor)'),
+          ),
+          _buildShortcutRow(
+            context,
+            L.pick(context, '工作台·双击框架', 'Board · double-click frame'),
+            L.pick(context, '放大预览，再双击/Esc 退出', 'loupe; Esc exits'),
+          ),
+          _buildShortcutRow(
+            context,
+            L.pick(context, '工作台·预览中滚轮/拖框', 'Board · in loupe scroll/drag'),
+            L.pick(context, '缩放/平移框内图片', 'zoom/pan image inside'),
+          ),
+          _buildShortcutRow(
+            context,
+            L.pick(context, '工作台·全景拖框/手柄', 'Board · overview drag/handles'),
+            L.pick(context, '移动框架 / 调框，松手吸附', 'move / resize, snaps'),
+          ),
+          _buildShortcutRow(
+            context,
+            L.pick(context, '工作台·删除选中框架', 'Board · delete frame'),
+            'Delete',
+          ),
+          _buildShortcutRow(
+            context,
+            L.pick(context, '工作台·退出', 'Board · exit'),
+            _prettyBinding('undo'),
           ),
           const Divider(height: 12, color: Colors.white24),
           _buildShortcutRow(
@@ -3759,6 +3803,7 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
     setState(() {
       _modelManagerOpen = true;
       _apiConfigOpen = false;
+      _morePanelOpen = false;
     });
     final service = _translateService;
     final installed = <(String, String), bool>{};
@@ -4740,6 +4785,7 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
       _filePanelCollage = false;
       _filePanelPendingBytes = null;
       _filePanelOpen = true;
+      _morePanelOpen = false;
       _settingsOpen = false;
       _modelManagerOpen = false;
       _apiConfigOpen = false;
@@ -4773,6 +4819,7 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
       _filePanelCollage = false;
       _filePanelPendingBytes = null;
       _filePanelOpen = true;
+      _morePanelOpen = false;
       _savePreviewOffset = null;
       if (!world.isEmpty) {
         _savePreviewSize = _previewCardSize(
@@ -5313,7 +5360,7 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
               ),
               divider(),
               // ── 拆分导出 ──
-              section(L.pick(context, '拆分导出', 'SPLIT EXPORT')),
+              section(L.pick(context, '拆图工作台', 'SPLIT BOARD')),
               Row(
                 children: [
                   stepper(
@@ -5682,7 +5729,11 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
       // 卡片外壳（深色/圆角/阴影）由面板自带，这里只管摆放尺寸。
       key: _filePanelKey,
       title: _filePanelCollage
-          ? L.pick(context, '拼图：勾选多张网格合成', 'Collage: tick images to grid')
+          ? L.pick(
+              context,
+              '拼图：勾选多张进工作台',
+              'Collage: tick images into the board',
+            )
           : _filePanelSave
           ? L.pick(context, '保存截图', 'Save screenshot')
           : L.pick(context, '打开图片', 'Open image'),
@@ -5828,6 +5879,7 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
       _paletteVisible = false;
       _fontFamilyVisible = false;
       _textBgVisible = false;
+      _morePanelOpen = false;
       _filePanelOpen = false;
       _modelManagerOpen = false;
       _apiConfigOpen = false;
@@ -6039,21 +6091,62 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
   }
 
   Widget _buildSettingsGeneralTab() {
-    return _settingsGroup(
-      L.pick(context, '工具栏位置', 'Toolbar position'),
-      _settings.dockPosition,
-      const [
-        (
-          'auto',
-          '自动（空间不足时给工具栏预留位置）',
-          'Auto (reserve space when room is tight)',
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        _settingsGroup(
+          L.pick(context, '工具栏位置', 'Toolbar position'),
+          _settings.dockPosition,
+          const [
+            (
+              'auto',
+              '自动（空间不足时给工具栏预留位置）',
+              'Auto (reserve space when room is tight)',
+            ),
+            ('left', '左侧', 'Left'),
+            ('right', '右侧', 'Right'),
+            ('top', '顶部', 'Top'),
+            ('bottom', '底部', 'Bottom'),
+          ],
+          (value) => _applySettings(_settings.copyWith(dockPosition: value)),
         ),
-        ('left', '左侧', 'Left'),
-        ('right', '右侧', 'Right'),
-        ('top', '顶部', 'Top'),
-        ('bottom', '底部', 'Bottom'),
+        Padding(
+          padding: const EdgeInsets.only(top: 10, bottom: 2),
+          child: Text(
+            L.pick(context, '打开图片', 'Open images'),
+            style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600),
+          ),
+        ),
+        _settingsGroup(
+          L.pick(context, '注册到文件管理器「打开方式」', 'Register in "Open With" menu'),
+          _settings.openWith ? 'on' : 'off',
+          const [('on', '开（默认）', 'On (default)'), ('off', '关', 'Off')],
+          (value) {
+            final enabled = value == 'on';
+            _applySettings(_settings.copyWith(openWith: enabled));
+            // 立即生效：开=注册（只给没有默认应用的 MIME 补位，不抢
+            // 已有默认）；关=撤销（删条目，并清掉指向我们的默认项）。
+            unawaited(OpenWithIntegration.sync(enabled: enabled));
+          },
+        ),
+        Padding(
+          padding: const EdgeInsets.only(top: 4),
+          child: Text(
+            L.pick(
+              context,
+              '开启后：右键图片「打开方式」出现本编辑器；png/jpeg/webp/bmp '
+                  '原本没有默认打开方式时自动设为本编辑器，已有别的默认'
+                  '（看图软件、浏览器）绝不抢占。',
+              'When on: the editor appears in the image "Open With" menu; for '
+                  'png/jpeg/webp/bmp that had no default handler it becomes the '
+                  'default, but an existing default (viewer, browser) is never '
+                  'overridden.',
+            ),
+            style: const TextStyle(fontSize: 11, color: Colors.white60),
+          ),
+        ),
       ],
-      (value) => _applySettings(_settings.copyWith(dockPosition: value)),
     );
   }
 
