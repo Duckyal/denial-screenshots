@@ -620,6 +620,7 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
     _dockRevealTimer?.cancel();
     _ocrElapsedTimer?.cancel();
     _apiElapsedTimer?.cancel();
+    _groupTimer?.cancel();
     _canvasTick.dispose();
     _staticTick.dispose();
     _decodedImage?.dispose();
@@ -5138,13 +5139,42 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
 
   /// 工作台内的一次动作（拖图/缩放/调框）开始前压当前状态：撤销栈在
   /// 工作台模式下就是"槽状态栈"，_undo/_redo 走同一套快照恢复。
+  ///
+  /// 连续事件自动合并（500ms 静默算"松手"）：鼠标滚轮滚一下可能触发
+  /// 20 个事件，方向键按住也会连续触发——全部压成一条撤销。真正结束时
+  /// （_flushCollageGroup）立即落盘，不等 timer。
+  Timer? _groupTimer;
+  _EditSnapshot? _pendingCollageSnapshot;
   void _pushCollageStep() {
-    _undoSnapshots.add(_snapshotNow());
+    // 已经在分组窗口里：不再压新 snapshot，只重置 timer。
+    if (_groupTimer != null) {
+      _groupTimer!.cancel();
+      _groupTimer = Timer(const Duration(milliseconds: 500), _flushCollageGroup);
+      return;
+    }
+    // 新分组：拍一张起点快照
+    _pendingCollageSnapshot = _snapshotNow();
     _redoSnapshots.clear();
+    _groupTimer = Timer(const Duration(milliseconds: 500), _flushCollageGroup);
+  }
+
+  /// 结束连续操作：把 pending snapshot 真正压进撤销栈。
+  void _flushCollageGroup() {
+    _groupTimer?.cancel();
+    _groupTimer = null;
+    final snap = _pendingCollageSnapshot;
+    _pendingCollageSnapshot = null;
+    if (snap != null) {
+      _undoSnapshots.add(snap);
+      // redo 在 _pushCollageStep 开头已经 clear 过，这里确保清一次
+      _redoSnapshots.clear();
+    }
   }
 
   /// 槽的 pan/zoom 变了：递增版本并重建内容层 widget。
+  /// 每次"连续操作"结束时（手势 end / 指针 up）都会调，确保撤销落盘。
   void _touchCollage() {
+    _flushCollageGroup();
     _collageVersion++;
     setState(() => _imageWidget = _buildCollageContentWidget());
   }
