@@ -3515,31 +3515,56 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
             L.pick(context, '重新截图（全局）', 'Re-capture (global)'),
             L.pick(context, 'Alt+A（关编辑器后选新图）', 'Alt+A (closes editor)'),
           ),
-          _buildShortcutRow(
-            context,
-            L.pick(context, '工作台·双击框架', 'Board · double-click frame'),
-            L.pick(context, '放大预览，再双击/Esc 退出', 'loupe; Esc exits'),
-          ),
-          _buildShortcutRow(
-            context,
-            L.pick(context, '工作台·预览中滚轮/拖框', 'Board · in loupe scroll/drag'),
-            L.pick(context, '缩放/平移框内图片', 'zoom/pan image inside'),
-          ),
-          _buildShortcutRow(
-            context,
-            L.pick(context, '工作台·全景拖框/手柄', 'Board · overview drag/handles'),
-            L.pick(context, '移动框架 / 调框，松手吸附', 'move / resize, snaps'),
-          ),
-          _buildShortcutRow(
-            context,
-            L.pick(context, '工作台·删除选中框架', 'Board · delete frame'),
-            'Delete',
-          ),
-          _buildShortcutRow(
-            context,
-            L.pick(context, '工作台·退出', 'Board · exit'),
-            _prettyBinding('undo'),
-          ),
+          if (_splitBoard)
+            ...[
+              _buildShortcutRow(
+                context,
+                L.pick(context, '拆图·固定井字线', 'Split · fixed well-grid'),
+                L.pick(context, '不可选中 / 不可移动', 'non-selectable / fixed'),
+              ),
+              _buildShortcutRow(
+                context,
+                L.pick(context, '拆图·取景底图', 'Split · frame the base image'),
+                L.pick(context, '拖动 / 滚轮缩放 / 方向键(Shift 加速)', 'drag / scroll-zoom / arrows(Shift)'),
+              ),
+              _buildShortcutRow(
+                context,
+                L.pick(context, '拆图·退出工作台', 'Split · exit board'),
+                _prettyBinding('undo'),
+              ),
+              _buildShortcutRow(
+                context,
+                L.pick(context, '拆图·取消退回原图', 'Split · cancel back to image'),
+                L.pick(context, '更多面板 · 取消 / Ctrl+Z 一步退出', 'More panel · Cancel / Ctrl+Z'),
+              ),
+            ]
+          else ...[
+            _buildShortcutRow(
+              context,
+              L.pick(context, '工作台·双击框架', 'Board · double-click frame'),
+              L.pick(context, '放大预览，再双击/Esc 退出', 'loupe; Esc exits'),
+            ),
+            _buildShortcutRow(
+              context,
+              L.pick(context, '工作台·预览中滚轮/拖框', 'Board · in loupe scroll/drag'),
+              L.pick(context, '缩放/平移框内图片', 'zoom/pan image inside'),
+            ),
+            _buildShortcutRow(
+              context,
+              L.pick(context, '工作台·全景拖框/手柄', 'Board · overview drag/handles'),
+              L.pick(context, '移动框架 / 调框，松手吸附', 'move / resize, snaps'),
+            ),
+            _buildShortcutRow(
+              context,
+              L.pick(context, '工作台·删除选中框架', 'Board · delete frame'),
+              'Delete',
+            ),
+            _buildShortcutRow(
+              context,
+              L.pick(context, '工作台·退出', 'Board · exit'),
+              _prettyBinding('undo'),
+            ),
+          ],
           const Divider(height: 12, color: Colors.white24),
           _buildShortcutRow(
             context,
