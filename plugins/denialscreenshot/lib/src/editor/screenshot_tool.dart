@@ -123,7 +123,9 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
 
   _EditSnapshot _snapshotNow() => (
     commands: List<DrawCommand>.from(history),
-    bytes: _currentImageBytes,
+    bytes: (_collageSlots != null && _preSplitBytes != null)
+        ? _preSplitBytes!
+        : _currentImageBytes,
     slots: _collageSlots == null ? null : _slotStatesOf(_collageSlots!),
     world: _collageWorld,
     split: _splitBoard,
@@ -1024,6 +1026,7 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
       _splitBoard = false;
       _activeSplitRows = 3;
       _activeSplitCols = 3;
+      _preSplitBytes = null;
       _collageDragSlot = null;
       _collageMoveSlot = null;
       _collageResizeSlot = null;
@@ -4588,6 +4591,8 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
   /// 拆图工作台当前生效的行列数（进入时记录，"切换"时比对 stepper 值）。
   int _activeSplitRows = 3;
   int _activeSplitCols = 3;
+    /// 工作台前保存的原始 PNG 字节：进工作台时 _currentImageBytes 被清成空（因为槽自己带底图了），但撤销栈里每条都要存它，否则回滚时 restoreSnapshotImage 解码不到底图。
+  Uint8List? _preSplitBytes;
 
   /// 拆图工作台：由「更多功能→拆分导出→确定」进入——当前画面（含标注）
   /// 烘成底图，按 rows×cols 均分成互不重叠、正好铺满的框架（N 块能拼
@@ -5088,6 +5093,9 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
       _hasTextSelection = false;
       _ocrGeneration++;
       _filePanelCollage = false;
+      _preSplitBytes = _currentImageBytes;
+      _preSplitBytes = _currentImageBytes;
+      _preSplitBytes = _currentImageBytes;
       _currentImageBytes = Uint8List(0);
       _imageWidget = _buildCollageContentWidget();
       _canvasZoom = 1.0;
@@ -5744,6 +5752,9 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
       _ocrSelRanges.clear();
       _hasTextSelection = false;
       _ocrGeneration++;
+      _preSplitBytes = _currentImageBytes;
+      _preSplitBytes = _currentImageBytes;
+      _preSplitBytes = _currentImageBytes;
       _currentImageBytes = Uint8List(0);
       _imageWidget = _buildCollageContentWidget();
       _canvasZoom = 1.0;
