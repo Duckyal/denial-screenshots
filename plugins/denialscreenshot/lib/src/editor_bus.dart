@@ -53,6 +53,22 @@ final class DenialScreenshotEditorBus {
   /// 域图）不应触发编辑器自动打开，由框选 surface 收发。
   final ValueNotifier<bool> suppressAutoOpen = ValueNotifier(false);
 
+  /// 编辑器 surface 当前是否可见。框选 Alt+A 用它判断要不要先让编辑器
+  /// 让位——两者同在 aboveWindows 层，编辑器开着时新选区会被压在编辑器
+  /// 冻结帧背后，要等编辑器关闭才露出来（看着像卡死）。
+  final ValueNotifier<bool> editorVisible = ValueNotifier(false);
+
+  /// Alt+A 在全局层被拒（编辑器正开着）的信号。合成器的全局快捷键优先
+  /// 于 surface 键盘捕获，这条按键根本不会到达编辑器自己的按键处理，
+  /// 只能由框选 surface 转发过来：编辑器收到后关闭自己并接着拉起新
+  /// 选区（未交付内容仍先走「放弃编辑？」确认）。
+  final StreamController<void> _retriggerCapture =
+      StreamController<void>.broadcast();
+
+  Stream<void> get retriggerCaptures => _retriggerCapture.stream;
+
+  void requestRetriggerCapture() => _retriggerCapture.add(null);
+
   final StreamController<EditorRequest> _controller =
       StreamController<EditorRequest>.broadcast();
 

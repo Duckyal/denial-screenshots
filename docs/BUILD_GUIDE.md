@@ -1,201 +1,77 @@
-# Denial Screenshot Tool - 编译指南
+# 构建指南
 
-## 当前状态
+> 更新时间：2026-11-03。插件架构下的构建全部走 `denial-plugins` CLI；
+> 旧的「装 Flutter SDK → cargo 编 FFI → build_output 拼装」流程已随
+> Rust crate 的删除一并作废（见提交 `d7b168f`）。
 
-项目代码已完成（95%），但需要 Flutter SDK 才能编译。Flutter SDK 正在下载中（661MB），速度较慢。
+## 前提条件
 
-## 快速编译步骤
+- Denial 桌面运行中（deniald + Plugin Manager / `denial-plugins` 可用）
+- 构建用的 Flutter/Dart 由 build-kit 提供，**不需要系统装 Flutter**
+- 国内网络建议镜像：`export PUB_HOSTED_URL=https://pub.flutter-io.cn`
+  （`FLUTTER_STORAGE_BASE_URL` 同理按需）
 
-### 1. 安装 Flutter SDK
+## 标准流程（plan → build → activate）
 
-```bash
-# 下载 Flutter SDK
-cd /home/wu/项目
-wget https://storage.googleapis.com/flutter_infra_release/releases/stable/linux/flutter_linux_3.24.5-stable.tar.xz
+```sh
+cd plugins/denialscreenshot
+denial-plugins --local add "$PWD"   # 首次：把本地目录登记为插件源
 
-# 解压
-tar -xf flutter_linux_3.24.5-stable.tar.xz
+PUB_HOSTED_URL=https://pub.flutter-io.cn denial-plugins plan
+# 候选 id 落在 ~/.local/state/denial/plugins/last-plan.json
+ID=$(python3 -c "import json;print(json.load(open('$HOME/.local/state/denial/plugins/last-plan.json'))['id'])")
 
-# 配置环境变量
-echo 'export PATH="$HOME/flutter/bin:$PATH"' >> ~/.bashrc
-source ~/.bashrc
-
-# 运行 flutter doctor
-flutter doctor
+denial-plugins build "$ID"
+denial-plugins activate "$ID"
 ```
 
-### 2. 安装依赖
+验证生效：
 
-```bash
-# 更新包列表
-sudo pacman -Syu
-
-# 安装 Flutter 依赖
-sudo pacman -S --needed \
-  base-devel \
-  cmake \
-  ninja \
-  git \
-  unzip \
-  curl \
-  libnotify \
-  libxdamage \
-  libxfixes \
-  libxrandr \
-  libxkbcommon \
-  xdg-utils \
-  libappindicator-gtk3 \
-  gtk3 \
-  libglvnd \
-  clang \
-  cmake \
-  ninja \
-  pkg-config \
-  libgtk-3-dev \
-  liblzma-dev \
-  clang \
-  cmake \
-  ninja \
-  pkg-config \
-  libgtk-3-dev \
-  liblzma-dev \
-  xz \
-  libarchive
+```sh
+denialctl --json status | python3 -c "import sys,json;print(json.load(sys.stdin)['ui'].get('plugin_bundle'))"
+# 应为 …/candidates/<ID>/bundle
+denialctl ui status   # 轮询到 Operation: Idle 才算切换完成
 ```
 
-### 3. 编译 Flutter 工具
+## SDK 覆盖文件（pubspec_overrides.yaml）
 
-```bash
-cd /home/wu/项目/denial-screenshots/compositor/src/dart_shell/screenshot_tool
+本地 pub 解析依赖 build-kit 里的 runtime。`denial-plugins prepare` 之后
+（build kit 变更）跑一次同步脚本刷新路径：
 
-# 安装 Flutter 依赖
-flutter pub get
-
-# 编译 Linux 版本
-flutter build linux --release
+```sh
+./tools/sync-overrides.sh
 ```
 
-编译产物位置：
-```
-build/linux/x64/release/bundle/
-```
+它从 `~/.local/state/denial/plugins/configuration.json` 读 runtime 路径写进
+`plugins/denialscreenshot/pubspec_overrides.yaml`（该文件不进 git，模板见
+`pubspec_overrides.yaml.example`）。
 
-### 4. 编译 Rust FFI 库
+## 静态检查（每次提交前）
 
-```bash
-cd /home/wu/项目/denial-screenshots/compositor
-
-# 编译 Rust 库
-cargo build --release --features flutter
+```sh
+cd plugins/denialscreenshot
+dart analyze --fatal-infos lib   # 或 "$DENIAL_PLUGIN_DART" analyze --fatal-infos lib
+dart format lib
 ```
 
-FFI 库位置：
-```
-target/release/libdenialscreenshot.so
-```
+保持 `--fatal-infos` 零告警是仓库红线。
 
-### 5. 创建输出目录
+## 独立编辑器 app（可选，仅 UI 原型）
 
-```bash
-cd /home/wu/项目/denial-screenshots
-
-# 创建输出目录
-mkdir -p build_output
-
-# 复制 Flutter 构建产物
-cp -r compositor/src/dart_shell/screenshot_tool/build/linux/x64/release/bundle/* build_output/
-
-# 复制 Rust FFI 库
-cp compositor/target/release/libdenialscreenshot.so build_output/
+```sh
+./run_standalone.sh              # 编译并启动 compositor/src/dart_shell/screenshot_tool
+BUILD_ONLY=1 ./run_standalone.sh # 只构建 release bundle
 ```
 
-## 使用方法
+它不参与插件构建、不触发系统截图，改动不会自动同步进插件——插件代码在
+`plugins/denialscreenshot/lib/`，以那边为准。
 
-### 方式 1: 直接运行
+## 常见坑
 
-```bash
-cd build_output
-./denialscreenshot
-```
-
-### 方式 2: 与 DenialWM 集成
-
-1. 将 `build_output` 目录复制到 DenialWM 的插件目录
-2. 在 DenialWM 配置中引用这些文件
-3. 通过快捷键 `Ctrl + Alt + A` 启动截图工具
-
-## 验证编译
-
-### 检查 Flutter 工具
-
-```bash
-cd build_output
-./denialscreenshot --version
-```
-
-### 检查 FFI 库
-
-```bash
-ldd build_output/libdenialscreenshot.so
-```
-
-应该看到所有依赖都已解决。
-
-## 常见问题
-
-### Q: Flutter 构建失败
-
-A: 运行 `flutter doctor` 检查环境，确保所有依赖都已安装。
-
-### Q: Rust 编译失败
-
-A: 确保使用最新的 Rust 工具链：
-```bash
-rustup update stable
-rustup default stable
-```
-
-### Q: FFI 库加载失败
-
-A: 确保库路径正确，检查 `LD_LIBRARY_PATH`：
-```bash
-export LD_LIBRARY_PATH=/home/wu/项目/denial-screenshots/build_output:$LD_LIBRARY_PATH
-```
-
-## 下一步
-
-编译完成后，你可以：
-
-1. 测试截图工具
-2. 查看文档了解功能
-3. 提交反馈或改进建议
-
-## 项目文件位置
-
-```
-/home/wu/项目/denial-screenshots/
-├── README.md                          # 项目说明
-├── build.sh                          # 构建脚本
-├── compositor/
-│   ├── Cargo.toml                    # Rust 依赖
-│   └── src/
-│       ├── bin/deniald/               # Rust 后端
-│       └── dart_shell/                # Flutter 前端
-│           └── screenshot_tool/       # 截图工具
-└── docs/
-    ├── QUICKSTART.md                  # 快速开始
-    ├── DEVELOPMENT.md                 # 开发文档
-    └── IMPLEMENTATION_COMPLETE.md     # 实现完成总结
-```
-
-## 技术支持
-
-如有问题，请查看：
-- [QUICKSTART.md](docs/QUICKSTART.md)
-- [DEVELOPMENT.md](docs/DEVELOPMENT.md)
-- [IMPLEMENTATION_COMPLETE.md](docs/IMPLEMENTATION_COMPLETE.md)
-
----
-
-**更新时间**: 2026-09-30
-**项目状态**: 代码完成，等待编译
+| 现象 | 原因与处理 |
+|---|---|
+| `activate` 报 "No initial frame arrived within 20 seconds" | **屏幕熄了**：DPMS 关闭时合成器没有新帧可等，激活必然超时并回落 packaged shell。先动鼠标/按键唤醒屏幕（`denialctl --json status` 看 `outputs…powered`），再重试 activate |
+| activate 命令超时但实际在切换 | 超时 ≠ 失败：轮询 `denialctl ui status` 到 `Operation: Idle` 再判定；不要连续堆 activate 请求 |
+| plan/build 报 kit 校验失败 | build-kit 副本被手工改过。别改 `~/.local/state/denial/plugins/build-kits/` 下的文件，重新 `denial-plugins prepare` |
+| 构建后 `pubspec.lock` 出现镜像 URL 漂移 | `git checkout -- plugins/denialscreenshot/pubspec.lock` 还原，别把镜像域名提交进仓库 |
+| 重启后插件"消失"（回落 packaged） | 重新 `denial-plugins activate <ID>` 即可，无需重新 build |

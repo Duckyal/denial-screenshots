@@ -50,16 +50,20 @@ what you look for in **Settings → Shortcuts → Denial actions**):
 | Area | Details |
 |---|---|
 | Capture | Dimmed full-output selection with edge/corner resizing; live pixels grabbed with `grim` (wlr-screencopy); still compatible with the compositor's capture directory |
-| Tools | Select, brush, line, arrow, rectangle, circle, text, **highlighter**, mosaic (blur / solid fill), eraser |
-| Editing | Undo / redo, select an existing shape to recolor or resize it, delete selection; in cursor mode **double-click a text to edit it in place** (clearing it deletes the text); `Alt+scroll` zooms the canvas, arrows pan when zoomed in |
+| Tools | Select, brush, line, arrow, rectangle, ellipse, text, **highlighter**, mosaic (blur / solid fill), eraser |
+| Text engine | PPT-style **live editing, true to pixel**: drag a box = wrapping text frame (font auto-shrinks to fit), click = free line, double-click edits in place; color / size / font / bold / **background** apply instantly while editing; `Enter` = newline, `Ctrl+Enter` or clicking the canvas commits, `Esc` cancels |
+| Editing | Undo / redo, select an existing shape to recolor or resize it, delete selection; `Alt+scroll` zooms the canvas, arrows pan when zoomed in |
 | Selection toolbar | OCR / translate / scrolling capture / edit / copy / save / pin / settings, right where you selected |
 | Scrolling capture | Burst-captures the framed region and stitches it; scroll injection defaults to Denial's virtual keyboard and can switch to `wtype` / `ydotool` or manual scrolling — paging key (Down / Space) and speed are configurable; a live thumbnail window floats in the top-right corner |
-| Output | Save / save-as / open image via the in-editor file panel, `Enter` saves; the copy button is copy-and-close in one, reporting copying / copied / failed with icon and color; `Esc` closes without touching the clipboard; when no image clipboard is available it copies the file path as text instead |
+| Output | Save / save-as / open image via the in-editor file panel, `Enter` saves; the copy button is copy-and-close in one, reporting copying / copied / failed with icon and color; `Esc` closes without touching the clipboard — **with unsaved / uncopied edits it first asks "Discard edits?"**; when no image clipboard is available it copies the file path as text instead |
+| More features | One panel beside the pin button: **collage board** (tick several images across folders, in tick order; the current canvas becomes the first frame; each image lives in a frame that acts as a window onto it — drag the frame to move it, handles to resize, frames snap to neighboring frames' edges, double-click to zoom a frame to screen then scroll zooms / drag pans the image inside it, Del to remove, saving crops the union of frames onto a transparent background, every step undoable/redoable) and **split board** (WeChat-moments style: set rows / columns and confirm, a fixed non-selectable m×n well-grid appears on screen over a single full-canvas base image; drag, scroll-zoom, and arrow-key nudging (Shift to accelerate) all frame **the whole base image** with all cells moving in sync — what you see is what you export; the split is not done live, export crops N indexed files from the grid and exits the board automatically, put them back together and it's the original image; Ctrl+Z / Cancel jumps back to the base image in one step) |
+| Text multi-select | Drag over recognized text in cursor mode; `Ctrl`+drag appends ranges (same line replaces), `Ctrl`+click the ✕ drops a range, `Ctrl+C` copies all ranges in selection order |
 | Pin | Turns the annotated snapshot — or clipboard content — into a draggable card, resized from the edges/corners **with a locked aspect ratio**; double-click returns to the editor, text cards allow selecting and copying individual words |
 | OCR | Local RapidOCR (PP-OCRv3 built in, zero download; v4/v5/v6 downloadable; the unified package's multilingual model; or your own local model directory), **or an online vision model** (reuses the translation API's endpoint/key, only needs its own model name) |
 | Translation | **Local offline** (Argos per-language packs / M2M-100) or online API (OpenAI-compatible / Baidu / DeepL / LibreTranslate); translations are painted back over the original text positions, with a blur or solid mask and auto-extracted or fixed text color |
 | Visible progress | Both OCR and translation show a status overlay: OCR reports "elapsed Ns / N blocks found", translation reports "elapsed Ns · model", and failures name the actual cause (timeout, unreachable, 401/429, out of credit…) |
-| Settings | Toolbar dock, translation backend and API, OCR model, scrolling-capture mode, mask colors and more are all persisted; bilingual (zh/en) UI that follows the shell locale |
+| Settings | Toolbar dock, translation backend and API, OCR model, scrolling-capture mode, mask colors, the image "Open With" registration toggle and more are all persisted; bilingual (zh/en) UI that follows the shell locale |
+| System integration | Installing the plugin auto-registers it in the file manager's "Open With" menu (standard freedesktop `.desktop` + MIME association); when png/jpeg/webp/bmp had **no default handler** it fills one in, but it never overrides a default you already chose; Settings → General → "Open images" turns it off any time (unregisters immediately) |
 
 Settings file: `~/.config/denial-screenshots/settings.json`.
 Set `DENIAL_SCREENSHOT_DIR` to override the capture directory
@@ -75,7 +79,7 @@ Versus common screenshot annotation tools (✔ supported / ✘ not supported / �
 | Form | **In-process Denial shell plugin**, no separate window | Standalone app | Bundled with the QQ client |
 | Platform | Denial (Wayland / wlr-screencopy) | Linux (Wayland + X11) / Windows | Windows (feature-limited on Linux) |
 | Open source | ✔ | ✔ | ✘ Closed source |
-| Tools | Select / brush / line / arrow / rect / circle / text / highlighter / mosaic / eraser | Similar, plus laser pointer, magnifier, inverted rectangle, step badges, etc. | Basic annotation (rectangle / arrow / text / mosaic, etc.) |
+| Tools | Select / brush / line / arrow / rect / ellipse / text / highlighter / mosaic / eraser | Similar, plus laser pointer, magnifier, inverted rectangle, step badges, etc. | Basic annotation (rectangle / arrow / text / mosaic, etc.) |
 | Edit drawn shapes | ✔ Recolor / resize on select, double-click to edit text | — | — |
 | Pin to desktop | ✔ Images + text, stackable, aspect-locked resize | ✔ | ✔ |
 | Scrolling capture | ✔ Auto-scroll injected via Denial's virtual keyboard | ✔ Portal-recording based | ✔ |
@@ -124,6 +128,27 @@ Declaring an action does not bind a key. After installing, open
 shortcut (for example `Ctrl+Alt+A` for "Region capture (recommended)" and
 `Super+S` for "Pin clipboard content").
 
+### Opening images in the editor (system integration)
+
+**Works right after installing** — the editor surface registers everything idempotently on startup, no manual steps:
+
+- "Open With" in your file manager gains *Denial Screenshot Editor*; pick it to annotate the image;
+- **the default handler is only filled in when there was none**: before registering, each MIME's
+  `[Default Applications]` entry in `mimeapps.list` is checked, and we only become the default for
+  png/jpeg/webp/bmp that never had one. An existing default (an image viewer, a browser…) is never
+  touched, and if you ever switch it back we won't grab it again.
+
+This is standard freedesktop integration, not a bespoke mechanism: a `.desktop` entry (`MimeType=image/...`)
+plus a bridge script that drops the image path into a spool directory
+`~/.config/denial-screenshot-editor-open/`, which the editor surface watches, consumes and deletes; requests
+spooled while the plugin isn't running are drained on its next start.
+
+Don't want it? Settings → General → "Open images" → Off **unregisters immediately** (removes the entry and any default pointing at us); `export DENIAL_SCREENSHOT_NO_OPEN_WITH=1` also works. `bash tools/install-image-open.sh
+[--default]` remains available as a manual, same-source installer. To uninstall, remove
+`~/.local/share/applications/com.denial.ScreenshotEditor.desktop` and
+`~/.local/share/bin/denial-screenshot-editor-open`; restore any filled-in default with
+`xdg-mime default <app> image/png`.
+
 ### If activate fails with "No initial frame arrived within 20 seconds"
 
 A cold custom runtime occasionally exceeds the hard 20 s timeout. Warm the AOT
@@ -141,7 +166,7 @@ to the packaged build); no rebuild is needed.
 
 | Key | Action |
 |---|---|
-| `V` `B` `L` `A` `R` `C` `T` `H` `M` `E` | Select / brush / line / arrow / rect / circle / text / highlighter / mosaic / eraser |
+| `V` `B` `L` `A` `R` `C` `T` `H` `M` `E` | Select / brush / line / arrow / rect / ellipse / text / highlighter / mosaic / eraser |
 | `Tab` | Collapse / reveal the toolbar |
 | `Space` | Shortcut cheat sheet |
 | `Ctrl+Z` / `Ctrl+R` | Undo / redo |
@@ -151,10 +176,11 @@ to the packaged build); no rebuild is needed.
 | `Ctrl+Enter` | Commit the live text edit (or click an empty canvas spot) |
 | Double-click text | Edit in place: PPT-style live editing, color / size / font / bold / background apply instantly |
 | Cursor-mode drag | Drag over recognized text to select; `Ctrl`+drag adds ranges (same line replaces), `Ctrl`+click the ✕ on a range drops it |
-| `Delete` / `Backspace` | Delete the selected shape |
+| `Delete` / `Backspace` | Delete the selected shape / board frame |
 | `[` / `]` | Nudge stroke width |
-| `Alt+scroll` | Zoom the canvas; arrows pan the view once zoomed in |
-| `Esc` | Close the editor (cancels a live text edit first; deselects first when a shape is selected; never writes the clipboard) |
+| `Alt+scroll` | Zoom the canvas; arrows pan the view once zoomed in (on the boards: scroll pans the overview; while a frame is zoomed in, scroll / drag zoom & pan the image inside it) |
+| Split board | The well-grid dividers are fixed and non-selectable; **drag / scroll-zoom / arrow keys (Shift to speed up)** all frame the single full-canvas base image, all cells in sync and previewed live without pushing undo steps; `Ctrl+Z` / Cancel exits in one step back to the full base image; the split only happens on save, which exports N indexed files and exits the board |
+| `Esc` | Close the editor (cancels a live text edit first; exits loupe zoom first; deselects first when a shape is selected; asks before discarding undelivered edits; never writes the clipboard) |
 
 ## Configuring the translation API
 
@@ -236,7 +262,7 @@ denial-screenshots/
 │   │   ├── selection_surface.dart    # selection plane + region toolbar (grim)
 │   │   ├── scroll_capture.dart       # scrolling burst session
 │   │   ├── scroll_stitch.dart        # long-image stitcher
-│   │   ├── editor_surface.dart       # editor surface + capture directory watcher
+│   │   ├── editor_surface.dart       # editor surface + capture / open-request watchers
 │   │   ├── pin_surface.dart          # floating pinned snapshot
 │   │   ├── clipboard.dart            # wl-copy / xclip + environment fallback
 │   │   ├── exporter.dart             # image clipboard wrapper with path fallback
@@ -247,6 +273,11 @@ denial-screenshots/
 │   │   └── editor/                   # editor UI, command stack, painting,
 │   │                                 # settings, file panel, translation, sidecar
 │   └── docs/DEVELOPMENT.md       # development and verification steps
+├── tools/                        # dev / install helper scripts
+│   ├── sync-overrides.sh             # align pubspec_overrides with the build-kit
+│   ├── install-image-open.sh         # install the "open images in editor" association
+│   ├── denial-screenshot-editor-open.sh  # spool bridge script (drops path into spool dir)
+│   └── com.denial.ScreenshotEditor.desktop # .desktop template (MimeType=image/*)
 ├── compositor/src/dart_shell/    # standalone editor app (UI prototype, not built as a plugin)
 └── run_standalone.sh             # entry point for the standalone app
 ```
@@ -281,6 +312,7 @@ cp pubspec_overrides.yaml.example pubspec_overrides.yaml   # replace /ABSOLUTE/R
 
 | Symptom | Fix |
 |---|---|
+| `activate` fails with "No initial frame arrived within 20 seconds" | **Check the screen is awake first**: with DPMS off the compositor has no new frame to wait for, activation always times out and falls back to the packaged shell. Wake the display (see `outputs…powered` in `denialctl --json status`) and retry; only if the screen is on and it still times out is it a genuinely slow cold start — see "If activate fails…" above |
 | No pixels after selecting | Make sure `grim` is installed and the compositor exposes wlr-screencopy (deniald does by default) |
 | Copy does not reach the clipboard | Check `/tmp/denial-screenshot-clipboard.log` (exit codes and stderr of every attempt). A common cause is the plugin process having no `WAYLAND_DISPLAY`; the code now falls back to `$XDG_RUNTIME_DIR/wayland-N` |
 | Long capture won't stitch / page | The target app may ignore the injected key: switch the paging key to `Space` in settings, change the injector (`wtype` / `ydotool`), or use manual scrolling |

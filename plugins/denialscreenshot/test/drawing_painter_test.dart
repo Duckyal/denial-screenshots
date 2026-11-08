@@ -35,6 +35,13 @@ Future<Color> _pixel(ui.Image image, int x, int y) async {
   );
 }
 
+/// 0..1 double 通道 → 8bit 整数（替代废弃的 Color.red/green/blue/alpha）。
+extension _Channel8 on Color {
+  int get red8 => (r * 255).round();
+  int get blue8 => (b * 255).round();
+  int get alpha8 => (a * 255).round();
+}
+
 void main() {
   test('boxed text shrinks to fit and renders inside its box only', () async {
     const box = Rect.fromLTWH(10, 10, 100, 40);
@@ -144,12 +151,12 @@ void main() {
 
       // 擦除带穿过的红笔迹处是真洞，透出底图（左半幅为黑）。
       final erased = await _pixel(image, 30, 40);
-      expect(erased.red, lessThan(60), reason: '擦除处应透出底图：$erased');
+      expect(erased.red8, lessThan(60), reason: '擦除处应透出底图：$erased');
       // 同一笔迹在擦除带之外必须依然可见（回归：其它笔迹不得消失）。
       final outside = await _pixel(image, 30, 10);
-      expect(outside.red, greaterThan(200), reason: '带外笔迹应保持不动：$outside');
+      expect(outside.red8, greaterThan(200), reason: '带外笔迹应保持不动：$outside');
       // 未触及的蓝笔迹不受影响。
-      expect((await _pixel(image, 90, 40)).blue, greaterThan(200));
+      expect((await _pixel(image, 90, 40)).blue8, greaterThan(200));
 
       background.dispose();
       annotation.dispose();
@@ -169,8 +176,8 @@ void main() {
       ),
     ]);
 
-    expect((await _pixel(image, 60, 40)).blue, greaterThan(100));
-    expect((await _pixel(image, 10, 10)).alpha, 0);
+    expect((await _pixel(image, 60, 40)).blue8, greaterThan(100));
+    expect((await _pixel(image, 10, 10)).alpha8, 0);
     image.dispose();
   });
 
@@ -201,11 +208,11 @@ void main() {
     ], background: background);
 
     final center = await _pixel(image, 60, 40);
-    expect(center.red, greaterThan(60));
-    expect(center.red, lessThan(200));
+    expect(center.red8, greaterThan(60));
+    expect(center.red8, lessThan(200));
     // 蒙版矩形外 painter 不画任何内容（底图由下层负责）。
-    expect((await _pixel(image, 40, 40)).alpha, 0);
-    expect((await _pixel(image, 80, 40)).alpha, 0);
+    expect((await _pixel(image, 40, 40)).alpha8, 0);
+    expect((await _pixel(image, 80, 40)).alpha8, 0);
     background.dispose();
     image.dispose();
   });

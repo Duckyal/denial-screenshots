@@ -1,0 +1,14 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=Denial Screenshot Editor
+Name[zh_CN]=Denial 截图编辑器
+Comment=Open images in the Denial screenshot annotation editor
+Comment[zh_CN]=用 Denial 截图标注编辑器打开图片
+Exec=denial-screenshot-editor-open %f
+TryExec=denial-screenshot-editor-open
+Icon=accessories-screenshot
+Terminal=false
+NoDisplay=true
+MimeType=image/png;image/jpeg;image/jpg;image/webp;image/bmp;
+Categories=Graphics;

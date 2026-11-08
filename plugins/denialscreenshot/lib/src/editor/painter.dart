@@ -1,3 +1,5 @@
+import 'collage.dart';
+
 import 'dart:math' as math;
 import 'dart:ui' as ui;
 
@@ -362,6 +364,217 @@ class TextBackgroundPainter extends CustomPainter {
   @override
   bool shouldRepaint(TextBackgroundPainter oldDelegate) =>
       oldDelegate.color != color || oldDelegate.radius != radius;
+}
+
+/// 拼图工作台的内容层：逐槽 clip 到框架矩形并按 pan/zoom 绘制图片。
+/// 槽的 pan/zoom 原地修改，编辑器用 _canvasTick 驱动重绘，这里每帧全画
+/// （槽数 ≤ 十几，成本可忽略）。
+class CollageContentPainter extends CustomPainter {
+  CollageContentPainter({required this.slots, this.version = 0});
+
+  final List<CollageSlot> slots;
+
+  /// 槽的 pan/zoom 原地修改（引用不变），编辑器每次改动递增版本号并重建
+  /// painter，shouldRepaint 靠它判定重绘。
+  final int version;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final paint = Paint()..filterQuality = FilterQuality.medium;
+    for (final slot in slots) {
+      canvas.save();
+      canvas.clipRect(slot.rect);
+      canvas.drawImageRect(
+        slot.image,
+        slot.effectiveSourceRect,
+        slot.imageRect,
+        paint,
+      );
+      canvas.restore();
+    }
+  }
+
+  @override
+  bool shouldRepaint(CollageContentPainter oldDelegate) =>
+      oldDelegate.slots != slots || oldDelegate.version != version;
+}
+
+/// 工作台框架导引层：每个槽画一圈细边框（选中高亮），编辑期悬浮在画布
+/// 上提示"框在哪"；导出走烘焙图，天然不含这层。
+class CollageGuidePainter extends CustomPainter {
+  CollageGuidePainter({
+    required this.slots,
+    this.selectedIndex,
+    this.version = 0,
+    this.handleSize = 0,
+    this.guides = const [],
+    this.strokeWidthScale = 1.0,
+    this.selectable = true,
+    this.fixedGrid = false,
+  });
+
+  /// 是否允许选中高亮与调框手柄。拆图工作台的九宫格框架是固定的、
+  /// 不能改，选中反而误导（用户会以为能拖动）——关掉。
+  final bool selectable;
+
+  /// 拆图模式：固定网格，不画选中/手柄，但保留规整的井字形分割线。
+  final bool fixedGrid;
+
+  /// 世界像素/屏幕像素换算：>1 放大（线变细回屏幕宽度），<1 全景
+  /// （线加粗到屏幕宽度）。线宽与出线长度都按它除。
+  final double strokeWidthScale;
+
+  final List<CollageSlot> slots;
+  final int? selectedIndex;
+
+  /// 拖框过程中命中的对齐参考线（世界坐标矩形），实时画成蓝线；
+  /// 空列表不画。松手吸附后由编辑器清空。
+  final List<Rect> guides;
+
+  /// 槽的 pan/zoom 是原地修改（引用不变），编辑器每次改动递增此版本号，
+  /// 否则 shouldRepaint 的引用比较会漏画。
+  final int version;
+
+  /// >0 时给选中框架画 8 向调大小手柄（白方块蓝边，世界尺寸由调用方按
+  /// 屏幕恒定换算）。
+  final double handleSize;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final k = strokeWidthScale <= 0 ? 1.0 : strokeWidthScale;
+
+    // 拆图模式：固定井字形分割线——相邻格子共享一条边，不描两遍。
+    if (fixedGrid) {
+      final paintDark = Paint()
+        ..color = const Color(0xB3000000)
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = 3.0 / k;
+      final paintLight = Paint()
+        ..color = const Color(0xE6FFFFFF)
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = 1.2 / k;
+      // 收集所有独立的竖线和横线（去重共享边）
+      final xs = <double>{};
+      final ys = <double>{};
+      for (final slot in slots) {
+        xs.add(slot.rect.left);
+        xs.add(slot.rect.right);
+        ys.add(slot.rect.top);
+        ys.add(slot.rect.bottom);
+      }
+      // 排序后画线——井字形（去重共享边，每条只描一次）
+      final xList = xs.toList()..sort();
+      final yList = ys.toList()..sort();
+      for (final x in xList) {
+        canvas.drawLine(
+          Offset(x, yList.first),
+          Offset(x, yList.last),
+          paintDark,
+        );
+        canvas.drawLine(
+          Offset(x, yList.first),
+          Offset(x, yList.last),
+          paintLight,
+        );
+      }
+      for (final y in yList) {
+        canvas.drawLine(
+          Offset(xList.first, y),
+          Offset(xList.last, y),
+          paintDark,
+        );
+        canvas.drawLine(
+          Offset(xList.first, y),
+          Offset(xList.last, y),
+          paintLight,
+        );
+      }
+      return;
+    }
+
+    void frame(CollageSlot slot, {required bool selected}) {
+      final rect = slot.rect;
+      // 深浅双线描边：单色细线在白底（或黑底）上都会隐形，深色外圈 +
+      // 亮色内圈保证任何画面背景都有对比；线宽除以显示比例，屏幕上
+      // 恒定（全景 fit<1 时不会细到看不见）。
+      canvas.drawRect(
+        rect,
+        Paint()
+          ..color = const Color(0xB3000000)
+          ..style = PaintingStyle.stroke
+          ..strokeWidth = (selected ? 4.0 : 2.8) / k,
+      );
+      canvas.drawRect(
+        rect,
+        Paint()
+          ..color = selected ? const Color(0xFF4C9AFF) : const Color(0xF2FFFFFF)
+          ..style = PaintingStyle.stroke
+          ..strokeWidth = (selected ? 2.2 : 1.2) / k,
+      );
+    }
+
+    // 相邻框架共用一条边：按 slots 顺序画的话，后画的白边会盖住先画
+    // 的选中蓝边——同一框的边一半蓝一半白。分两遍：普通框在前，选中
+    // 框最后画，蓝边完整。
+    for (var i = 0; i < slots.length; i++) {
+      if (i != selectedIndex) frame(slots[i], selected: false);
+    }
+    if (selectedIndex != null &&
+        selectedIndex! >= 0 &&
+        selectedIndex! < slots.length) {
+      frame(slots[selectedIndex!], selected: true);
+    }
+
+    // 对齐参考线：拖框时命中才画（1.5px 亮蓝，盖在所有框线之上）。
+    if (guides.isNotEmpty) {
+      final halo = Paint()..color = const Color(0x99000000);
+      final line = Paint()..color = const Color(0xFF4C9AFF);
+      for (final g in guides) {
+        canvas.drawRect(g.inflate(1.5), halo);
+        canvas.drawRect(g, line);
+      }
+    }
+
+    for (var i = 0; i < slots.length; i++) {
+      final selected = selectable && i == selectedIndex;
+      final rect = slots[i].rect;
+      if (selected && handleSize > 0) {
+        final fill = Paint()..color = Colors.white;
+        final border = Paint()
+          ..color = const Color(0xFF4C9AFF)
+          ..style = PaintingStyle.stroke
+          ..strokeWidth = 1.5;
+        for (final point in [
+          rect.topLeft,
+          rect.topCenter,
+          rect.topRight,
+          rect.centerRight,
+          rect.bottomRight,
+          rect.bottomCenter,
+          rect.bottomLeft,
+          rect.centerLeft,
+        ]) {
+          final hr = Rect.fromCenter(
+            center: point,
+            width: handleSize,
+            height: handleSize,
+          );
+          canvas.drawRect(hr, fill);
+          canvas.drawRect(hr, border);
+        }
+      }
+    }
+  }
+
+  @override
+  bool shouldRepaint(CollageGuidePainter oldDelegate) =>
+      oldDelegate.selectedIndex != selectedIndex ||
+      oldDelegate.slots != slots ||
+      oldDelegate.version != version ||
+      oldDelegate.handleSize != handleSize ||
+      oldDelegate.guides != guides ||
+      oldDelegate.strokeWidthScale != strokeWidthScale ||
+      oldDelegate.fixedGrid != fixedGrid;
 }
 
 /// 文本框编辑态的高亮层：高对比虚线描边 + 半透明底 + 四角实心角标，

@@ -60,6 +60,20 @@ class _CaptureFlowHostState extends ConsumerState<CaptureFlowHost> {
   final ValueNotifier<Offset?> _cursorPosition = ValueNotifier(null);
 
   bool _visible = false;
+
+  /// 本 surface 自己的即时提示条（Alt+A 在框选中重复触发时用：此时
+  /// 选区浮层可见，就地说明比跨 surface 提示更直接）。
+  String? _flowHint;
+  Timer? _flowHintTimer;
+
+  void _showFlowHint(String message) {
+    setState(() => _flowHint = message);
+    _flowHintTimer?.cancel();
+    _flowHintTimer = Timer(const Duration(milliseconds: 2200), () {
+      if (mounted) setState(() => _flowHint = null);
+    });
+  }
+
   bool _capturing = false;
 
   /// 抓帧期间把整个选区浮层藏起来：grim 抓的是合成帧，浮层（压暗层/边框/
@@ -291,6 +305,27 @@ class _CaptureFlowHostState extends ConsumerState<CaptureFlowHost> {
           CustomPaint(
             painter: _DimPainter(region: _region, hover: _hoverWindow),
           ),
+          if (_flowHint case final hint?)
+            Align(
+              alignment: Alignment.topCenter,
+              child: Padding(
+                padding: const EdgeInsets.only(top: 48),
+                child: Container(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 14,
+                    vertical: 8,
+                  ),
+                  decoration: BoxDecoration(
+                    color: const Color(0xE6202428),
+                    borderRadius: BorderRadius.circular(8),
+                  ),
+                  child: Text(
+                    hint,
+                    style: const TextStyle(fontSize: 13, color: Colors.white),
+                  ),
+                ),
+              ),
+            ),
           if (_region != null) _buildRegionOverlay(size, _region!),
           if (_resultOpen && _region != null)
             _buildResultWindow(size, _region!),
@@ -1011,9 +1046,34 @@ class _CaptureFlowHostState extends ConsumerState<CaptureFlowHost> {
   // ---- 动作 ----
 
   Future<void> _begin() async {
-    if (!mounted || _visible || _beginBusy) return;
+    // 选区浮层已经开着（还没框完）：Alt+A 再次触发直接忽略——重入会
+    // 把用户正在拖的框清零，像误触。静默忽略也会被当成"按了没反应"，
+    // 所以给一条即时提示说明当前状态。
+    if (!mounted) return;
+    if (_visible || _beginBusy) {
+      _showFlowHint(
+        L.pick(
+          context,
+          '正在框选：拖动选区，或按 Esc 取消',
+          'Selection in progress: drag a region, or press Esc to cancel',
+        ),
+      );
+      return;
+    }
     _beginBusy = true;
     DenialScreenshotEditorBus.instance.suppressAutoOpen.value = true;
+    // 编辑器开着：不能直接抢——两者同在 aboveWindows 层，硬开新选区会
+    // 被压在编辑器冻结帧背后，等编辑器关闭才冒出来，看着像卡死；而
+    // 关掉编辑器又会销毁用户正在标的画布（比"没反应"更糟）。所以这里
+    // 立即给出可见反馈，让用户自己决定先保存/复制还是 Esc 关闭。
+    if (DenialScreenshotEditorBus.instance.editorVisible.value) {
+      // 编辑器开着：把这次 Alt+A 转交给它——由它关闭自己并重新拉起选区
+      // （用户预期"再按一次就是重新截图"，不是弹个提示让人自己关）。
+      _beginBusy = false;
+      DenialScreenshotEditorBus.instance.suppressAutoOpen.value = false;
+      DenialScreenshotEditorBus.instance.requestRetriggerCapture();
+      return;
+    }
     // 长截图模式：选区确定后直接滚动拼接。
     _scrollMode = CaptureFlowBus.instance.scrollMode;
     CaptureFlowBus.instance.scrollMode = false;
