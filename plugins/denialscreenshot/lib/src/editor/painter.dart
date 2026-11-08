@@ -466,12 +466,28 @@ class CollageGuidePainter extends CustomPainter {
       final xList = xs.toList()..sort();
       final yList = ys.toList()..sort();
       for (final x in xList) {
-        canvas.drawLine(Offset(x, yList.first), Offset(x, yList.last), paintDark);
-        canvas.drawLine(Offset(x, yList.first), Offset(x, yList.last), paintLight);
+        canvas.drawLine(
+          Offset(x, yList.first),
+          Offset(x, yList.last),
+          paintDark,
+        );
+        canvas.drawLine(
+          Offset(x, yList.first),
+          Offset(x, yList.last),
+          paintLight,
+        );
       }
       for (final y in yList) {
-        canvas.drawLine(Offset(xList.first, y), Offset(xList.last, y), paintDark);
-        canvas.drawLine(Offset(xList.first, y), Offset(xList.last, y), paintLight);
+        canvas.drawLine(
+          Offset(xList.first, y),
+          Offset(xList.last, y),
+          paintDark,
+        );
+        canvas.drawLine(
+          Offset(xList.first, y),
+          Offset(xList.last, y),
+          paintLight,
+        );
       }
       return;
     }
