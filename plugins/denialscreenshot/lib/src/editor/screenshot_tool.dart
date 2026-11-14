@@ -610,6 +610,10 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
     HardwareKeyboard.instance.removeHandler(_handleKeyEvent);
     _retriggerSub?.cancel();
     _messageTimer?.cancel();
+    // 交付后关窗的两个定时器：dispose 时一律取消，避免回调打到已卸载的
+    // state 上（关闭流程本身也会触发 dispose）。
+    _closeAfterSaveTimer?.cancel();
+    _copyResetTimer?.cancel();
     for (final image in _collageOwnedImages) {
       image.dispose();
     }
@@ -5466,7 +5470,16 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
       await File(path).writeAsBytes(bytes);
       _ffi.save();
       _delivered = true;
-      _showMessage('${L.s('已保存：', 'Saved: ')}$path');
+      _showMessage(
+        '${L.s('已保存，正在关闭…：', 'Saved, closing…: ')}$path',
+        seconds: 2,
+      );
+      // 与「复制并关闭」同一节奏：保存是交付，交付即收工。留一拍让
+      // "已保存"提示和文件面板退出动画走完，再关编辑器，否则点了像没反应。
+      _closeAfterSaveTimer?.cancel();
+      _closeAfterSaveTimer = Timer(const Duration(milliseconds: 700), () {
+        if (mounted) _closeEditor();
+      });
     } else {
       final bytes = await File(path).readAsBytes();
       if (!mounted) return;
@@ -5974,8 +5987,9 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
     // 全失败不算交付：否则 Esc 不再弹放弃确认，用户以为存过了。
     final delivered = saved > 0;
     if (delivered) _delivered = true;
-    // 分割只在保存时真正执行；导出成功后**自动关闭拆图工作台**，回到
-    // 进拆图前的普通编辑（底图恢复原样），不留下可撤销的多余步骤。
+    // 分割只在保存时真正执行。导出成功后先退出工作台回到进拆图前的普通
+    // 编辑（恢复底图与标注，不留下可撤销的多余步骤），再按"保存即交付"
+    // 的语义延迟关窗——和普通保存、复制并关闭是同一套收工节奏。
     if (delivered && _splitBoard) {
       _exitSplitBoard();
     }
@@ -5988,6 +6002,12 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
               'Exported $saved images: $prefix-1.png … into $dirPath',
             ),
     );
+    if (delivered) {
+      _closeAfterSaveTimer?.cancel();
+      _closeAfterSaveTimer = Timer(const Duration(milliseconds: 700), () {
+        if (mounted) _closeEditor();
+      });
+    }
   }
 
   /// 「更多功能」面板浮层：锚在更多按钮外侧，随停靠方向展开。
@@ -7513,6 +7533,10 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
 
   /// 关闭编辑器：结束本次会话（窗口退出）。
   void _closeEditor() {
+    // 任何路径关窗都要清掉待执行的延迟关窗任务，避免重复关/回调打到已
+    // 卸载的 state。
+    _closeAfterSaveTimer?.cancel();
+    _closeAfterSaveTimer = null;
     _ffi.cancel();
     _window.quit();
     if (_captureAfterClose) {
@@ -9087,6 +9111,10 @@ class _ScreenshotToolState extends State<ScreenshotTool> {
   /// 即将关窗”外都自动回 idle——复制是异步的，按钮必须给出过程反馈。
   _CopyState _copyState = _CopyState.idle;
   Timer? _copyResetTimer;
+
+  /// 保存成功后的延迟关窗定时器（与 [_copyResetTimer] 同一节奏：先亮
+  /// "已保存"再退出）。
+  Timer? _closeAfterSaveTimer;
 
   IconData get _copyIcon => switch (_copyState) {
     _CopyState.working => Icons.hourglass_top,

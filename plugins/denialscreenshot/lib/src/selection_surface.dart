@@ -1783,6 +1783,7 @@ class _CaptureFlowHostState extends ConsumerState<CaptureFlowHost> {
     }
     if (!mounted) return;
     final slash = path.lastIndexOf('/');
+    // 记住目录/文件名，下次开保存面板还落在原处。
     setState(() {
       _captureHidden = false;
       _savePanelOpen = false;
@@ -1793,6 +1794,8 @@ class _CaptureFlowHostState extends ConsumerState<CaptureFlowHost> {
       }
     });
     PinCardBus.instance.showToast(L.s('已保存：$path', 'Saved: $path'));
+    // 与「复制」一致：保存也是交付，交付即收工——收起框选浮层退出截图。
+    _close();
   }
 
   Future<void> _pinImage() async {
