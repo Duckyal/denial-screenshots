@@ -1,11 +1,34 @@
 # denial-screenshots
 
-A QQ / Snipaste-style screenshot annotation tool for [Denial](https://github.com/denialwm/denial),
+A WeChat-screenshot-style annotation tool for [Denial](https://github.com/denialwm/denial),
 implemented as a Denial plugin per the
 [denial-plugins](https://github.com/denialwm/denial-plugins) spec. It runs inside
 the shell process.
 
 English | [简体中文](README.md)
+
+## Why this exists
+
+Denial's built-in screenshot is basic: it saves the whole screen or a dragged
+region to a PNG and that's the end of it. No annotation, no toolbar on hand —
+to draw an arrow, add a label or blur something out you had to open another
+program.
+
+So this plugin rebuilds the flow after **WeChat's screenshot**, where selecting
+a region is not the end but the beginning:
+
+- **A toolbar right at the selection**: OCR / translate / scrolling capture /
+  edit / copy / save / pin — handle it without leaving the region, no saving to
+  a file first and no hunting for another app.
+- **WYSIWYG annotation**: pen, arrow, rectangle, ellipse, highlighter, mosaic,
+  text — draw and paste straight away, nothing touches the disk or a file
+  manager.
+- **Moments-style split**: cut one tall image into an m×n grid for sharing.
+- **Scrolling capture**: drag a region, let it scroll and stitch into one long
+  image.
+
+In one line: remove the "now go process the screenshot" step, so taking a
+screenshot is itself the delivery.
 
 ## What it is
 
@@ -74,9 +97,9 @@ Local OCR / translation models download to `~/.local/share/denial-screenshots/mo
 
 Versus common screenshot annotation tools (✔ supported / ✘ not supported / — version-dependent):
 
-| Dimension | denial-screenshots | mark-shot | QQ Snapshot |
+| Dimension | denial-screenshots | mark-shot | WeChat Snapshot |
 |---|---|---|---|
-| Form | **In-process Denial shell plugin**, no separate window | Standalone app | Bundled with the QQ client |
+| Form | **In-process Denial shell plugin**, no separate window | Standalone app | Bundled with the WeChat client |
 | Platform | Denial (Wayland / wlr-screencopy) | Linux (Wayland + X11) / Windows | Windows (feature-limited on Linux) |
 | Open source | ✔ | ✔ | ✘ Closed source |
 | Tools | Select / brush / line / arrow / rect / ellipse / text / highlighter / mosaic / eraser | Similar, plus laser pointer, magnifier, inverted rectangle, step badges, etc. | Basic annotation (rectangle / arrow / text / mosaic, etc.) |
@@ -87,7 +110,7 @@ Versus common screenshot annotation tools (✔ supported / ✘ not supported / �
 | Translation | ✔ **Local offline** (Argos / M2M) + 4 online protocols | ✔ Online only (OpenAI / Gemini / Claude / Tencent / Baidu / Youdao) | ✔ (online, Tencent) |
 | Screen recording (GIF/video) | ✘ | ✔ | ✘ |
 | Image-host upload / QR scan | ✘ | ✔ | — |
-| Fully offline | ✔ | Partially (outside the Linux capture paths) | ✘ Requires QQ login |
+| Fully offline | ✔ | Partially (outside the Linux capture paths) | ✘ Requires WeChat login |
 | Visible OCR/translation progress | ✔ Real-time elapsed time and cause in an overlay | — | — |
 | UI languages | ✔ Chinese / English | — | — |
 
