@@ -769,6 +769,7 @@ class _CaptureFlowHostState extends ConsumerState<CaptureFlowHost> {
                             mode: _resultMode,
                             source: _resultRegions[index].source,
                             translated: _resultRegions[index].translated,
+                            onOpenUrl: _openQrUrl,
                           ),
                         ),
                       ),
@@ -1798,17 +1799,21 @@ class _CaptureFlowHostState extends ConsumerState<CaptureFlowHost> {
     return null;
   }
 
-  /// 用系统默认浏览器打开扫码得到的网址。
+  /// 用系统默认浏览器打开扫码得到的网址，打开后收起截图浮层。
+  ///
+  /// 扫码的目的一旦达成（跳去网页），本次截图就没有继续留着的理由——
+  /// 与复制/保存/置顶同属"交付即收工"。失败则留着浮层，让用户还能复制
+  /// 链接自己处理，不至于什么都拿不到。
   Future<void> _openQrUrl(Uri url) async {
     final ok = await openUrlExternally(url);
     if (!mounted) return;
+    if (ok) {
+      _close();
+      PinCardBus.instance.showToast(L.s('已在浏览器打开', 'Opened in your browser'));
+      return;
+    }
     PinCardBus.instance.showToast(
-      ok
-          ? L.s('已在浏览器打开', 'Opened in your browser')
-          : L.s(
-              '打开失败（缺 xdg-open / gio）',
-              'Could not open (missing xdg-open / gio)',
-            ),
+      L.s('打开失败（缺 xdg-open / gio）', 'Could not open (missing xdg-open / gio)'),
     );
   }
 
@@ -1994,11 +1999,15 @@ class _ResultRow extends StatelessWidget {
     required this.mode,
     required this.source,
     required this.translated,
+    this.onOpenUrl,
   });
 
   final String mode;
   final String source;
   final String translated;
+
+  /// 点结果行里的链接：交给上层统一处理（打开 + 收起浮层）。
+  final Future<void> Function(Uri url)? onOpenUrl;
 
   @override
   Widget build(BuildContext context) {
@@ -2007,8 +2016,11 @@ class _ResultRow extends StatelessWidget {
       // 非网址（纯文本码、条码编号）保持普通文本。
       final url = qrUrlFromText(source);
       if (url != null) {
+        final open = onOpenUrl;
         return InkWell(
-          onTap: () => unawaited(openUrlExternally(url)),
+          // 没有回调时退回直接打开（不留悬空行为）。
+          onTap: () =>
+              unawaited(open != null ? open(url) : openUrlExternally(url)),
           child: Text(
             source,
             style: const TextStyle(
