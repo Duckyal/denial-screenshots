@@ -775,12 +775,24 @@ class _CaptureFlowHostState extends ConsumerState<CaptureFlowHost> {
                     ),
                   if (hasText) ...[
                     const SizedBox(height: 8),
-                    Align(
-                      alignment: Alignment.centerRight,
-                      child: TextButton(
-                        onPressed: _copyResultText,
-                        child: Text(L.pick(context, '复制文字', 'Copy text')),
-                      ),
+                    Row(
+                      mainAxisAlignment: MainAxisAlignment.end,
+                      children: [
+                        // 扫码结果里若是网址，给一个真正的"跳转"入口：
+                        // 扫码最常见的目的就是打开链接，只给文字复制不够。
+                        if (_firstQrUrl != null) ...[
+                          TextButton.icon(
+                            onPressed: () => _openQrUrl(_firstQrUrl!),
+                            icon: const Icon(Icons.open_in_new, size: 16),
+                            label: Text(L.pick(context, '打开链接', 'Open link')),
+                          ),
+                          const SizedBox(width: 4),
+                        ],
+                        TextButton(
+                          onPressed: _copyResultText,
+                          child: Text(L.pick(context, '复制文字', 'Copy text')),
+                        ),
+                      ],
                     ),
                   ],
                 ],
@@ -1773,6 +1785,33 @@ class _CaptureFlowHostState extends ConsumerState<CaptureFlowHost> {
     }
   }
 
+  /// 扫码结果里第一个可打开的网址（没有则 null，"打开链接"按钮据此显隐）。
+  ///
+  /// 只取第一条：结果窗一次可能列出多个码，但"点一下就跳到某个网页"必须
+  /// 有明确目标，多码时自动打开第一个是唯一不歧义的默认。
+  Uri? get _firstQrUrl {
+    if (_resultMode != 'qr') return null;
+    for (final region in _resultRegions) {
+      final url = qrUrlFromText(region.source);
+      if (url != null) return url;
+    }
+    return null;
+  }
+
+  /// 用系统默认浏览器打开扫码得到的网址。
+  Future<void> _openQrUrl(Uri url) async {
+    final ok = await openUrlExternally(url);
+    if (!mounted) return;
+    PinCardBus.instance.showToast(
+      ok
+          ? L.s('已在浏览器打开', 'Opened in your browser')
+          : L.s(
+              '打开失败（缺 xdg-open / gio）',
+              'Could not open (missing xdg-open / gio)',
+            ),
+    );
+  }
+
   Future<void> _copyResultText() async {
     // 扫码与识字一样只有原文（translated 恒为空），直接取 source 拼接。
     final text = _resultMode == 'ocr' || _resultMode == 'qr'
@@ -1963,7 +2002,30 @@ class _ResultRow extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    if (mode == 'ocr' || mode == 'qr') {
+    if (mode == 'qr') {
+      // 扫码结果里的网址直接做成可点链接（蓝色 + 下划线 + 点击打开），
+      // 非网址（纯文本码、条码编号）保持普通文本。
+      final url = qrUrlFromText(source);
+      if (url != null) {
+        return InkWell(
+          onTap: () => unawaited(openUrlExternally(url)),
+          child: Text(
+            source,
+            style: const TextStyle(
+              fontSize: 13,
+              color: Color(0xFF6FC3FF),
+              decoration: TextDecoration.underline,
+              decorationColor: Color(0xFF6FC3FF),
+            ),
+          ),
+        );
+      }
+      return Text(
+        source,
+        style: const TextStyle(fontSize: 13, color: Colors.white),
+      );
+    }
+    if (mode == 'ocr') {
       return Text(
         source,
         style: const TextStyle(fontSize: 13, color: Colors.white),
