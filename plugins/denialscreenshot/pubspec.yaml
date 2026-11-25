@@ -1,10 +1,10 @@
 name: denial_screenshot
 description: >-
   WeChat-screenshot-style annotation plugin for Denial. Region capture with a
-  toolbar right at the selection (OCR, translate, scrolling capture, edit, copy,
-  save, pin), smart window picking, clipboard pin, collage and split boards, and
-  an in-shell editor with brush, arrow, shape, highlighter, mask and eraser
-  tools.
+  toolbar right at the selection (OCR, translate, QR/barcode scan, scrolling
+  capture, edit, copy, save, pin), smart window picking, clipboard pin, collage
+  and split boards, and an in-shell editor with brush, arrow, shape,
+  highlighter, mask and eraser tools.
 publish_to: none
 version: 0.3.0
 

@@ -1,11 +1,11 @@
 # Denial Screenshot Tool
 
 嵌在 denial shell 进程里的截图全流程插件：框选截图（含智能选窗）、标注编辑、
-滚动长截图、置顶贴图、本地 OCR + 翻译。
+滚动长截图、置顶贴图、本地 OCR + 翻译、本机扫码（二维码 / 条码）。
 
 > 起因是 denial 自带的截图过于简陋（整屏或框一块存成 PNG 就结束，没有标注、
 > 也没有就地工具栏），于是**借鉴微信截图的思路**重做：框完选区立刻出工具栏，
-> 标注、识字、翻译、拆图、长截图都在原地完成，不必先存文件再另开程序。
+> 标注、识字、翻译、扫码、拆图、长截图都在原地完成，不必先存文件再另开程序。
 
 > 按 [denial-plugins](https://github.com/denialwm/denial-plugins) 规范实现的
 > 纯 Dart 插件。**功能叙事、快捷键全表、翻译 API 配置与故障排查以仓库根的
@@ -94,6 +94,7 @@ plugins/denialscreenshot/
     ├── editor_surface.dart       # 编辑器宿主（bridge、目录监听、生命周期）
     ├── pin_surface.dart          # 置顶快照浮窗（图 / 文字卡片）
     ├── clipboard.dart            # wl-copy / xclip + 环境兜底
+    ├── qr_scan.dart              # 扫码：zbarimg 解二维码/条码 + 网址识别与打开
     ├── exporter.dart             # 图片剪贴板封装与路径兜底
     ├── screenshot_store.dart     # 截图目录 / 最新文件读取
     ├── capture_flow_bus.dart     # action → 框选平面的总线
