@@ -23,6 +23,7 @@ import 'editor_bus.dart';
 import 'l10n.dart';
 import 'panel_nav.dart';
 import 'pin_surface.dart';
+import 'qr_scan.dart';
 import 'scroll_capture.dart';
 import 'scroll_stitch.dart' show eraseRegionInPlace;
 import 'selection_settings_panel.dart';
@@ -530,6 +531,11 @@ class _CaptureFlowHostState extends ConsumerState<CaptureFlowHost> {
               () => _runText('translate'),
             ),
             _toolItem(
+              Icons.qr_code_scanner,
+              L.pick(context, '扫码', 'Scan'),
+              _runQrScan,
+            ),
+            _toolItem(
               Icons.screenshot,
               L.pick(context, '长截屏', 'Scroll'),
               _startScrollCapture,
@@ -575,7 +581,7 @@ class _CaptureFlowHostState extends ConsumerState<CaptureFlowHost> {
     );
   }
 
-  static const int _toolbarItemCount = 9;
+  static const int _toolbarItemCount = 10;
   static const double _toolbarBarHeight = 72;
   static const double _toolbarBarWidth = 54 * _toolbarItemCount + 8 * 2 + 4;
 
@@ -673,9 +679,11 @@ class _CaptureFlowHostState extends ConsumerState<CaptureFlowHost> {
     final useVertical = side == 'below' || side == 'above';
 
     Widget card({required double maxWidth, required double maxHeight}) {
-      final title = _resultMode == 'ocr'
-          ? L.pick(context, '识别结果', 'Recognized text')
-          : L.pick(context, '翻译结果', 'Translation');
+      final title = switch (_resultMode) {
+        'ocr' => L.pick(context, '识别结果', 'Recognized text'),
+        'qr' => L.pick(context, '扫码结果', 'Scanned code'),
+        _ => L.pick(context, '翻译结果', 'Translation'),
+      };
       final hasText = _resultRegions.isNotEmpty;
       return KeyedSubtree(
         key: _resultCardKey,
@@ -738,9 +746,11 @@ class _CaptureFlowHostState extends ConsumerState<CaptureFlowHost> {
                     )
                   else if (!hasText)
                     Text(
-                      _resultStatus.isEmpty
-                          ? L.pick(context, '未识别到文字', 'No text recognized')
-                          : _resultStatus,
+                      _resultStatus.isNotEmpty
+                          ? _resultStatus
+                          : _resultMode == 'qr'
+                          ? L.pick(context, '没识别到二维码', 'No code found')
+                          : L.pick(context, '未识别到文字', 'No text recognized'),
                       style: const TextStyle(
                         fontSize: 13,
                         color: Colors.white54,
@@ -1578,6 +1588,64 @@ class _CaptureFlowHostState extends ConsumerState<CaptureFlowHost> {
     }
   }
 
+  /// 扫码：把选区解成二维码/条码文本，结果用同一个结果窗展示，可选中复制。
+  ///
+  /// 与识字/翻译的区别是它完全本地、瞬时完成（zbar 解一张图是毫秒级），
+  /// 所以不开 _resultBusy 转圈，直接把结论写进结果窗；但缺 zbarimg 与
+  /// "图里没有码"必须分开提示——前者要用户装包，后者是正常结果。
+  Future<void> _runQrScan() async {
+    final captured = await _captureNow(restore: false);
+    if (captured == null) return;
+    setState(() {
+      _captureHidden = false;
+      _resultMode = 'qr';
+      _resultRegions = const [];
+      _resultStatus = L.s('正在识别二维码…', 'Scanning for codes…');
+      _resultBusy = true;
+      _resultOpen = true;
+      _resultWindowHeight = null;
+    });
+    final outcome = await scanQrCodes(captured.bytes);
+    if (!mounted) return;
+    switch (outcome) {
+      case QrScanFound(:final results):
+        setState(() {
+          _resultBusy = false;
+          _resultStatus = '';
+          // 结果窗的行模型是 (source, translated)：扫码只有一段原文，
+          // 塞进 source 就能被 _ResultRow 与复制按钮正确处理。
+          _resultRegions = [
+            for (final result in results)
+              TranslateRegion(
+                source: result.text,
+                translated: '',
+                rect: const Rect.fromLTWH(0, 0, 1, 1),
+                background: const [],
+                foreground: const [],
+              ),
+          ];
+        });
+      case QrScanError(:final failure, :final detail):
+        setState(() {
+          _resultBusy = false;
+          _resultStatus = switch (failure) {
+            QrScanFailure.toolMissing => L.s(
+              '系统里没有 zbarimg，先装 zbar（如 sudo pacman -S zbar）',
+              'zbarimg not found — install zbar first (e.g. sudo pacman -S zbar)',
+            ),
+            QrScanFailure.nothingFound => L.s(
+              '图里没有识别到二维码或条码',
+              'No QR code or barcode found in the selection',
+            ),
+            QrScanFailure.toolFailed => L.s(
+              '扫码失败：${detail ?? '未知错误'}',
+              'Scan failed: ${detail ?? 'unknown error'}',
+            ),
+          };
+        });
+    }
+  }
+
   /// 在线识字/翻译：对刚截的图直接调视觉模型 OCR（ocrViaApi），需要翻译时
   /// 再逐条走翻译 API。缺配置、无结果、接口报错都在结果窗里写清楚，不静默。
   Future<void> _runTextViaApi(String mode, Uint8List bytes) async {
@@ -1706,7 +1774,8 @@ class _CaptureFlowHostState extends ConsumerState<CaptureFlowHost> {
   }
 
   Future<void> _copyResultText() async {
-    final text = _resultMode == 'ocr'
+    // 扫码与识字一样只有原文（translated 恒为空），直接取 source 拼接。
+    final text = _resultMode == 'ocr' || _resultMode == 'qr'
         ? _resultRegions.map((region) => region.source).join('\n')
         : _resultRegions
               .map(
@@ -1894,7 +1963,7 @@ class _ResultRow extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    if (mode == 'ocr') {
+    if (mode == 'ocr' || mode == 'qr') {
       return Text(
         source,
         style: const TextStyle(fontSize: 13, color: Colors.white),

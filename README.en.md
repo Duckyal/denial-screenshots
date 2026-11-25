@@ -17,9 +17,9 @@ program.
 So this plugin rebuilds the flow after **WeChat's screenshot**, where selecting
 a region is not the end but the beginning:
 
-- **A toolbar right at the selection**: OCR / translate / scrolling capture /
-  edit / copy / save / pin — handle it without leaving the region, no saving to
-  a file first and no hunting for another app.
+- **A toolbar right at the selection**: OCR / translate / scan code / scrolling
+  capture / edit / copy / save / pin — handle it without leaving the region, no
+  saving to a file first and no hunting for another app.
 - **WYSIWYG annotation**: pen, arrow, rectangle, ellipse, highlighter, mosaic,
   text — draw and paste straight away, nothing touches the disk or a file
   manager.
@@ -76,7 +76,7 @@ what you look for in **Settings → Shortcuts → Denial actions**):
 | Tools | Select, brush, line, arrow, rectangle, ellipse, text, **highlighter**, mosaic (blur / solid fill), eraser |
 | Text engine | PPT-style **live editing, true to pixel**: drag a box = wrapping text frame (font auto-shrinks to fit), click = free line, double-click edits in place; color / size / font / bold / **background** apply instantly while editing; `Enter` = newline, `Ctrl+Enter` or clicking the canvas commits, `Esc` cancels |
 | Editing | Undo / redo, select an existing shape to recolor or resize it, delete selection; `Alt+scroll` zooms the canvas, arrows pan when zoomed in |
-| Selection toolbar | OCR / translate / scrolling capture / edit / copy / save / pin / settings, right where you selected; **copy, save and pin deliver and finish — the overlay closes itself and leaves capture** (OCR / translate / edit keep you in place) |
+| Selection toolbar | OCR / translate / scan code / scrolling capture / edit / copy / save / pin / settings, right where you selected; **copy, save and pin deliver and finish — the overlay closes itself and leaves capture** (OCR / translate / scan / edit keep you in place) |
 | Scrolling capture | Burst-captures the framed region and stitches it; scroll injection defaults to Denial's virtual keyboard and can switch to `wtype` / `ydotool` or manual scrolling — paging key (Down / Space) and speed are configurable; a live thumbnail window floats in the top-right corner |
 | Output | Save / save-as / open image via the in-editor file panel, `Enter` saves; **saving and the copy button both deliver and finish: after a short confirmation the editor closes itself** (`Ctrl+C` is the exception — it copies without closing); the copy button reports copying / copied / failed with icon and color; `Esc` closes without touching the clipboard — **with unsaved / uncopied edits it first asks "Discard edits?"**; when no image clipboard is available it copies the file path as text instead |
 | More features | One panel beside the pin button: **collage board** (tick several images across folders, in tick order; the current canvas becomes the first frame; each image lives in a frame that acts as a window onto it — drag the frame to move it, handles to resize, frames snap to neighboring frames' edges, double-click to zoom a frame to screen then scroll zooms / drag pans the image inside it, Del to remove, saving crops the union of frames onto a transparent background, every step undoable/redoable) and **split board** (WeChat-moments style: set rows / columns and confirm, a fixed non-selectable m×n well-grid appears on screen over a single full-canvas base image; drag, scroll-zoom, and arrow-key nudging (Shift to accelerate) all frame **the whole base image** with all cells moving in sync — what you see is what you export; the split is not done live, export crops N indexed files from the grid and exits the board automatically, put them back together and it's the original image; Ctrl+Z / Cancel jumps back to the base image in one step) |
@@ -266,6 +266,7 @@ Notes:
 |---|---|---|
 | Region / scrolling capture | `grim` (wlr-screencopy) | deniald implements wlr-screencopy, so grim works out of the box |
 | Copy image | `wl-clipboard` (`sudo pacman -S wl-clipboard`) | Falls back to `xclip`; if neither works the file path is copied as text instead |
+| Scan QR / barcode | `zbar` (provides `zbarimg`, `sudo pacman -S zbar`) | Only needed when you press "Scan" in the toolbar; without it the result window tells you to install it, nothing else breaks |
 | Local OCR / translation | Python with `rapidocr`, `rapidocr-onnxruntime`, `onnxruntime`, `ctranslate2`, `sentencepiece`, `PIL` | First run downloads the OCR model and Argos language packs (HF mirror) |
 | Auto-scroll for long captures | Denial virtual keyboard by default (no dependency) | Can switch to `wtype` / `ydotool` (install them yourself) or manual scrolling |
 | API translation / online OCR | Any OpenAI-compatible endpoint, etc. | Fill in endpoint / key / model in the settings |
