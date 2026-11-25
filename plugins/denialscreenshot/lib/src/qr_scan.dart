@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
@@ -187,3 +188,74 @@ String _unescapeXml(String value) => value
     .replaceAll('&quot;', '"')
     .replaceAll('&apos;', "'")
     .replaceAll('&amp;', '&');
+
+/// 扫码结果是不是一个可直接打开的网址。
+///
+/// 二维码绝大多数场景就是"给我一个链接"，所以结果窗要能一键打开。这里只
+/// 认 http/https——`mailto:`、`tel:`、`file:`、`javascript:` 之类不自动变成
+/// 可点链接：前者有专门的打开方式，后者是明确的危险协议（扫码内容来自外部，
+/// 不能让一个 file:// 或 javascript: 在用户点一下时被执行）。
+///
+/// 允许没有 scheme 的常见写法（`example.com/path`）：很多码只印域名，
+/// 这时补 https:// 视为网址。
+Uri? qrUrlFromText(String text) {
+  final value = text.trim();
+  if (value.isEmpty || value.contains(RegExp(r'\s'))) return null;
+  final lower = value.toLowerCase();
+  if (lower.startsWith('http://') || lower.startsWith('https://')) {
+    final uri = Uri.tryParse(value);
+    if (uri != null && uri.host.isNotEmpty) return uri;
+    return null;
+  }
+  // 带其它 scheme 的一律不当网址（mailto/tel/file/javascript…）。
+  // 注意 `host:8080/path` 也是"字母开头 + 冒号"，会被这条规则误伤——所以
+  // 先排除"冒号后紧跟数字"的写法（那是端口，不是 scheme）。
+  final schemePattern = RegExp(r'^([a-zA-Z][a-zA-Z0-9+.-]*):(.*)$');
+  final schemeMatch = schemePattern.firstMatch(value);
+  if (schemeMatch != null &&
+      !RegExp(r'^\d+($|[/?#])').hasMatch(schemeMatch.group(2)!)) {
+    return null;
+  }
+  // 无 scheme：要求像域名（有点、且点后是 2 位以上字母，允许 localhost）。
+  final hostPattern = RegExp(
+    r'^(?:[a-zA-Z0-9](?:[a-zA-Z0-9-]*[a-zA-Z0-9])?\.)+[a-zA-Z]{2,}'
+    r'(?::\d+)?(?:[/?#].*)?$',
+    caseSensitive: false,
+  );
+  if (hostPattern.hasMatch(value)) {
+    return Uri.tryParse('https://$value');
+  }
+  return null;
+}
+
+/// 用系统默认程序打开网址。
+///
+/// 与插件其它外部工具一致（grim / wl-copy / zbarimg）：不引 url_launcher
+/// 这类带平台通道的依赖。位置参数用 `--` 隔开，避免以 `-` 开头的内容被当成
+/// 选项（扫码内容是外部输入，不能让它变成命令行参数）。
+Future<bool> openUrlExternally(Uri url) async {
+  final environment = childProcessEnvironment();
+  for (final command in <List<String>>[
+    <String>['xdg-open', '--', url.toString()],
+    <String>['gio', 'open', '--', url.toString()],
+  ]) {
+    try {
+      final process = await Process.start(
+        command.first,
+        command.skip(1).toList(growable: false),
+        environment: environment,
+      );
+      // 不关心输出，但要排空管道；否则子进程可能在写满缓冲后挂住。
+      unawaited(process.stdout.drain<void>().catchError((Object _) {}));
+      unawaited(process.stderr.drain<void>().catchError((Object _) {}));
+      final code = await process.exitCode.timeout(
+        const Duration(seconds: 5),
+        onTimeout: () => -1,
+      );
+      if (code == 0) return true;
+    } on Object {
+      // 试下一个命令。
+    }
+  }
+  return false;
+}
